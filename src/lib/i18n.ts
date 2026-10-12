@@ -419,6 +419,7 @@ export const EN: Record<string, string> = {
   "Markdown 模式": "Markdown Mode",
   "HTML 模式": "HTML Mode",
   当前文档模式: "Current Document Mode",
+  文档模式: "Document Mode",
   渲染模式: "Render Mode",
   显示行号: "Show Line Numbers",
   语法高亮语言: "Syntax Highlighting Language",

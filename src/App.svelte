@@ -189,6 +189,7 @@
   // 由 onEditorModeChange 持续同步（含工具栏下拉与菜单两条切换路径）。
   let editorMode = $state<"ir" | "wysiwyg" | "sv">("ir");
   let shortcutsOpen = $state(false); // 「快捷键一览」模态（帮助菜单）
+  let tabsEl = $state<HTMLElement | null>(null); // 标签栏滚动容器（切标签时把活跃项滚进可视区）
   let showLineNumbers = $state(true); // 是否显示正文行号（默认显示）
   let typewriterOn = $state(false); // 打字机模式：光标行始终停在视口垂直中线
   let paragraphFocus = $state(false); // 段落聚焦：只亮当前编辑块，其余内容压暗
@@ -3816,6 +3817,24 @@
     if (docKind === "code") applyCodeReaderStyle();
   });
 
+  // 标签栏：切标签 / 增删标签后把活跃项平滑滚进可视区。标签超出宽度才需要滚动，
+  // 否则容器本就装得下，滚一下反而会抖（故先比较 rect 再决定滚不滚）。
+  $effect(() => {
+    const index = activeIndex;
+    void tabs.length;
+    const container = tabsEl;
+    if (!container) return;
+    const el = container.querySelector<HTMLElement>(`.tab[data-index="${index}"]`);
+    if (!el) return;
+    const cRect = container.getBoundingClientRect();
+    const eRect = el.getBoundingClientRect();
+    if (eRect.left < cRect.left) {
+      container.scrollTo({ left: container.scrollLeft - (cRect.left - eRect.left) - 6, behavior: "smooth" });
+    } else if (eRect.right > cRect.right) {
+      container.scrollTo({ left: container.scrollLeft + (eRect.right - cRect.right) + 6, behavior: "smooth" });
+    }
+  });
+
   // ---- 帮助 ----
   /**
    * 快捷键一览（帮助菜单）：用表格呈现，按分类分组，两列「快捷键 / 功能」便于速查。
@@ -4194,19 +4213,31 @@
       label: t("视图"),
       key: "v",
       items: [
-        // 阅读 / 编辑模式：与下面的三种渲染模式是两个维度，故单独成组，放最前面
+        // 阅读 / 编辑：只读开关，最常用，单独置顶
         { label: t("阅读模式"), shortcut: "Ctrl+E", checked: () => browseMode, action: () => void setBrowseMode(!browseMode) },
         { sep: true },
-        // 模式：纯文本 / Markdown / HTML，三选一。默认由后缀决定（见 openPath/openHtmlPath/openCodePath），
-        // 这里可以手动改当前标签的模式；超大代码文件是只读分节视图，没有可切换的渲染器，整组置灰
-        { label: t("纯文本模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "code", action: () => void setDocMode("code") },
-        { label: t("Markdown 模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "markdown", action: () => void setDocMode("markdown") },
-        { label: t("HTML 模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "html", action: () => void setDocMode("html") },
+        // 文档模式：纯文本 / Markdown / HTML，三选一，决定用哪个渲染器。
+        // 默认由后缀决定（见 openPath/openHtmlPath/openCodePath），这里可手动改当前标签；
+        // 超大代码文件是只读分节视图，无可切换的渲染器，整组置灰。
+        {
+          label: t("文档模式"),
+          sub: [
+            { label: t("纯文本模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "code", action: () => void setDocMode("code") },
+            { label: t("Markdown 模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "markdown", action: () => void setDocMode("markdown") },
+            { label: t("HTML 模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "html", action: () => void setDocMode("html") },
+          ],
+        },
+        // 渲染模式：仅 Markdown 有效（IR / 所见即所得 / 分屏预览），三选一
+        {
+          label: t("渲染模式"),
+          sub: [
+            { label: t("即时渲染（IR）"), radio: true, disabled: () => docKind !== "markdown", checked: () => editorMode === "ir", action: () => switchEditorMode("ir") },
+            { label: t("所见即所得（WYSIWYG）"), radio: true, disabled: () => docKind !== "markdown", checked: () => editorMode === "wysiwyg", action: () => switchEditorMode("wysiwyg") },
+            { label: t("分屏预览（SV）"), radio: true, disabled: () => docKind !== "markdown", checked: () => editorMode === "sv", action: () => switchEditorMode("sv") },
+          ],
+        },
         { sep: true },
-        { label: t("即时渲染（IR）"), disabled: () => docKind !== "markdown", checked: () => editorMode === "ir", action: () => switchEditorMode("ir") },
-        { label: t("所见即所得（WYSIWYG）"), disabled: () => docKind !== "markdown", checked: () => editorMode === "wysiwyg", action: () => switchEditorMode("wysiwyg") },
-        { label: t("分屏预览（SV）"), disabled: () => docKind !== "markdown", checked: () => editorMode === "sv", action: () => switchEditorMode("sv") },
-        { sep: true },
+        // 侧边栏：面板开关 + 面板内的视图切换
         {
           label: t("侧边栏"),
           sub: [
@@ -4219,20 +4250,17 @@
           ],
         },
         { sep: true },
-        // 排版工具栏是 Vditor 独有的，只有 Markdown 模式有；纯文本 / HTML 模式下置灰
+        // 编辑器显示：排版工具栏（仅 Markdown）/ 行号 / 语法高亮（仅代码文件）
         { label: t("显示排版工具栏"), checked: () => showToolbar, disabled: () => docKind !== "markdown", action: toggleEditorToolbar },
-        // 行号在代码模式下仍可勾选：Markdown 由 Vditor 侧的行号栏消费，代码由 CM 的 lineNumbers() 消费
         { label: t("显示行号"), checked: () => showLineNumbers && docKind !== "html", disabled: () => docKind === "html", action: toggleLineNumbers },
-        { sep: true },
         {
-          // 只服务代码文件（.txt/.py/.bat 等）：超大代码文件是只读分节纯文本，无高亮可改
           label: t("语法高亮语言"),
           disabled: () => docKind !== "code" || codeLargeText !== null,
           sub: codeLangSubmenu(),
         },
+        { sep: true },
+        // 专注写作：打字机 / 段落聚焦 / 沉浸式全屏，都是「让注意力回到正文」的显示模式
         {
-          // 打字机 / 段落聚焦在 Markdown 与纯文本两种模式下都支持（HTML 模式下光标在 iframe 里，
-          // 正文既不被编辑也量不到光标）。Markdown 走 Vditor，纯文本走 CodeMirror 的等价实现。
           label: t("打字机模式"),
           shortcut: "F9",
           checked: () => typewriterOn && docKind !== "html",
@@ -4246,7 +4274,6 @@
           disabled: () => docKind === "html",
           action: toggleParagraphFocus,
         },
-        { sep: true },
         { label: t("沉浸式全屏编辑"), shortcut: "F11", checked: () => isEditorFullscreen(), action: toggleEditorFullscreen },
       ],
     },
@@ -5018,11 +5045,12 @@
 
     <!-- 标签栏（批次六）：活跃标签的名字与未保存圆点直接读全局状态，其余读各自快照；
          标签多了横向滚动，滚轮也能推着滚（onwheel 里手动转成横向） -->
-    <div class="tabs" onwheel={onTabsWheel}>
+    <div class="tabs" bind:this={tabsEl} onwheel={onTabsWheel}>
       {#each tabs as tab, i (tab.id)}
         <button
           class="tab"
           class:active={i === activeIndex}
+          data-index={i}
           title={i === activeIndex ? currentPath ?? t("尚未保存到磁盘") : tab.path ?? t("尚未保存到磁盘")}
           onclick={() => void switchTab(i)}
           oncontextmenu={(e) => openTabMenu(e, i)}
@@ -5674,7 +5702,7 @@
   /* 标签栏（批次六）：占菜单栏右侧剩余空间的固定比例，标签多了自身横向滚动 */
   .tabs {
     display: flex;
-    align-items: stretch;
+    align-items: center;
     gap: 3px;
     flex: 0 1 auto;
     min-width: 0;
@@ -5683,6 +5711,24 @@
     overflow-y: hidden;
     scrollbar-width: thin;
     padding: 0 2px;
+  }
+
+  /* 标签超出宽度时的横向滚动条：细、低调、悬停才明显，避免抢视觉 */
+  .tabs::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  .tabs::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .tabs::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: rgba(128, 128, 128, 0.35);
+  }
+
+  .tabs::-webkit-scrollbar-thumb:hover {
+    background: rgba(128, 128, 128, 0.6);
   }
 
   /* 未选中标签：给一层卡片外观（底色 + 边框）稍微后退，避免与菜单栏底色糊在一起分不出边界 */
@@ -5701,11 +5747,14 @@
     cursor: pointer;
     white-space: nowrap;
     max-width: 12rem;
-    transition: opacity 0.12s ease;
+    /* 不参与收缩：标签变多时保持各自宽度，靠容器横向滚动而不是把标签挤窄 */
+    flex: 0 0 auto;
+    transition: opacity 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
   }
 
   .tab:hover {
     opacity: 0.9;
+    background: var(--hover, rgba(128, 128, 128, 0.12));
   }
 
   /* 选中标签：不透明 + 加粗 + 顶部强调条，与未选中拉开层级 */
