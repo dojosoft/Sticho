@@ -2070,7 +2070,7 @@ function renderLineNumbers(): void {
   const bandBottom = scrollerRect.bottom + LINE_NUMBER_MARGIN;
 
   const units = collectLineUnits(scroller, { top: bandTop, bottom: bandBottom });
-  const numbers = assignSourceLineNumbers(units, normalizedSourceLines(lineNumberSource));
+  const numbers = compactLineNumbers(units, assignSourceLineNumbers(units, normalizedSourceLines(lineNumberSource)));
 
   const rows: NumberedRow[] = [];
   for (let i = 0; i < units.length; i++) {
@@ -2102,6 +2102,31 @@ function renderLineNumbers(): void {
   for (let i = rows.length; i < rowPool.length; i++) {
     if (rowPool[i].style.display !== "none") rowPool[i].style.display = "none";
   }
+}
+
+/**
+ * 把「源码行号」压成「可见行号」。
+ *
+ * Markdown 源码里有一批内容根本不渲染：空行、表格分隔行、front matter、HTML 注释、
+ * 被折叠的语法标记……编号逻辑却照样给它们留了号，于是可见行之间会跳号（1、3、5…）。
+ * 用户看到的是一篇连续的文档，跳号反而不好用——这里按「第几个可见行」重新编号。
+ * assignSourceLineNumbers 产出的号严格递增，所以压缩后就是 1、2、3…。
+ *
+ * 分节渲染的大文档（unit.base 有值）例外：DOM 里只有视口附近的几节，连续编号会随着
+ * 滚动来回跳，只能保留源码行号。
+ */
+function compactLineNumbers(units: LineUnit[], numbers: number[]): number[] {
+  if (units.some((unit) => unit.base !== null)) return numbers;
+  let last = -1;
+  let rank = 0;
+  return numbers.map((number) => {
+    if (number <= 0) return 0;
+    if (number !== last) {
+      rank += 1;
+      last = number;
+    }
+    return rank;
+  });
 }
 
 /**

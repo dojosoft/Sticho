@@ -4023,6 +4023,8 @@
     sub?: MenuItem[];
     /** 动态子菜单（最近文件随列表变化，需在展开时求值） */
     dynamic?: () => MenuItem[];
+    /** 悬停说明：鼠标停在菜单项上时用原生 tooltip 显示（disabled 项也要能看到，故配合 aria-disabled） */
+    tip?: string;
   };
 
   type MenuDef = { id: string; label: string; key: string; items: MenuItem[]; readonlyLocked?: boolean };
@@ -4310,13 +4312,26 @@
           ],
         },
         { sep: true },
-        // 编辑器显示：排版工具栏（仅 Markdown）/ 行号 / 语法高亮（仅代码文件）
-        { label: t("显示排版工具栏"), checked: () => showToolbar, disabled: () => docKind !== "markdown", action: toggleEditorToolbar },
-        { label: t("显示行号"), checked: () => showLineNumbers && docKind !== "html", disabled: () => docKind === "html", action: toggleLineNumbers },
+        // 编辑器显示：排版工具栏（仅 Markdown）/ 行号 / 语法高亮（仅纯文本）
+        {
+          label: t("显示排版工具栏"),
+          checked: () => showToolbar,
+          disabled: () => docKind !== "markdown",
+          action: toggleEditorToolbar,
+          tip: t("仅在 Markdown 模式下可用：显示或隐藏正文上方的排版工具栏。"),
+        },
+        {
+          label: t("显示行号"),
+          checked: () => showLineNumbers && docKind !== "html",
+          disabled: () => docKind === "html",
+          action: toggleLineNumbers,
+          tip: t("仅在 Markdown 与纯文本模式下可用：在正文左侧显示行号。"),
+        },
         {
           label: t("语法高亮语言"),
           disabled: () => docKind !== "code" || codeLargeText !== null,
           sub: codeLangSubmenu(),
+          tip: t("仅在纯文本模式下可用：指定代码着色的语言，「自动」按文件扩展名判断。"),
         },
         { sep: true },
         // 专注写作：打字机 / 段落聚焦 / 沉浸式全屏，都是「让注意力回到正文」的显示模式
@@ -4361,6 +4376,9 @@
   }
 
   function runMenuItem(item: MenuItem): void {
+    // 菜单项改用 aria-disabled（原生 disabled 会吞掉鼠标事件，悬停说明就看不到了），
+    // 因此这里必须自己挡住不可用项的动作。
+    if (item.disabled?.()) return;
     menuOpen = null;
     subOpen = null;
     void item.action?.();
@@ -5062,13 +5080,20 @@
                 <div
                   class="menu-sub"
                   role="none"
-                  onmouseenter={() => (subOpen = item.label ?? null)}
+                  onmouseenter={() => {
+                    // 不可用的父项不展开子菜单（否则灰掉的项一悬停就弹出面板）
+                    if (!locked && !item.disabled?.()) subOpen = item.label ?? null;
+                  }}
                   onmouseleave={() => (subOpen = null)}
                 >
                   <button
                     class="menu-item"
-                    disabled={locked || item.disabled?.()}
-                    onclick={() => (subOpen = item.label ?? null)}
+                    class:is-disabled={locked || item.disabled?.()}
+                    aria-disabled={locked || item.disabled?.()}
+                    title={item.tip}
+                    onclick={() => {
+                      if (!locked && !item.disabled?.()) subOpen = item.label ?? null;
+                    }}
                   >
                     <span class="mark"></span>
                     <span class="label">{item.label}</span>
@@ -5082,11 +5107,12 @@
                         {:else}
                           <button
                             class="menu-item"
-                            disabled={locked || child.disabled?.()}
+                            class:is-disabled={locked || child.disabled?.()}
+                            aria-disabled={locked || child.disabled?.()}
                             onclick={() => runMenuItem(child)}
                           >
                             <span class="mark">{child.radio ? (child.checked?.() ? "●" : "") : (child.checked?.() ? "✓" : "")}</span>
-                            <span class="label" title={child.label}>{child.label}</span>
+                            <span class="label" title={child.tip ?? child.label}>{child.label}</span>
                             {#if child.shortcut}<span class="shortcut">{child.shortcut}</span>{/if}
                           </button>
                         {/if}
@@ -5095,7 +5121,13 @@
                   {/if}
                 </div>
               {:else}
-                <button class="menu-item" disabled={locked || item.disabled?.()} onclick={() => runMenuItem(item)}>
+                <button
+                  class="menu-item"
+                  class:is-disabled={locked || item.disabled?.()}
+                  aria-disabled={locked || item.disabled?.()}
+                  title={item.tip}
+                  onclick={() => runMenuItem(item)}
+                >
                   <span class="mark">{item.radio ? (item.checked?.() ? "●" : "") : (item.checked?.() ? "✓" : "")}</span>
                   <span class="label">{item.label}</span>
                   {#if item.shortcut}<span class="shortcut">{item.shortcut}</span>{/if}
@@ -5720,11 +5752,13 @@
     white-space: nowrap;
   }
 
-  .menu-item:hover:not(:disabled) {
+  .menu-item:hover:not(.is-disabled) {
     background: var(--hover, rgba(0, 0, 0, 0.07));
   }
 
-  .menu-item:disabled {
+  /* 不可用项：置灰且不可点。用类而不是原生 :disabled——原生 disabled 会吞掉鼠标事件，
+     悬停说明（原生 title）就显示不出来了。 */
+  .menu-item.is-disabled {
     opacity: 0.4;
     cursor: default;
   }
