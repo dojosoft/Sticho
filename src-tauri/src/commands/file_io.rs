@@ -16,6 +16,9 @@ const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 /// PDF 导入大小上限：50MB（文字版 PDF 远小于此，防止误选巨型扫描件拖垮前端）
 const MAX_PDF_SIZE: u64 = 50 * 1024 * 1024;
 
+/// 图片读取大小上限：20MB（Word 导出嵌入图片用，正常插图远小于此）
+const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
+
 /// 原子写的临时文件后缀（同时用于在目录树里过滤掉崩溃后残留的临时文件）
 const TMP_SUFFIX: &str = ".sticho.tmp";
 
@@ -404,6 +407,38 @@ pub async fn read_pdf_base64(path: String) -> Result<String, String> {
             return Err("这不是有效的 PDF 文件（文件头不匹配）".to_string());
         }
 
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    })
+    .await
+    .map_err(|e| format!("任务调度失败：{e}"))?
+}
+
+/// 读取本地图片并 base64 编码（Word 导出嵌入图片用）。
+///
+/// 与 read_pdf_base64 同理：IPC 走 JSON，二进制必须编码后过通道。
+/// 这里只做大小与存在性检查，能不能真正嵌入由前端按扩展名/MIME 判定——
+/// 判断失败时前端回落到占位文字，不影响整篇导出。
+#[tauri::command]
+pub async fn read_image_base64(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&path);
+
+        let meta = match fs::metadata(p) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!("文件不存在：{path}"));
+            }
+            Err(e) => return Err(format!("无法访问文件：{e}")),
+        };
+
+        if meta.len() > MAX_IMAGE_SIZE {
+            return Err(format!(
+                "图片过大（{} MB），导出仅支持 20MB 以内的图片",
+                meta.len() / 1024 / 1024
+            ));
+        }
+
+        let bytes = fs::read(p).map_err(|e| format!("读取失败：{e}"))?;
         Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     })
     .await

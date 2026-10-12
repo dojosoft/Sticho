@@ -1054,6 +1054,45 @@ function decorateLargeSection(el: HTMLElement): void {
   resolveImagesIn(el);
 }
 
+/** 离屏 Mermaid 渲染的等待上限（毫秒）：首次要先注入 mermaid.min.js，放宽一些 */
+const MERMAID_TIMEOUT_MS = 15000;
+
+/**
+ * 离屏把一段 Mermaid 源码渲染成 SVG（Word 导出嵌入图片用）。
+ *
+ * 复用编辑器的渲染通路，保证与预览里看到的版本、主题完全一致；
+ * 代价是首次调用要先注入 `vditor/dist/js/mermaid/mermaid.min.js`，会明显慢一拍。
+ *
+ * Vditor 的渲染器是「按 .language-mermaid 定位、把 SVG 写回该元素 innerHTML」的异步实现，
+ * 因此这里构造同样结构的代码块、调用后轮询等待 SVG 出现。
+ * 超时或渲染失败（含语法错误）返回 null，调用方回落成代码块。
+ */
+export async function renderMermaidInto(
+  host: HTMLElement,
+  code: string,
+): Promise<SVGSVGElement | null> {
+  const ctor = await ensureVditor();
+
+  const block = document.createElement("pre");
+  const codeEl = document.createElement("code");
+  codeEl.className = "language-mermaid";
+  codeEl.textContent = code;
+  block.appendChild(codeEl);
+  host.appendChild(block);
+
+  ctor.mermaidRender(host, CDN_PATH, vditor?.vditor.options.theme ?? "classic");
+
+  const deadline = Date.now() + MERMAID_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const svg = codeEl.querySelector("svg");
+    if (svg) return svg as SVGSVGElement;
+    // Vditor 渲染失败时会把错误片段写回并把 data-processed 置为 true
+    if (codeEl.getAttribute("data-processed") === "true") return null;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return null;
+}
+
 /** 惰性创建大文档阅读器（挂在 .vditor-content 下，与 IR/SV/WYSIWYG 三个正文并列） */
 function ensureLargeReader(): LargeReader | null {
   if (!ready || !vditor) return null;

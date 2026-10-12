@@ -179,8 +179,14 @@ pub async fn export_pdf(app: AppHandle, path: String, html_b64: String) -> Resul
 
 /// 在 with_webview 回调内执行：走 CDP 的 Page.printToPDF。
 ///
-/// 参数与原生 PrintToPdf 刻意保持一致（页宽高/边距/背景），
-/// 唯一的增量是 `generateDocumentOutline`——按 h1~h6 生成 PDF 书签。
+/// 参数与原生 PrintToPdf 刻意保持一致（页宽高/边距/背景），增量有两处：
+/// 1. `generateDocumentOutline`——按 h1~h6 生成 PDF 书签
+/// 2. `displayHeaderFooter` + 自定义页眉页脚模板——页眉出文档名（取自打印 HTML 的
+///    `<title>`），页脚出「第 N / M 页」。
+///
+/// 模板里的样式必须**内联**：页眉页脚不在文档的 CSS 作用域内，
+/// 且 Chromium 要求显式给出 font-size（不给会是 0 或异常大）。
+/// 左右 padding 与页边距一致，让页眉页脚与正文左右对齐。
 fn print_via_cdp(
     pw: &tauri::webview::PlatformWebview,
     pdf_path: &str,
@@ -196,8 +202,10 @@ fn print_via_cdp(
             concat!(
                 r#"{{"paperWidth":{},"paperHeight":{},"marginTop":{},"marginBottom":{},"#,
                 r#""marginLeft":{},"marginRight":{},"printBackground":true,"#,
-                r#""displayHeaderFooter":false,"preferCSSPageSize":false,"#,
-                r#""generateDocumentOutline":true,"transferMode":"ReturnAsBase64"}}"#
+                r#""displayHeaderFooter":true,"preferCSSPageSize":false,"#,
+                r#""generateDocumentOutline":true,"transferMode":"ReturnAsBase64","#,
+                r#""headerTemplate":"<div style=\"font-size:9px;width:100%;padding:0 0.7in;color:#8a8f98;white-space:nowrap;overflow:hidden;\"><span class=\"title\"></span></div>","#,
+                r#""footerTemplate":"<div style=\"font-size:9px;width:100%;text-align:center;color:#8a8f98;\">第 <span class=\"pageNumber\"></span> / <span class=\"totalPages\"></span> 页</div>"}}"#
             ),
             A4_WIDTH, A4_HEIGHT, MARGIN_INCH, MARGIN_INCH, MARGIN_INCH, MARGIN_INCH
         );
@@ -239,7 +247,7 @@ fn print_via_webview2(
             .CreatePrintSettings()
             .map_err(|e| format!("创建打印设置失败：{e}"))?;
 
-        // A4 + 边距 + 打印背景色（代码块/表头底色必须保留）+ 无页眉页脚
+        // A4 + 边距 + 打印背景色（代码块/表头底色必须保留）+ 页眉页脚
         settings.SetPageWidth(A4_WIDTH).map_err(com_err)?;
         settings.SetPageHeight(A4_HEIGHT).map_err(com_err)?;
         settings.SetMarginTop(MARGIN_INCH).map_err(com_err)?;
@@ -247,7 +255,10 @@ fn print_via_webview2(
         settings.SetMarginLeft(MARGIN_INCH).map_err(com_err)?;
         settings.SetMarginRight(MARGIN_INCH).map_err(com_err)?;
         settings.SetShouldPrintBackgrounds(true).map_err(com_err)?;
-        settings.SetShouldPrintHeaderAndFooter(false).map_err(com_err)?;
+        // 原生接口只能整体开关页眉页脚，样式与内容由 WebView2 固定（页脚含页码，
+        // 同时会带上日期与临时文件 URL），不支持 CDP 那套自定义模板。
+        // 这里仍开启，是为了「宁可样式差一点，也别丢了页码」——该分支只在 CDP 整体失败时走到。
+        settings.SetShouldPrintHeaderAndFooter(true).map_err(com_err)?;
         settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT).map_err(com_err)?;
         settings.SetScaleFactor(1.0).map_err(com_err)?;
 

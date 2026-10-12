@@ -8,6 +8,10 @@
  * 中文字体策略（开工前确认的方案）：
  * 打印 CSS 显式声明 "Microsoft YaHei"（Win10/11 内置），WebView2 用系统
  * DirectWrite 渲染，无内嵌字体文件、无联网，中文不可能出方块。
+ *
+ * 页眉页脚（批次九补全）：页码与文档名由 Rust 侧 CDP 的 headerTemplate /
+ * footerTemplate 生成，其中页眉取 `<span class="title">`——它来自本文件的 `<title>`，
+ * 所以这里必须把文档名传进来。
  */
 import MarkdownIt from "markdown-it";
 import { invoke } from "@tauri-apps/api/core";
@@ -16,20 +20,36 @@ import { applyAutoSpace } from "./typography";
 const md = new MarkdownIt({ html: false, linkify: true });
 applyAutoSpace(md);
 
-export async function exportPdf(path: string, markdown: string): Promise<void> {
+/**
+ * 导出 PDF。
+ *
+ * `title` 为文档主名，写入打印 HTML 的 `<title>`，由页眉模板取出显示。
+ */
+export async function exportPdf(path: string, markdown: string, title = ""): Promise<void> {
   const body = md.render(markdown);
-  const html = buildPrintHtml(body);
+  const html = buildPrintHtml(body, title);
   await invoke("export_pdf", { path, htmlB64: toBase64(new TextEncoder().encode(html)) });
 }
 
+/** HTML 文本转义（title 里可能出现 `&` `<` 等字符） */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 /** 完整打印文档：A4 纵向 + 中文排版 + 分页控制 */
-function buildPrintHtml(bodyHtml: string): string {
+function buildPrintHtml(bodyHtml: string, title: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<title>${escapeHtml(title)}</title>
 <style>
-  @page { size: A4 portrait; margin: 0; }
+  /* 页边距只在 @page 上设一次：正文再用 body margin 会与打印参数叠加成双倍边距 */
+  @page { size: A4 portrait; margin: 0.7in; }
   * { box-sizing: border-box; }
   html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   body {
@@ -37,7 +57,7 @@ function buildPrintHtml(bodyHtml: string): string {
     font-size: 10.5pt;          /* 五号字 */
     line-height: 1.75;
     color: #1f2328;
-    margin: 18mm 16mm;           /* 与 Rust 侧 PrintSettings 边距一致 */
+    margin: 0;                   /* 边距由 @page / 打印参数负责 */
   }
 
   /* ---- 标题 ---- */

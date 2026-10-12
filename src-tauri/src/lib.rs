@@ -55,6 +55,7 @@ pub fn run() {
             commands::file_io::write_text_file,
             commands::file_io::write_file_base64,
             commands::file_io::read_pdf_base64,
+            commands::file_io::read_image_base64,
             commands::file_io::get_file_info,
             commands::file_io::list_dir,
             commands::file_io::get_startup_file,

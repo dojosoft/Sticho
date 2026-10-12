@@ -2040,12 +2040,32 @@
   // exportDocx / importPdf 走调用点动态加载：docx 与 pdfjs-dist 体积可观，
   // 却只有导出 Word / 导入 PDF 时才用得上，静态打进主包白白拖慢首帧
   const exportWord = () =>
-    exportAs(t("导出为 Word 文档"), "docx", t("Word 文档"), (path, source) =>
-      import("./lib/export-docx").then((m) => m.exportDocx(path, source)),
-    );
+    exportAs(t("导出为 Word 文档"), "docx", t("Word 文档"), async (path, source) => {
+      const [{ exportDocx }, { renderMermaidToPng }] = await Promise.all([
+        import("./lib/export-docx"),
+        import("./lib/mermaidImage"),
+      ]);
+      const { embedded, skipped } = await exportDocx(path, source, {
+        baseDir: docDirPath(),
+        renderMermaid: renderMermaidToPng,
+      });
+      // 有图片没能嵌入时给一次汇总说明（远端图、不支持格式、相对路径解析失败等）
+      if (skipped.length) {
+        const list = skipped.slice(0, 8).join("\n");
+        const more = skipped.length > 8 ? t("\n…另有 {n} 张", { n: skipped.length - 8 }) : "";
+        await messageDialog(
+          t("已嵌入 {n} 张图片。以下图片未能嵌入，已回落为占位文字：\n{list}{more}", {
+            n: embedded,
+            list,
+            more,
+          }),
+          { title: t("导出为 Word 文档"), kind: "warning" },
+        );
+      }
+    });
   const exportPdfFile = () =>
     exportAs(t("导出为 PDF 文档"), "pdf", t("PDF 文档"), (path, source) =>
-      import("./lib/export-pdf").then((m) => m.exportPdf(path, source)),
+      import("./lib/export-pdf").then((m) => m.exportPdf(path, source, docBaseName())),
     );
   // HTML 文档导出 HTML：源码原样写出（走 markdown-it 会把标签转义成文本）
   const exportHtmlFile = () =>

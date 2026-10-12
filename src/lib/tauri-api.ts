@@ -33,6 +33,11 @@ export function readPdfBase64(path: string): Promise<string> {
   return invoke<string>("read_pdf_base64", { path });
 }
 
+/** 读取图片原始字节（base64 返回，20MB 上限在 Rust 侧完成；Word 导出嵌入图片用） */
+export function readImageBase64(path: string): Promise<string> {
+  return invoke<string>("read_image_base64", { path });
+}
+
 /**
  * 把 base64 图片写进文档同级 assets 目录，返回写入文件的绝对路径（批次三）。
  *
