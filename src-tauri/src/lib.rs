@@ -99,6 +99,8 @@ pub fn run() {
             commands::history::list_history,
             commands::history::read_history,
             commands::history::restore_history,
+            commands::history::list_all_history,
+            commands::history::delete_history,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

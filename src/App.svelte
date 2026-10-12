@@ -133,6 +133,7 @@
   import CodeTools from "./components/CodeTools.svelte";
   import CloudBrowser from "./components/CloudBrowser.svelte";
   import DiffView from "./components/DiffView.svelte";
+  import RecoveryCenter from "./components/RecoveryCenter.svelte";
   import FindBar from "./components/FindBar.svelte";
   import StatusBar from "./components/StatusBar.svelte";
   import SettingsModal from "./components/SettingsModal.svelte";
@@ -213,6 +214,8 @@
   let davSyncState = $state<"idle" | "busy" | "error">("idle"); // 状态栏同步指示
   let davSyncTip = $state(""); // 状态栏指示的 tooltip（失败详情）
   let cloudOpen = $state(false); // 云端文件浏览模态
+  // 恢复中心（文件菜单 →「恢复中心…」）：统一浏览恢复草稿与本地版本历史
+  let recoveryOpen = $state(false);
 
   /** 配置齐了且本会话验证过，才允许开启同步 / 浏览云端 */
   const davReady = $derived(davUrl.trim() !== "" && davVerified);
@@ -1138,6 +1141,44 @@
     } catch (e) {
       await showError(t("读取历史版本失败："), e);
     }
+  }
+
+  /**
+   * 恢复中心 →「恢复」：把草稿 / 历史版本的内容在编辑器里打开成未保存文档。
+   *
+   * 刻意不直接写盘：与「文件历史 → 恢复」一致，恢复结果只标记为未保存，由用户确认后再
+   * 保存，避免误点就把磁盘上较新的版本盖掉。path 有值时保留原路径（保存即写回原文件）。
+   */
+  async function restoreFromRecoveryCenter(payload: {
+    content: string;
+    kind: string;
+    path: string | null;
+    encoding?: string;
+  }): Promise<void> {
+    const { content, kind, path } = payload;
+    await loadIntoFreshTab(async () => {
+      docKind = kind === "html" ? "html" : kind === "code" ? "code" : "markdown";
+      currentPath = path;
+      setDocumentPath(path);
+      dirty = true; // 恢复出来的是历史内容，必须手动保存才写回磁盘
+      encoding = payload.encoding || "utf-8";
+      diskMtime = null;
+      if (docKind === "html") {
+        htmlSource = content;
+        previewDoc = content;
+        previewKey += 1;
+        previewMutated = false;
+        htmlView = "preview";
+        htmlScripts = false;
+      } else if (docKind === "code") {
+        await showCodeDoc(content, path);
+      } else {
+        setEditorValue(content);
+      }
+      if (path) treeRoot = parentDir(path);
+      await updateTitle();
+      refreshSideNow();
+    });
   }
 
   /** 帮助菜单 →「导出诊断信息…」：生成报告并让用户选择保存位置 */
@@ -3888,6 +3929,13 @@
                   action: () => void historyVersionMenu(h.file),
                 })),
         },
+        {
+          // 恢复中心：统一浏览恢复草稿与全部文档的本地版本历史，可预览后恢复 / 另存 / 删除
+          label: t("恢复中心…"),
+          action: () => {
+            recoveryOpen = true;
+          },
+        },
         { sep: true },
         // HTML 文档专属操作（从「视图」迁来）：只在打开 .html 时可用，编辑 Markdown 时整组置灰
         { label: t("HTML 预览"), disabled: () => docKind !== "html", checked: () => docKind === "html" && htmlView === "preview", action: () => setHtmlView("preview") },
@@ -4242,6 +4290,9 @@
         e.preventDefault();
       } else if (choiceState) {
         resolveChoice(null);
+        e.preventDefault();
+      } else if (recoveryOpen) {
+        recoveryOpen = false;
         e.preventDefault();
       } else if (settingsOpen) {
         settingsOpen = false;
@@ -5100,6 +5151,15 @@
       dav={davConfig}
       onOpen={(remote, content) => void openCloudDoc(remote, content)}
       onClose={() => (cloudOpen = false)}
+    />
+  {/if}
+
+  <!-- 恢复中心（文件菜单 →「恢复中心…」）：统一浏览恢复草稿与本地版本历史 -->
+  {#if recoveryOpen}
+    <RecoveryCenter
+      {locale}
+      onRestore={(payload) => void restoreFromRecoveryCenter(payload)}
+      onClose={() => (recoveryOpen = false)}
     />
   {/if}
 

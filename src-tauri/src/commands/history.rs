@@ -223,6 +223,87 @@ pub fn restore_history(app: AppHandle, path: String, file: String) -> Result<Str
     Ok(content)
 }
 
+/// 某个文档的历史版本分组（恢复中心用，见 `list_all_history`）
+#[derive(serde::Serialize)]
+pub struct HistoryDoc {
+    /// 原文档绝对路径（来自 meta.json）
+    pub path: String,
+    /// 文档名（文件名）
+    pub name: String,
+    /// 该文档的历史版本（按时间降序）
+    pub entries: Vec<HistoryEntry>,
+}
+
+/// 从某历史目录的 meta.json 取出原文档路径与文件名。
+///
+/// 拿不到路径就返回 None：没有原路径既不能回读正文，也不能恢复 / 另存，
+/// 列到界面上只会误导用户。
+fn read_meta(dir: &Path) -> Option<(String, String)> {
+    let text = fs::read_to_string(dir.join(META_FILE)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let path = v.get("path")?.as_str()?.to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let name = match v.get("name").and_then(|n| n.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    Some((path, name))
+}
+
+/// 列出**全部文档**的本地历史版本，按最近有改动排序（恢复中心）。
+///
+/// 与 `list_history` 的区别：那条只认单个路径（文件菜单 →「文件历史」），
+/// 这条遍历整个 `history/` 目录，供「恢复中心」一次性呈现所有留档。
+#[tauri::command]
+pub fn list_all_history(app: AppHandle) -> Result<Vec<HistoryDoc>, String> {
+    let root = history_root(&app)?;
+    let read = match fs::read_dir(&root) {
+        Ok(r) => r,
+        Err(_) => return Ok(Vec::new()), // 还没有任何历史，不算错误
+    };
+
+    let mut docs: Vec<HistoryDoc> = Vec::new();
+    for item in read.flatten() {
+        let dir = item.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some((path, name)) = read_meta(&dir) else { continue };
+        let entries = list_entries(&dir)?;
+        if entries.is_empty() {
+            continue;
+        }
+        docs.push(HistoryDoc { path, name, entries });
+    }
+
+    // 最近有改动的文档排前面（entries 已降序，取首条时间即可）
+    docs.sort_by(|a, b| {
+        let at = a.entries.first().map(|e| e.saved_at).unwrap_or(0);
+        let bt = b.entries.first().map(|e| e.saved_at).unwrap_or(0);
+        bt.cmp(&at)
+    });
+    Ok(docs)
+}
+
+/// 删除某个历史版本（幂等：文件本就不存在时返回 `Ok(())`）。
+#[tauri::command]
+pub fn delete_history(app: AppHandle, path: String, file: String) -> Result<(), String> {
+    if !is_valid_entry(&file) {
+        return Err("历史版本标识非法".into());
+    }
+    let target = doc_dir(&app, &path)?.join(&file);
+    match fs::remove_file(&target) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("删除历史版本失败：{e}")),
+    }
+}
+
 /// 保留份数：读设置项 `historyKeep`，缺失或非法时用默认值（并夹在 1..=200）。
 fn history_keep(app: &AppHandle) -> usize {
     super::config::get_settings_path(app.clone())
@@ -266,6 +347,24 @@ mod tests {
     fn 扩展名兜底与提取() {
         assert_eq!(ext_of(r"D:\a.md"), "md");
         assert_eq!(ext_of(r"D:\README"), "txt");
+    }
+
+    #[test]
+    fn 读取历史目录元信息() {
+        let dir = std::env::temp_dir().join(format!("sticho-meta-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(read_meta(&dir).is_none(), "没有 meta.json 时应返回 None");
+
+        fs::write(dir.join(META_FILE), r#"{"path":"D:\\Docs\\A.md","name":"A.md"}"#).unwrap();
+        assert_eq!(read_meta(&dir), Some((r"D:\Docs\A.md".to_string(), "A.md".to_string())));
+
+        // name 缺失 / 为空时用文件名兜底
+        fs::write(dir.join(META_FILE), r#"{"path":"D:\\Docs\\B.md"}"#).unwrap();
+        assert_eq!(read_meta(&dir), Some((r"D:\Docs\B.md".to_string(), "B.md".to_string())));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

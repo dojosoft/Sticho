@@ -653,6 +653,25 @@ export const EN: Record<string, string> = {
     "Format: Ctrl+B Bold / Ctrl+I Italic / Ctrl+Shift+K Link / Ctrl+1~6 Heading Levels 1~6",
   "视图：Ctrl+K 命令面板 / F9 显示/隐藏侧边栏 / Alt+F/E/O/V/S/H 展开对应菜单 / Esc 关闭菜单与查找栏":
     "View: Ctrl+K Command Palette / F9 Toggle Sidebar / Alt+F/E/O/V/S/H Open Menu / Esc Close Menu and Find Bar",
+
+  // ---- 恢复中心（统一浏览恢复草稿与本地版本历史）----
+  "恢复中心…": "Recovery Center…",
+  恢复中心: "Recovery Center",
+  恢复草稿: "Recovery Drafts",
+  本地版本历史: "Local Version History",
+  关闭预览: "Close Preview",
+  "读取中…": "Loading…",
+  暂无恢复草稿: "No recovery drafts",
+  暂无本地版本历史: "No local version history",
+  "{n} 字": "{n} characters",
+  "{n} 个版本": "{n} versions",
+  草稿正文已不存在: "The draft content no longer exists",
+  删除: "Delete",
+  "确认删除草稿「{title}」？删除后无法恢复。":
+    "Delete the draft “{title}”? This cannot be undone.",
+  "确认删除该历史版本？删除后无法恢复。": "Delete this version? This cannot be undone.",
+  "草稿与版本历史都存放在本机数据目录，离线可用；恢复后以未保存的新文档打开，需手动保存。":
+    "Drafts and version history are stored locally in the app's data folder and work offline; restoring opens them as an unsaved document that you must save manually.",
 };
 
 /** 生成翻译函数：locale 变化时由 $derived 重新生成，标记文本随之更新 */

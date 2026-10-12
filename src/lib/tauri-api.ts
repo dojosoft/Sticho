@@ -432,6 +432,28 @@ export function restoreHistory(path: string, file: string): Promise<string> {
   return invoke<string>("restore_history", { path, file });
 }
 
+// ---- 恢复中心：全局列出所有文档的本地历史版本 ----
+
+/** 某个文档的历史版本分组 */
+export type HistoryDoc = {
+  /** 原文档绝对路径 */
+  path: string;
+  /** 文档名 */
+  name: string;
+  /** 该文档的历史版本（按时间降序） */
+  entries: HistoryEntry[];
+};
+
+/** 列出全部文档的本地历史版本，按最近有改动排序（恢复中心用） */
+export function listAllHistory(): Promise<HistoryDoc[]> {
+  return invoke<HistoryDoc[]>("list_all_history");
+}
+
+/** 删除某个历史版本（幂等：文件本就不存在也算成功） */
+export function deleteHistory(path: string, file: string): Promise<void> {
+  return invoke<void>("delete_history", { path, file });
+}
+
 // ---- 诊断（帮助菜单 →「导出诊断信息」）----
 
 /** 记录一条前端日志（showError 等关键事件同步落盘，便于事后排查） */
