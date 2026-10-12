@@ -60,6 +60,7 @@ Windows SmartScreen 会显示「Windows 已保护你的电脑 / 未知发布者�
 npm install
 npm run tauri dev        # 开发调试
 npm run tauri build      # 打包 msi + nsis
+npm run release          # 一键发布：构建 → 归档到 release/ → SHA256 → 复制绿色版到桌面
 npm run check-version    # 校验三处版本号一致，并打印安装包 SHA256
 npm run i18n-missing     # 列出未收录英文的界面文案
 ```

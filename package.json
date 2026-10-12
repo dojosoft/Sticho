@@ -12,6 +12,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "check-version": "node scripts/check-version.mjs",
     "i18n-missing": "node scripts/i18n-missing.mjs",
+    "release": "node scripts/release.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
     "tauri": "tauri"
