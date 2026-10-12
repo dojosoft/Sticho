@@ -5,8 +5,8 @@
  * 这里只做与界面无关的计算，便于单独推理与复用。
  */
 
-/** 侧边栏视图：文件目录树 / 文档大纲 / 文件属性 */
-export type SidebarView = "tree" | "outline" | "props";
+/** 侧边栏视图：文件目录树 / 文档大纲 / 文件属性 / 跨文件搜索 */
+export type SidebarView = "tree" | "outline" | "props" | "search";
 
 /** 大纲条目 */
 export type OutlineItem = {

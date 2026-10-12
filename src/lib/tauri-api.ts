@@ -89,6 +89,36 @@ export function listDir(path: string): Promise<DirEntry[]> {
   return invoke<DirEntry[]>("list_dir", { path });
 }
 
+/**
+ * 跨文件搜索命中（字段与 lib/fileSearch.ts 的 SearchHit 一致：line 1 起、column 0 起字符下标）
+ */
+export type SearchHit = {
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+};
+
+/** 跨文件搜索结果：hits 为命中列表，files 为实际扫描的文件数，truncated 表示因达到上限被截断 */
+export type SearchResult = {
+  hits: SearchHit[];
+  files: number;
+  truncated: boolean;
+};
+
+/**
+ * 在 root 目录内做跨文件全文搜索（字面量匹配，Rust 侧遍历，跳过 node_modules/.git 等）。
+ * maxHits 为命中上限，传 0 用后端默认值。
+ */
+export function searchFiles(
+  root: string,
+  query: string,
+  caseSensitive: boolean,
+  maxHits: number,
+): Promise<SearchResult> {
+  return invoke<SearchResult>("search_files", { root, query, caseSensitive, maxHits });
+}
+
 /** 启动参数中待打开的文件（文件关联后双击文档由资源管理器传入），无则返回 null */
 export function getStartupFile(): Promise<string | null> {
   return invoke<string | null>("get_startup_file");

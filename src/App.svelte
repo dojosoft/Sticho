@@ -76,6 +76,7 @@
     listHistory,
     readHistory,
     restoreHistory,
+    searchFiles,
     logEvent,
     exportDiagnostics,
     type DataLocationMode,
@@ -135,6 +136,9 @@
   import FindBar from "./components/FindBar.svelte";
   import StatusBar from "./components/StatusBar.svelte";
   import SettingsModal from "./components/SettingsModal.svelte";
+  import CommandPalette, { type PaletteCommand } from "./components/CommandPalette.svelte";
+  import WelcomeDialog from "./components/WelcomeDialog.svelte";
+  import { groupSearchHits, type SearchGroup, type SearchHit } from "./lib/fileSearch";
   // 导出 / 导入实现（export-pdf、export-html、export-txt、import-html、export-docx、
   // import-pdf）统一走调用点动态加载：它们拖着 markdown-it / turndown / docx /
   // pdfjs-dist 这类大依赖，却只在对应菜单动作时才用得上。
@@ -154,6 +158,20 @@
   let historyEntries = $state<HistoryEntry[]>([]);
   // 版本差异视图（批次三）：null = 未打开
   let diffView = $state<{ title: string; leftLabel: string; rightLabel: string; lines: DiffLine[] } | null>(null);
+  // 命令面板（批次四）：Ctrl+K 打开；commands 在每次打开时按当前菜单求值（动态子菜单要新鲜数据）
+  let paletteOpen = $state(false);
+  let paletteCommands = $state<PaletteCommand[]>([]);
+  // 入门指南（批次四）：首次启动弹一次，帮助菜单可随时重开；welcomeShown 落设置
+  let welcomeOpen = $state(false);
+  // 跨文件搜索（批次四）：结果由应用层持有，侧边栏只负责输入与渲染
+  let searchGroups = $state<SearchGroup[]>([]);
+  let searchBusy = $state(false);
+  let searchError = $state("");
+  let searchFileCount = $state(0);
+  let searchTruncated = $state(false);
+  let searchQuery = $state(""); // 最近一次搜索的查询词与大小写设置，供「点击命中定位」复用
+  let searchCaseSensitive = $state(false);
+  let searchSeq = 0; // 搜索序号：丢弃过期请求的结果，避免快速输入时结果乱序
   let theme = $state<"light" | "dark">("light");
   let userThemeSet = $state(false); // 用户是否显式选过主题（否则跟随系统）
   let recentFiles = $state<string[]>([]);
@@ -3710,8 +3728,8 @@
         t("导出：Ctrl+Shift+E Word / Ctrl+Shift+P PDF / Ctrl+Shift+H HTML / Ctrl+Shift+T 纯文本"),
         t("编辑：Ctrl+Z 撤销 / Ctrl+Y 重做 / Ctrl+X 剪切 / Ctrl+C 复制 / Ctrl+V 粘贴"),
         t("查找：Ctrl+F 查找 / F3 查找下一个 / Shift+F3 查找上一个 / Ctrl+H 替换"),
-        t("格式：Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+K 链接 / Ctrl+1~6 标题 1~6 级"),
-        t("视图：F9 显示/隐藏侧边栏 / Alt+F/E/O/V/S/H 展开对应菜单 / Esc 关闭菜单与查找栏"),
+        t("格式：Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+Shift+K 链接 / Ctrl+1~6 标题 1~6 级"),
+        t("视图：Ctrl+K 命令面板 / F9 显示/隐藏侧边栏 / Alt+F/E/O/V/S/H 展开对应菜单 / Esc 关闭菜单与查找栏"),
       ].join("\n"),
       { title: t("快捷键一览"), kind: "info" },
     );
@@ -3939,7 +3957,7 @@
         { label: t("删除线"), action: () => applyFormat("strike") },
         { label: t("行内代码"), action: () => applyFormat("inline-code") },
         { sep: true },
-        { label: t("链接"), shortcut: "Ctrl+K", action: () => applyFormat("link") },
+        { label: t("链接"), shortcut: "Ctrl+Shift+K", action: () => applyFormat("link") },
         { label: t("插入图片"), action: () => insertLocalImage() },
         { label: t("表情"), action: () => applyFormat("emoji") },
         { sep: true },
@@ -3995,6 +4013,7 @@
             { label: t("文件目录树"), radio: true, checked: () => sidebarVisible && sidebarView === "tree", action: () => setSidebarView("tree") },
             { label: t("文档大纲"), radio: true, checked: () => sidebarVisible && sidebarView === "outline", action: () => setSidebarView("outline") },
             { label: t("文件属性"), radio: true, checked: () => sidebarVisible && sidebarView === "props", action: () => setSidebarView("props") },
+            { label: t("跨文件搜索"), radio: true, checked: () => sidebarVisible && sidebarView === "search", action: () => setSidebarView("search") },
           ],
         },
         { sep: true },
@@ -4031,6 +4050,7 @@
       label: t("帮助"),
       key: "h",
       items: [
+        { label: t("入门指南…"), action: () => (welcomeOpen = true) },
         { label: t("快捷键一览…"), action: showShortcuts },
         { sep: true },
         { label: t("导出诊断信息…"), action: exportDiagnosticsReport },
@@ -4054,12 +4074,159 @@
     void item.action?.();
   }
 
+  // ---- 命令面板（批次四，Ctrl+K）----
+
+  /**
+   * 把菜单树拍平成命令列表：展开 sub 与 dynamic 子项，跳过分隔线、无动作项与当前不可用的项。
+   * dynamic 在每次打开面板时求值，最近文件 / 文件历史这类动态子菜单才能拿到最新数据。
+   */
+  function flatMenuItems(): PaletteCommand[] {
+    const out: PaletteCommand[] = [];
+    let seq = 0;
+    const walk = (items: MenuItem[], category: string): void => {
+      for (const item of items) {
+        if (item.sep || !item.label) continue;
+        // 子菜单：本身不执行，作为分类前缀继续展开
+        if (item.sub) {
+          walk(item.sub, `${category} › ${item.label}`);
+          continue;
+        }
+        // 动态子菜单：展开时求值；父项不可用则整组跳过
+        if (item.dynamic) {
+          if (item.disabled?.()) continue;
+          walk(item.dynamic(), `${category} › ${item.label}`);
+          continue;
+        }
+        if (!item.action || item.disabled?.()) continue;
+        out.push({
+          id: `cmd-${seq++}`,
+          label: item.label,
+          category,
+          shortcut: item.shortcut,
+          run: () => runMenuItem(item),
+        });
+      }
+    };
+    for (const menu of MENUS) walk(menu.items, menu.label);
+    return out;
+  }
+
+  function openCommandPalette(): void {
+    menuOpen = null;
+    subOpen = null;
+    paletteCommands = flatMenuItems();
+    paletteOpen = true;
+  }
+
+  // ---- 入门指南（批次四）----
+
+  /** 关闭入门指南并记住「已看过」，不再自动弹出（帮助菜单仍可重开） */
+  function dismissWelcome(): void {
+    welcomeOpen = false;
+    void saveSetting("welcomeShown", true);
+  }
+
+  // ---- 跨文件搜索（批次四）----
+
+  /**
+   * 在当前目录树根内搜索。查询为空则清空结果；
+   * 用自增序号丢弃过期请求：快速输入时先发的慢请求不会覆盖后发的快结果。
+   */
+  async function runSearch(query: string, caseSensitive: boolean): Promise<void> {
+    if (!treeRoot) return;
+    searchQuery = query;
+    searchCaseSensitive = caseSensitive;
+    if (query === "") {
+      searchGroups = [];
+      searchFileCount = 0;
+      searchTruncated = false;
+      searchError = "";
+      return;
+    }
+    const seq = ++searchSeq;
+    searchBusy = true;
+    try {
+      const res = await searchFiles(treeRoot, query, caseSensitive, 500);
+      if (seq !== searchSeq) return;
+      searchGroups = groupSearchHits(res.hits);
+      searchFileCount = res.files;
+      searchTruncated = res.truncated;
+      searchError = "";
+    } catch (e) {
+      if (seq !== searchSeq) return;
+      searchError = e instanceof Error ? e.message : String(e);
+      searchGroups = [];
+    } finally {
+      if (seq === searchSeq) searchBusy = false;
+    }
+  }
+
+  /** 点击搜索结果：打开对应文件，并把视图定位到该命中处 */
+  async function openSearchHit(hit: SearchHit): Promise<void> {
+    if (busy) return;
+    busy = true;
+    try {
+      const ext = extOf(hit.path);
+      if (ext === "html" || ext === "htm") await loadIntoFreshTab(() => openHtmlPath(hit.path));
+      else if (isCodePath(hit.path)) await loadIntoFreshTab(() => openCodePath(hit.path));
+      else await loadIntoFreshTab(() => openPath(hit.path));
+      await revealSearchHit(hit);
+    } catch (e) {
+      await showError(t("打开失败："), e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /**
+   * 把视图定位到命中所在位置。
+   *
+   * 复用既有查找通路（Markdown/HTML/代码/大文档四条都覆盖），做法是：临时打开查找状态 →
+   * 按查询算出命中列表 → 前进到第 occurrence 处 → 立即收起查找状态。整个过程同步完成，
+   * Svelte 在同一拍内把 findOpen 从 true 又置回 false，查找栏不会闪出来。
+   * 取不到精确行号时只是滚动到该文件的第一处命中，属于可接受的降级。
+   */
+  async function revealSearchHit(hit: SearchHit): Promise<void> {
+    const group = searchGroups.find((g) => g.path === hit.path);
+    const occurrence = group ? group.hits.indexOf(hit) : 0;
+    const prevText = findText;
+    const prevCase = findCase;
+    const prevIdx = findIdx;
+
+    findText = searchQuery;
+    findCase = searchCaseSensitive;
+    findWord = false;
+    findRegex = false;
+    findIdx = -1;
+    // Vditor / CodeMirror 的正文渲染是异步的，等一拍再收集命中，否则拿到空列表
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+
+    findOpen = true; // 命中收集依赖 findOpen 为真（refreshFindCount 的门槛）
+    refreshFindCount();
+    for (let i = 0; i <= occurrence; i++) findNext(false);
+
+    // 收拾临时查找状态：保留滚动/选中位置，清掉高亮与计数
+    findOpen = false;
+    findIdx = -1;
+    clearFindHighlights();
+    clearCodeFind();
+    findText = prevText;
+    findCase = prevCase;
+    findIdx = prevIdx;
+  }
+
   // ---- 快捷键 ----
   function onKeydown(e: KeyboardEvent): void {
     // Esc：优先关闭菜单 / 查找栏
     if (e.key === "Escape") {
       if (diffView) {
         diffView = null;
+        e.preventDefault();
+      } else if (paletteOpen) {
+        paletteOpen = false;
+        e.preventDefault();
+      } else if (welcomeOpen) {
+        dismissWelcome();
         e.preventDefault();
       } else if (choiceState) {
         resolveChoice(null);
@@ -4136,6 +4303,13 @@
     } else if (key === "q") {
       e.preventDefault();
       void exitApp();
+    } else if (key === "k" && !e.shiftKey) {
+      // Ctrl+K：命令面板（批次四）；「链接」让位给 Ctrl+Shift+K
+      e.preventDefault();
+      openCommandPalette();
+    } else if (key === "k" && e.shiftKey) {
+      e.preventDefault();
+      applyFormat("link");
     } else if (key === "f" && !e.shiftKey) {
       e.preventDefault();
       void openFind();
@@ -4265,6 +4439,8 @@
         (s["davSyncIndex"] as
           | Record<string, { remote: string; size: number; modified: number }>
           | undefined) ?? {};
+      // 入门指南（批次四）：只在首次启动弹出；看过之后写 welcomeShown，帮助菜单仍可重开
+      const welcomeShown = (s["welcomeShown"] as boolean | undefined) ?? false;
 
       // 主题与语言已就绪：界面壳此刻可以亮出来了，编辑器与主题目录的加载
       // 不再挡住窗口出现（tauri.conf.json 里 visible:false，这里负责首次 show）。
@@ -4326,6 +4502,9 @@
       // 环境自检（用户要求）：pandoc 缺失时提示一次并可一键下载。
       // 放在最后，避免与上面的会话恢复 / 启动文件对话框抢焦点。
       await checkPandocOnStartup();
+
+      // 入门指南（批次四）：首次启动弹一次，与上面的对话框顺序出现，避免叠在一起
+      if (!welcomeShown) welcomeOpen = true;
     })();
 
     // 自动保存定时器：30 秒一轮，按标签落草稿并记录会话（内容没变时跳过写盘）
@@ -4724,11 +4903,18 @@
         {outline}
         {fileProps}
         codeFile={docKind === "code"}
+        {searchGroups}
+        {searchBusy}
+        {searchError}
+        searchFiles={searchFileCount}
+        {searchTruncated}
         onView={setSidebarView}
         onClose={toggleSidebar}
         onOpenFile={openFromTree}
         onPickRoot={pickTreeRoot}
         onGotoHeading={gotoHeading}
+        onSearch={(q, cs) => void runSearch(q, cs)}
+        onOpenHit={(hit) => void openSearchHit(hit)}
         t={t}
       />
     {/if}
@@ -4914,6 +5100,20 @@
       lines={diffView.lines}
       onClose={() => (diffView = null)}
     />
+  {/if}
+
+  <!-- 命令面板（批次四）：Ctrl+K 打开，回车执行菜单里的任意命令 -->
+  {#if paletteOpen}
+    <CommandPalette
+      {locale}
+      commands={paletteCommands}
+      onClose={() => (paletteOpen = false)}
+    />
+  {/if}
+
+  <!-- 入门指南（批次四）：首次启动弹出，帮助菜单可随时重开 -->
+  {#if welcomeOpen}
+    <WelcomeDialog {locale} appVersion={APP_VERSION} onClose={dismissWelcome} />
   {/if}
 
   <!-- 标签栏右键菜单：固定定位在鼠标处（放在最外层，不受 .tabs 横向滚动裁剪） -->

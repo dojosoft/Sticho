@@ -2,13 +2,14 @@
   /**
    * 左侧侧边栏（任务书阶段 11）
    *
-   * 三个视图互相切换：文件目录树 / 文档大纲 / 文件属性。
-   * 目录树按需加载（展开时才读目录），大纲与文件属性的数据由 App 侧提供，
+   * 四个视图互相切换：文件目录树 / 文档大纲 / 文件属性 / 跨文件搜索。
+   * 目录树按需加载（展开时才读目录），大纲、文件属性与搜索结果的数据由 App 侧提供，
    * 本组件只负责渲染与交互，避免把文件状态逻辑散落到两个文件里。
    */
   import { untrack } from "svelte";
   import { listDir, type DirEntry } from "../lib/tauri-api";
   import type { OutlineItem, SidebarView } from "../lib/sidebar";
+  import { highlightSegments, type SearchGroup, type SearchHit } from "../lib/fileSearch";
 
   type Props = {
     view: SidebarView;
@@ -19,16 +20,79 @@
     fileProps: [string, string][];
     /** 当前是代码文件：大纲模板不适用，提示语要换成「代码文件无大纲」 */
     codeFile?: boolean;
+    /** 跨文件搜索：按文件分组的命中、进行中/错误状态与统计（由应用层持有并传入） */
+    searchGroups?: SearchGroup[];
+    searchBusy?: boolean;
+    searchError?: string;
+    /** 实际扫描的文件数 */
+    searchFiles?: number;
+    /** 命中是否因达到上限被截断 */
+    searchTruncated?: boolean;
     onView: (view: SidebarView) => void;
     onClose: () => void;
     onOpenFile: (path: string) => void;
     onPickRoot: () => void;
     onGotoHeading: (index: number) => void;
+    /** 发起跨文件搜索（查询词 + 是否区分大小写） */
+    onSearch?: (query: string, caseSensitive: boolean) => void;
+    /** 点击某条命中：打开对应文件并定位 */
+    onOpenHit?: (hit: SearchHit) => void;
     /** 界面翻译函数（以中文原文为键）；未传入时原样返回，便于单独渲染 / 测试 */
     t?: (key: string, vars?: Record<string, string | number>) => string;
   };
 
-  let { view, root, currentPath, outline, fileProps, codeFile = false, onView, onClose, onOpenFile, onPickRoot, onGotoHeading, t = (s: string) => s }: Props = $props();
+  let {
+    view,
+    root,
+    currentPath,
+    outline,
+    fileProps,
+    codeFile = false,
+    searchGroups = [],
+    searchBusy = false,
+    searchError = "",
+    searchFiles = 0,
+    searchTruncated = false,
+    onView,
+    onClose,
+    onOpenFile,
+    onPickRoot,
+    onGotoHeading,
+    onSearch = () => {},
+    onOpenHit = () => {},
+    t = (s: string) => s,
+  }: Props = $props();
+
+  // ---- 跨文件搜索的本地输入状态（结果本身由应用层持有） ----
+  let query = $state("");
+  let caseSensitive = $state(false);
+  let debounce = 0;
+
+  /** 输入防抖：停顿后再发起遍历，避免逐字触发整目录扫描 */
+  function scheduleSearch(): void {
+    if (debounce !== 0) clearTimeout(debounce);
+    debounce = window.setTimeout(() => {
+      debounce = 0;
+      onSearch(query.trim(), caseSensitive);
+    }, 250);
+  }
+
+  /** 立即搜索（回车、切换大小写时） */
+  function runSearchNow(): void {
+    if (debounce !== 0) {
+      clearTimeout(debounce);
+      debounce = 0;
+    }
+    onSearch(query.trim(), caseSensitive);
+  }
+
+  /** 已展示的命中总数（用于统计行） */
+  const totalHits = $derived(searchGroups.reduce((n, g) => n + g.hits.length, 0));
+
+  /** 路径末段文件名（结果分组标题用） */
+  function baseName(path: string): string {
+    return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+  }
 
   // ---- 目录树状态：已加载的子项缓存 + 展开集合（均重新赋值以触发响应） ----
   let cache = $state<Record<string, DirEntry[]>>({});
@@ -122,6 +186,7 @@
       <button class:active={view === "tree"} onclick={() => onView("tree")} title={t("按文件夹浏览文件")}>{t("文件")}</button>
       <button class:active={view === "outline"} onclick={() => onView("outline")} title={t("按标题层级跳转")}>{t("大纲")}</button>
       <button class:active={view === "props"} onclick={() => onView("props")} title={t("当前文件属性")}>{t("属性")}</button>
+      <button class:active={view === "search"} onclick={() => onView("search")} title={t("在当前文件夹中全文搜索")}>{t("搜索")}</button>
     </div>
     <button class="close" onclick={onClose} title={t("关闭侧边栏（F9）")}>✕</button>
   </div>
@@ -166,13 +231,83 @@
           </button>
         {/each}
       {/if}
-    {:else}
+    {:else if view === "props"}
       <dl class="props">
         {#each fileProps as [label, value] (label)}
           <dt>{label}</dt>
           <dd title={value}>{value}</dd>
         {/each}
       </dl>
+    {:else}
+      <!-- 跨文件搜索：输入 + 结果（按文件分组，点击命中打开并定位） -->
+      {#if root === null}
+        <div class="hint">{t("未选择文件夹。请先切到「文件」标签，点「选择…」指定一个目录，再回到这里搜索。")}</div>
+      {:else}
+        <div class="search-head">
+          <input
+            class="search-input"
+            type="search"
+            placeholder={t("在当前文件夹中搜索…")}
+            value={query}
+            oninput={(e) => {
+              query = e.currentTarget.value;
+              scheduleSearch();
+            }}
+            onkeydown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                runSearchNow();
+              }
+            }}
+          />
+          <label class="search-case" title={t("区分大小写")}>
+            <input
+              type="checkbox"
+              checked={caseSensitive}
+              onchange={() => {
+                caseSensitive = !caseSensitive;
+                runSearchNow();
+              }}
+            />
+            Aa
+          </label>
+        </div>
+
+        {#if searchError}
+          <div class="hint error">{searchError}</div>
+        {:else if searchBusy}
+          <div class="hint">{t("搜索中…")}</div>
+        {:else if query.trim() === ""}
+          <div class="hint">{t("输入关键词开始搜索（字面量匹配，可切换区分大小写）。")}</div>
+        {:else if totalHits === 0}
+          <div class="hint">{t("没有找到匹配内容")}</div>
+        {:else}
+          <div class="hint">
+            {t("在 {files} 个文件中找到 {n} 处", { files: searchFiles, n: totalHits })}{#if searchTruncated}{t("（结果已截断，请缩小范围）")}{/if}
+          </div>
+          {#each searchGroups as group (group.path)}
+            <div class="sgroup">
+              <div class="sgroup-head" title={group.path}>
+                <span class="sgroup-name">{baseName(group.path)}</span>
+                <span class="sgroup-path">{group.path}</span>
+              </div>
+              {#each group.hits as hit (hit.line + ":" + hit.column)}
+                <button class="shit" onclick={() => onOpenHit(hit)} title={`${group.path}:${hit.line}`}>
+                  <span class="shit-ln">{hit.line}</span>
+                  <span class="shit-text">
+                    {#each highlightSegments(hit.text, query, caseSensitive) as seg, si (si)}
+                      {#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}
+                    {/each}
+                  </span>
+                </button>
+              {/each}
+              {#if group.truncated}
+                <div class="hint">{t("（该文件命中过多，仅显示前若干条）")}</div>
+              {/if}
+            </div>
+          {/each}
+        {/if}
+      {/if}
     {/if}
   </div>
 </aside>
@@ -370,6 +505,104 @@
   .props dd {
     margin: 0.1rem 0 0;
     word-break: break-all;
+  }
+
+  /* ---- 跨文件搜索 ---- */
+  .search-head {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0 0.5rem 0.35rem;
+    border-bottom: 1px solid var(--border, #ddd);
+    margin-bottom: 0.3rem;
+  }
+
+  .search-input {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.35rem;
+    color: inherit;
+    background: var(--bg, #fff);
+    border: 1px solid var(--border, #ddd);
+    border-radius: 5px;
+    outline: none;
+  }
+
+  .search-case {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    font-size: 0.7rem;
+    flex-shrink: 0;
+    opacity: 0.8;
+    cursor: pointer;
+  }
+
+  .sgroup {
+    margin-bottom: 0.4rem;
+  }
+
+  .sgroup-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .sgroup-name {
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .sgroup-path {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.6875rem;
+    opacity: 0.5;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .shit {
+    display: flex;
+    gap: 0.4rem;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    font-size: 0.75rem;
+    padding: 0.15rem 0.5rem;
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .shit:hover {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+  }
+
+  .shit-ln {
+    flex: 0 0 2.2rem;
+    text-align: right;
+    opacity: 0.5;
+  }
+
+  .shit-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .shit-text mark {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    color: inherit;
+    border-radius: 2px;
   }
 
   .hint {

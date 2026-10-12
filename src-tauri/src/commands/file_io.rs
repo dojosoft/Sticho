@@ -5,7 +5,7 @@
 //! 2. 统一做大文件、占用、磁盘满等边界情况的错误处理（任务书 6.2）
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use encoding_rs::{Encoding, BIG5, EUC_KR, GB18030, SHIFT_JIS, UTF_16BE, UTF_16LE, UTF_8, WINDOWS_1252};
@@ -445,6 +445,213 @@ pub async fn read_image_base64(path: String) -> Result<String, String> {
     .map_err(|e| format!("任务调度失败：{e}"))?
 }
 
+/// 跨文件搜索的命中条目（阶段 12：侧边栏「搜索」视图）。
+///
+/// path 为文件绝对路径，line 为 1 起行号，column 为行内 0 起字符下标，text 为命中行文本。
+#[derive(serde::Serialize, Clone)]
+pub struct SearchHit {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub text: String,
+}
+
+/// 跨文件搜索的整体结果。
+#[derive(serde::Serialize, Clone)]
+pub struct SearchResult {
+    pub hits: Vec<SearchHit>,
+    /// 实际扫描的文件数（已通过扩展名白名单的文件，含因过大/二进制被跳过的）
+    pub files: u32,
+    /// 命中数达到上限提前结束（结果可能不完整）
+    pub truncated: bool,
+}
+
+/// 搜索时整棵跳过的目录名（依赖包 / 版本库 / 构建产物，命中会淹没真实结果）。
+const SEARCH_SKIP_DIRS: &[&str] = &["node_modules", ".git", "target", "dist", ".svn"];
+
+/// 搜索时纳入的文本文件扩展名白名单（小写，不含点）。
+const SEARCH_EXTS: &[&str] = &[
+    "md", "markdown", "txt", "html", "htm", "css", "scss", "less", "js", "mjs", "cjs", "ts", "tsx",
+    "jsx", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml", "csv", "log", "py", "rs",
+    "go", "java", "c", "cpp", "h", "hpp", "sh", "bat", "ps1", "sql", "vue", "svelte", "tex", "rst",
+    "adoc",
+];
+
+/// 单次搜索最多扫描的文件数（防止在超大仓库上长时间占用后台线程）。
+const MAX_SEARCH_FILES: usize = 5000;
+/// 单次搜索最多返回的命中数。
+const MAX_SEARCH_HITS: usize = 500;
+/// 命中行文本的最大字符数，超出则按窗口截取。
+const SEARCH_LINE_MAX: usize = 600;
+/// 行内过长时，命中位置之前额外保留的字符数（让上下文可见）。
+const SEARCH_LINE_LEAD: usize = 100;
+
+/// 跨文件全文搜索（字面量匹配，无正则依赖）。
+///
+/// 遍历 root 下的文本文件，返回所有含 query 的行；目录遍历与匹配都在后台线程完成，
+/// 避免大目录卡住主线程。`max_hits` 为 0 时使用 MAX_SEARCH_HITS。
+#[tauri::command]
+pub async fn search_files(
+    root: String,
+    query: String,
+    case_sensitive: bool,
+    max_hits: u32,
+) -> Result<SearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        search_files_blocking(&root, &query, case_sensitive, max_hits)
+    })
+    .await
+    .map_err(|e| format!("任务调度失败：{e}"))?
+}
+
+fn search_files_blocking(
+    root: &str,
+    query: &str,
+    case_sensitive: bool,
+    max_hits: u32,
+) -> Result<SearchResult, String> {
+    // 空查询直接返回空结果（前端此时不应发起请求，这里兜底）
+    if query.is_empty() {
+        return Ok(SearchResult { hits: Vec::new(), files: 0, truncated: false });
+    }
+
+    // 校验根目录，错误文案与 list_dir 对齐
+    let meta = match fs::metadata(root) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("目录不存在：{root}"));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(format!("无权限访问目录：{root}"));
+        }
+        Err(e) => return Err(format!("无法访问目录：{e}")),
+    };
+    if !meta.is_dir() {
+        return Err(format!("目录不存在：{root}"));
+    }
+
+    let limit = if max_hits == 0 { MAX_SEARCH_HITS } else { max_hits as usize };
+    // 不区分大小写时先折叠一次查询词，避免每行重复折叠
+    let needle = if case_sensitive { query.to_string() } else { query.to_lowercase() };
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut files: u32 = 0;
+    let mut truncated = false;
+
+    // 显式栈做深度优先遍历，避免对深层目录递归调用
+    let mut stack: Vec<PathBuf> = vec![PathBuf::from(root)];
+    'outer: while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue, // 个别子目录无权限时跳过，不中断整体搜索
+        };
+
+        for entry in entries.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+
+            if file_type.is_dir() {
+                // 跳过集合内的目录名命中则整棵跳过
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| SEARCH_SKIP_DIRS.contains(&n))
+                {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            // 文件数达到上限后停止扫描
+            if files as usize >= MAX_SEARCH_FILES {
+                break 'outer;
+            }
+
+            // 扩展名白名单：取末尾点后的小写扩展名
+            let ext = match path.extension().and_then(|e| e.to_str()) {
+                Some(e) => e.to_ascii_lowercase(),
+                None => continue,
+            };
+            if !SEARCH_EXTS.contains(&ext.as_str()) {
+                continue;
+            }
+
+            files += 1;
+
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.len() > MAX_FILE_SIZE {
+                continue;
+            }
+
+            let bytes = match fs::read(&path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            // 前 8000 字节含 NUL 视为二进制，跳过
+            if bytes[..bytes.len().min(8000)].contains(&0) {
+                continue;
+            }
+
+            let (text, _) = decode_auto(&bytes);
+            let hit_path = path.to_string_lossy().into_owned();
+
+            // 按 '\n' 切行，去掉行尾 '\r'，行号 1 起
+            for (idx, raw) in text.split('\n').enumerate() {
+                let line = raw.strip_suffix('\r').unwrap_or(raw);
+
+                let found = if case_sensitive {
+                    line.find(&needle)
+                } else {
+                    line.to_lowercase().find(&needle)
+                };
+                let byte_pos = match found {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                // 小写折叠可能改变字节长度，byte_pos 未必落在字符边界上，
+                // 故用 char_indices 安全地数出匹配前的字符数（等价于前缀的 chars().count()）
+                let mut column = line.char_indices().take_while(|(i, _)| *i < byte_pos).count();
+
+                let mut text = line.to_string();
+                // 整行过长时从命中前方截取窗口，保证返回的 text 内仍含查询词
+                if line.chars().count() > SEARCH_LINE_MAX {
+                    let start = column.saturating_sub(SEARCH_LINE_LEAD);
+                    let window: String = line.chars().skip(start).take(SEARCH_LINE_MAX).collect();
+                    text = format!("…{window}");
+                    // column 调整为相对该窗口的字符下标（"…" 为展示前缀，不计数）
+                    column -= start;
+                }
+
+                hits.push(SearchHit {
+                    path: hit_path.clone(),
+                    line: (idx + 1) as u32,
+                    column: column as u32,
+                    text,
+                });
+
+                // 命中数达到上限立即停止后续扫描
+                if hits.len() >= limit {
+                    truncated = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    Ok(SearchResult { hits, files, truncated })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +696,116 @@ mod tests {
 
         let (text, id) = decode_auto(b"plain ascii");
         assert_eq!((text.as_str(), id), ("plain ascii", "utf-8"));
+    }
+
+    /// 临时测试目录：进程内唯一命名，Drop 时自动清理（并行运行互不冲突）。
+    struct 临时目录(std::path::PathBuf);
+
+    impl 临时目录 {
+        fn new(名: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static 计数: AtomicU32 = AtomicU32::new(0);
+            let 序号 = 计数.fetch_add(1, Ordering::Relaxed);
+            let 时间 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let 路径 = std::env::temp_dir().join(format!(
+                "sticho_search_{名}_{}_{}_{}",
+                std::process::id(),
+                序号,
+                时间
+            ));
+            fs::create_dir_all(&路径).expect("创建临时目录");
+            Self(路径)
+        }
+
+        fn str(&self) -> String {
+            self.0.to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for 临时目录 {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn 搜索_基本命中定位行列与文本() {
+        let dir = 临时目录::new("basic");
+        fs::write(dir.0.join("a.md"), "hello world\nfoo bar").unwrap();
+
+        let r = search_files_blocking(&dir.str(), "world", true, 0).expect("搜索成功");
+        assert_eq!(r.files, 1);
+        assert!(!r.truncated);
+        assert_eq!(r.hits.len(), 1);
+
+        let h = &r.hits[0];
+        assert!(h.path.ends_with("a.md"));
+        assert_eq!(h.line, 1);
+        assert_eq!(h.column, 6); // "hello " 共 6 个字符
+        assert_eq!(h.text, "hello world");
+    }
+
+    #[test]
+    fn 搜索_跳过集合内的目录() {
+        let dir = 临时目录::new("skip");
+        fs::write(dir.0.join("keep.md"), "needle").unwrap();
+        let skip = dir.0.join("node_modules");
+        fs::create_dir_all(&skip).unwrap();
+        fs::write(skip.join("dep.md"), "needle").unwrap();
+
+        let r = search_files_blocking(&dir.str(), "needle", true, 0).expect("搜索成功");
+        assert_eq!(r.hits.len(), 1);
+        assert!(r.hits[0].path.ends_with("keep.md"));
+        assert!(r.hits.iter().all(|h| !h.path.contains("node_modules")));
+    }
+
+    #[test]
+    fn 搜索_只扫描白名单扩展名() {
+        let dir = 临时目录::new("ext");
+        fs::write(dir.0.join("a.md"), "needle").unwrap();
+        fs::write(dir.0.join("b.png"), "needle").unwrap();
+        fs::write(dir.0.join("c.bin"), "needle").unwrap();
+
+        let r = search_files_blocking(&dir.str(), "needle", true, 0).expect("搜索成功");
+        assert_eq!(r.files, 1); // 仅 a.md 进入白名单被扫描
+        assert_eq!(r.hits.len(), 1);
+        assert!(r.hits[0].path.ends_with("a.md"));
+    }
+
+    #[test]
+    fn 搜索_大小写敏感开关() {
+        let dir = 临时目录::new("case");
+        fs::write(dir.0.join("a.md"), "Hello World").unwrap();
+
+        let 敏感 = search_files_blocking(&dir.str(), "hello", true, 0).unwrap();
+        assert_eq!(敏感.hits.len(), 0, "区分大小写时不应命中小写查询");
+
+        let 不敏感 = search_files_blocking(&dir.str(), "hello", false, 0).unwrap();
+        assert_eq!(不敏感.hits.len(), 1);
+        assert_eq!(不敏感.hits[0].column, 0);
+    }
+
+    #[test]
+    fn 搜索_空查询返回空结果() {
+        let dir = 临时目录::new("empty");
+        fs::write(dir.0.join("a.md"), "anything").unwrap();
+
+        let r = search_files_blocking(&dir.str(), "", true, 0).unwrap();
+        assert!(r.hits.is_empty());
+        assert_eq!(r.files, 0);
+        assert!(!r.truncated);
+    }
+
+    #[test]
+    fn 搜索_命中上限触发截断() {
+        let dir = 临时目录::new("limit");
+        fs::write(dir.0.join("a.md"), "hit\nhit\nhit").unwrap();
+
+        let r = search_files_blocking(&dir.str(), "hit", true, 2).unwrap();
+        assert_eq!(r.hits.len(), 2);
+        assert!(r.truncated);
     }
 }

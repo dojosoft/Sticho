@@ -58,6 +58,7 @@ pub fn run() {
             commands::file_io::read_image_base64,
             commands::file_io::get_file_info,
             commands::file_io::list_dir,
+            commands::file_io::search_files,
             commands::file_io::get_startup_file,
             commands::asset::save_image_asset,
             commands::config::get_settings_path,
