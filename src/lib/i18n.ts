@@ -425,8 +425,9 @@ export const EN: Record<string, string> = {
   语法高亮语言: "Syntax Highlighting Language",
   "仅在 Markdown 模式下可用：显示或隐藏正文上方的排版工具栏。":
     "Available in Markdown mode only: show or hide the formatting toolbar above the text.",
-  "仅在 Markdown 与纯文本模式下可用：在正文左侧显示行号。":
-    "Available in Markdown and plain-text modes: show line numbers in the left gutter.",
+  "在正文左侧显示行号。": "Show line numbers in the left gutter.",
+  "当前模式不支持行号显示（仅纯文本、Markdown 分屏预览与 HTML 源码视图支持）。":
+    "Line numbers are unavailable in this mode (supported in plain text, Markdown split preview, and HTML source view only).",
   "仅在纯文本模式下可用：指定代码着色的语言，「自动」按文件扩展名判断。":
     "Available in plain-text mode only: choose the language used for syntax highlighting; “Auto” picks it from the file extension.",
   "自动（按扩展名）": "Auto (by Extension)",

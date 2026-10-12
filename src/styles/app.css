@@ -241,6 +241,18 @@ body {
 }
 
 /**
+ * SV 分屏预览下开启行号：`.vditor-sv` 自带的内边距只有 10px，行号栏（44px）塞不进去。
+ *
+ * 行号栏由 editor.ts 自绘并挂在滚动容器的父元素下——SV 的父元素正是 `.vditor-content`
+ * （IR / 所见即所得另有 `.vditor-ir` / `.vditor-wysiwyg` 这一层，走上面那套让车道规则），
+ * 故这里按 `.vditor-content.md-studio-linenumbers` 精确匹配 SV，把左侧内边距让出一条车道。
+ * Vditor 的 setPadding 只给 IR / 所见即所得写内联 padding，不会覆盖这条规则。
+ */
+.vditor-content.md-studio-linenumbers > .vditor-sv {
+  padding-left: 44px;
+}
+
+/**
  * 代码块语言下拉面板（配套 editor.ts 的 openLangPanel）。
  *
  * 面板由 editor.ts 直接创建并挂到 body 上，拿不到 App.svelte 里 scoped 的 .menu-panel

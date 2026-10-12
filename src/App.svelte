@@ -193,6 +193,9 @@
   let showLineNumbers = $state(true); // 是否显示正文行号（默认显示）
   let typewriterOn = $state(false); // 打字机模式：光标行始终停在视口垂直中线
   let paragraphFocus = $state(false); // 段落聚焦：只亮当前编辑块，其余内容压暗
+  // 大文档（Markdown）分节阅读通路是否激活：那套正文由整篇源码分节拼出，等同纯源码视图，
+  // 仍给行号（见 lineNumbersSupported）。
+  let largeReading = $state(false);
 
   // ---- 阅读排版（字体 / 字号 / 行距 / 文字色 / 护眼底色）----
   // 只作用于 Markdown / 纯文本这类「不含自带样式」的文档；HTML 文档走沙箱 iframe
@@ -302,6 +305,58 @@
   const previewEditable = $derived(
     docKind === "html" && htmlView === "preview" && !browseMode && !htmlScripts,
   );
+
+  // ---- HTML 源码视图的行号（批次 E）----
+  // 源码视图用原生 textarea，行号由一层透明的「镜像叠层」绘制：叠层与 textarea 同字体、
+  // 同宽度并逐行隐藏原文，软换行位置便完全一致，行号才能落在「逻辑行」上（压缩型 HTML
+  // 的超长行会折成多行，按固定行高堆行号必然错位）。
+  let htmlSourceWrap = $state<HTMLDivElement | null>(null);
+  let htmlGutterEl = $state<HTMLDivElement | null>(null);
+
+  /**
+   * 「显示行号」在当前视图是否可用（批次 E）。
+   *
+   * 只在「正文本身就是源码行」的视图里给行号：纯文本（含语法高亮）、Markdown 分屏预览
+   * （SV）、大文档分节阅读态、HTML 源码视图。Markdown 的实时渲染（IR）与所见即所得
+   * （WYSIWYG）带隐藏排版字段，行号与源码行对不上、也没有实际意义；HTML 预览是沙箱
+   * iframe，父窗口量不到里面的内容，同样给不了。
+   */
+  const lineNumbersSupported = $derived(
+    docKind === "code" ||
+      (docKind === "markdown" && (editorMode === "sv" || largeReading)) ||
+      (docKind === "html" && htmlView === "source"),
+  );
+
+  /** HTML 源码视图的行号叠层是否应当出现（跟随总开关与当前视图） */
+  const htmlGutterOn = $derived(
+    docKind === "html" && htmlView === "source" && showLineNumbers && lineNumbersSupported,
+  );
+
+  /** 叠层逐行渲染用的源码行（仅在叠层可见时才拆分，避免编辑时白白 split 大文本） */
+  const htmlSourceLines = $derived(htmlGutterOn ? htmlSource.split(/\r\n|\r|\n/) : []);
+
+  /**
+   * 量出 textarea 的正文内容宽度喂给叠层。
+   *
+   * 叠层要按同一宽度排版才能与 textarea 同步换行；宽度随窗口、侧栏开合、分栏而变化，
+   * 故交给 ResizeObserver 跟住（见下方的 $effect）。textarea 的 clientWidth 已排除
+   * 滚动条，减掉左右内边距即内容宽。
+   */
+  function syncHtmlGutterMetrics(): void {
+    const ta = sourceArea;
+    const wrap = htmlSourceWrap;
+    if (!ta || !wrap) return;
+    const cs = getComputedStyle(ta);
+    const padLeft = parseFloat(cs.paddingLeft) || 0;
+    const padRight = parseFloat(cs.paddingRight) || 0;
+    wrap.style.setProperty("--html-ln-pad", `${padLeft}px`);
+    wrap.style.setProperty("--html-ln-w", `${Math.max(0, ta.clientWidth - padLeft - padRight)}px`);
+  }
+
+  /** textarea 滚动时把叠层拖到同一位置（行号只随纵向滚动走） */
+  function onHtmlSourceScroll(): void {
+    if (htmlGutterEl && sourceArea) htmlGutterEl.scrollTop = sourceArea.scrollTop;
+  }
 
   // ---- 代码文件模式（打开 .py / .bat 等）：CodeMirror 覆盖层（见 lib/codeEditor.ts）----
   // 与 HTML 覆盖层同一范式：覆盖而不隐藏 Vditor，避免其布局失效。
@@ -3845,23 +3900,36 @@
     if (docKind !== "code") unmountCodeEditor();
   });
 
-  // 行号只服务 Markdown/TXT 编辑：HTML 文档模式是覆盖在编辑器之上的预览层，
-  // 行号既看不见也无处对齐，故跟随文档类型自动开关（切回 Markdown/TXT 时按设置恢复）。
+  // 行号只服务「正文即源码」的视图（见 lineNumbersSupported）：纯文本走 CodeMirror 自带的
+  // lineNumbers()；Markdown 只在分屏预览（SV）与大文档分节阅读态由 Vditor 那套自绘行号栏承担
+  // （它按 pre.vditor-reset 的块/行单元编号，对 CM 的 DOM 不适用）；超大代码文件的分节纯文本
+  // 没有 CM，行号也归自绘行号栏。HTML 源码视图另有镜像叠层（见 htmlGutterOn）。
   // 打字机模式与段落聚焦在 Markdown / 纯文本两种模式下都支持（HTML 模式下光标在 iframe 里，
-  // Vditor 正文既不被编辑也量不到光标）：Markdown 走 Vditor 那套，纯文本走 CodeMirror 那套。
-  // 代码文件的行号由 CodeMirror 自带的 lineNumbers() 承担——Vditor 那套只认
-  // pre.vditor-reset 结构，对 CM 的 DOM 不适用。
+  // Vditor 正文既不被编辑也量不到光标）。
   $effect(() => {
     const md = docKind === "markdown";
     const code = docKind === "code";
-    // 超大代码文件的分节纯文本没有 CM，行号仍由 Vditor 那套行号栏承担（它按 `pre` 行单元编号）
-    const gutter = md || codeLargeText !== null;
+    const gutter = (md && (editorMode === "sv" || largeReading)) || codeLargeText !== null;
     setLineNumbersVisible(showLineNumbers && gutter);
     setTypewriterMode(typewriterOn && md);
     setParagraphFocusVisible(paragraphFocus && md);
     setCodeTypewriter(typewriterOn && code);
     setCodeParagraphFocus(paragraphFocus && code);
-    setCodeLineNumbers(showLineNumbers); // 未挂载时是 no-op
+    setCodeLineNumbers(showLineNumbers && code); // 未挂载时是 no-op
+  });
+
+  // HTML 源码行号的叠层：叠层可见时量一次宽度并挂上 ResizeObserver（宽度随窗口 / 侧栏变化），
+  // 内容变化后把叠层滚到与 textarea 相同的位置（行高变了，仅靠 scroll 事件补不齐）。
+  $effect(() => {
+    if (!htmlGutterOn) return;
+    void htmlSourceLines; // 依赖内容：每次重排后重新对齐滚动位置
+    const ta = sourceArea;
+    if (!ta) return;
+    syncHtmlGutterMetrics();
+    const ro = new ResizeObserver(() => syncHtmlGutterMetrics());
+    ro.observe(ta);
+    onHtmlSourceScroll();
+    return () => ro.disconnect();
   });
 
   // 阅读排版：同样只服务 Markdown/TXT。HTML 文档显式传空设置（等价于移除样式），
@@ -4322,10 +4390,12 @@
         },
         {
           label: t("显示行号"),
-          checked: () => showLineNumbers && docKind !== "html",
-          disabled: () => docKind === "html",
+          checked: () => showLineNumbers && lineNumbersSupported,
+          disabled: () => !lineNumbersSupported,
           action: toggleLineNumbers,
-          tip: t("仅在 Markdown 与纯文本模式下可用：在正文左侧显示行号。"),
+          tip: lineNumbersSupported
+            ? t("在正文左侧显示行号。")
+            : t("当前模式不支持行号显示（仅纯文本、Markdown 分屏预览与 HTML 源码视图支持）。"),
         },
         {
           label: t("语法高亮语言"),
@@ -4865,8 +4935,9 @@
       if (enabledSidebarViews.length === 0) sidebarVisible = false;
       // 上次停留的面板被关掉时，落回第一个仍开启的面板
       else if (!sidebarPanels[sidebarView]) sidebarView = enabledSidebarViews[0]!;
+      // 行号的开合统一由下方按「当前视图是否支持」的门控 $effect 落地，这里只取值，
+      // 否则会在 IR / 所见即所得这类不支持行号的视图里把它硬打开
       showLineNumbers = (s["lineNumbers"] as boolean | undefined) ?? true;
-      setLineNumbersVisible(showLineNumbers);
       typewriterOn = (s["typewriterMode"] as boolean | undefined) ?? false;
       paragraphFocus = (s["paragraphFocus"] as boolean | undefined) ?? false;
       setTypewriterMode(typewriterOn);
@@ -4921,6 +4992,7 @@
       // 大文档走分节渲染通路时（editor.ts 自动判定），把应用层拉回阅读模式：
       // 那条通路只有只读的分节正文，界面必须如实反映「现在是阅读态」。
       onLargeModeChange((active) => {
+        largeReading = active; // 行号适用性判定要用（见 lineNumbersSupported）
         if (active) resetToBrowseMode();
       });
       // 大文档的正文随滚动挂载 / 卸载分节，查找高亮的 Range 会随之失效，重画一次
@@ -5399,13 +5471,32 @@
               ></iframe>
             {/key}
           {:else}
-            <textarea
-              bind:this={sourceArea}
-              spellcheck="false"
-              readonly={browseMode}
-              value={htmlSource}
-              oninput={(e) => onHtmlInput(e.currentTarget.value)}
-            ></textarea>
+            <!-- HTML 源码视图：原生 textarea（大文件不卡），行号交给一层透明镜像叠层绘制 -->
+            <div
+              class={"html-source" + (htmlGutterOn ? " with-linenumbers" : "")}
+              bind:this={htmlSourceWrap}
+            >
+              <textarea
+                bind:this={sourceArea}
+                spellcheck="false"
+                readonly={browseMode}
+                value={htmlSource}
+                oninput={(e) => onHtmlInput(e.currentTarget.value)}
+                onscroll={onHtmlSourceScroll}
+              ></textarea>
+              {#if htmlGutterOn}
+                <!-- 镜像叠层：逐行隐藏原文（决定软换行后的行高），行号绝对定位到左侧车道。
+                     与编辑器自绘行号栏同理，行号只随纵向滚动同步，不参与交互。 -->
+                <div class="html-linenumbers" bind:this={htmlGutterEl} aria-hidden="true">
+                  {#each htmlSourceLines as line, i (i)}
+                    <div class="html-linenumber">
+                      <span class="num">{i + 1}</span>
+                      <span class="ghost">{line === "" ? "\u200b" : line}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
           {/if}
         </div>
       {/if}
@@ -6275,6 +6366,59 @@
     overflow: auto;
     user-select: text; /* 全局禁选了，输入区要放开 */
     tab-size: 2;
+  }
+
+  /* ---- HTML 源码视图的行号叠层（批次 E）----
+     叠层与 textarea 同字体 / 同内容宽（宽度由 JS 量出写进 --html-ln-w），逐行镜像原文但隐藏，
+     于是软换行位置与 textarea 完全一致；行号绝对定位到左侧车道（--html-ln-pad 那一段空位）。 */
+  .html-source {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+  }
+
+  /* 开启行号时给 textarea 让出左侧车道，叠层按同一内边距排版才能对齐 */
+  .html-source.with-linenumbers textarea {
+    padding-left: 40px;
+  }
+
+  .html-linenumbers {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: calc(var(--html-ln-pad, 0px) + var(--html-ln-w, 0px));
+    box-sizing: border-box;
+    padding: 12px 0 0 var(--html-ln-pad, 0px);
+    overflow: hidden; /* 内容比 textarea 高，靠 scrollTop 跟着 textarea 滚 */
+    pointer-events: none; /* 只负责显示：点击 / 选中都交给下层 textarea */
+    user-select: none;
+    font-family: Consolas, "Courier New", var(--font-sans);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--fg);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 2;
+  }
+
+  /* 每个逻辑行一行：ghost 决定该行折行后的高度，num 落在这段高度左上角 */
+  .html-linenumber {
+    position: relative;
+  }
+
+  .html-linenumber .ghost {
+    visibility: hidden;
+  }
+
+  .html-linenumber .num {
+    position: absolute;
+    top: 0;
+    left: calc(-1 * var(--html-ln-pad, 0px));
+    width: calc(var(--html-ln-pad, 0px) - 6px);
+    text-align: right;
+    opacity: 0.35;
   }
 
   /* ---- 代码文件模式（打开 .py / .bat 等）：CodeMirror 覆盖层 ---- */

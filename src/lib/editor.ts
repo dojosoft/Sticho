@@ -1846,9 +1846,16 @@ const LINE_UNIT_SELECTOR =
 function collectLineUnits(scroller: HTMLElement, band: { top: number; bottom: number }): LineUnit[] {
   const units: LineUnit[] = [];
   let group = 0;
-  for (const el of Array.from(scroller.querySelectorAll<HTMLElement>(LINE_UNIT_SELECTOR))) {
+  // SV 分屏预览：正文是 `pre.vditor-sv`，源码逐行只用换行 span 分隔，一个块级行单元都没有，
+  // 按行级选择器去查会颗粒无收。这里把整个元素当成「一个多行单元」，交给下面的多行分支
+  // （它本就负责按换行逐行量盒——代码块、被软换行折过的段落走的就是它）。
+  const svRoot = scroller.classList.contains("vditor-sv") ? scroller : null;
+  const candidates = svRoot
+    ? [svRoot]
+    : Array.from(scroller.querySelectorAll<HTMLElement>(LINE_UNIT_SELECTOR));
+  for (const el of candidates) {
     // 嵌套的行级元素（引用里的段落、列表项里的段落）只认最内层那个，否则同一源码行算两遍
-    if (el.querySelector(LINE_UNIT_SELECTOR)) continue;
+    if (!svRoot && el.querySelector(LINE_UNIT_SELECTOR)) continue;
     const bounds = el.getBoundingClientRect();
     // 被折叠的行首标记、隐藏的源码行在渲染层里不占位，也就不该有行号
     if (bounds.width <= 0 || bounds.height <= 0) continue;
