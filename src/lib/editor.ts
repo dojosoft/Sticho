@@ -722,6 +722,15 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
   lineNumberSource = initialValue;
 
   // readyPromise 已在上方同步赋值：await 期间 whenEditorReady() 拿到的也是这份挂起的承诺
+  //
+  // 下面这些功能改由应用层统一绑定（对齐 Typora 的快捷键），因此关掉 Vditor 自带的组合键。
+  // 原因：Vditor 的默认工具栏项自带 hotkey，而它的 mergeToolbar 会把默认项合并进我们的自定义项
+  // （Object.assign({}, 默认项, 自定义项)），于是这些 hotkey 依然生效；Vditor 的按键监听挂在编辑器
+  // 元素上，会先于挂在 window 的应用层监听触发，造成同一次按键双触发。
+  // 关掉的是：⌘K 链接 / ⌘O 有序列表 / ⌘H 标题 / ⌘E 表情 / ⌘U 代码块 / ⇧⌘H 分隔线 / ⇧⌘I 减缩进。
+  const vditorHotkeysOff = new Set([
+    "headings", "ordered-list", "link", "emoji", "line", "outdent", "code",
+  ]);
   const Vditor = await ensureVditor();
 
   vditor = new Vditor(el, {
@@ -798,7 +807,11 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
       "undo", "redo", "|",
       "edit-mode", "fullscreen",
     ].map((item) =>
-      typeof item === "string" ? (item === "|" ? item : { name: item, tipPosition: "se" }) : item,
+      typeof item === "string"
+        ? item === "|"
+          ? item
+          : { name: item, tipPosition: "se", ...(vditorHotkeysOff.has(item) ? { hotkey: "" } : {}) }
+        : item,
     ),
 
     // 异步渲染完成（此时内容、工具栏、Lute 实例均已就绪），唤醒等待方
@@ -1441,6 +1454,22 @@ export function applyHeading(level: number): void {
   if (blockedByReadonly()) return;
   vditor?.focus();
   toolbarItem("headings")?.querySelector<HTMLElement>(`button[data-tag="h${level}"]`)?.click();
+}
+
+/**
+ * 把当前行恢复为正文（清除标题，对齐 Typora 的 Ctrl+0）。
+ *
+ * Vditor 的标题下拉面板只有 H1~H6，没有「正文」项；但它的标题按钮在光标位于标题行时会被
+ * 标记为 vditor-menu--current，此时点它即取消标题（见 Vditor 的 Headings 点击处理）。
+ * 故这里只在确实处于标题行时派发一次点击，非标题行不发任何请求。
+ */
+export function clearHeading(): void {
+  if (blockedByReadonly()) return;
+  vditor?.focus();
+  const btn = toolbarItem("headings")?.children[0] as HTMLElement | undefined;
+  if (btn?.classList.contains("vditor-menu--current")) {
+    btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  }
 }
 
 /**

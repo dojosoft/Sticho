@@ -24,8 +24,8 @@
   /** 要点清单（纯展示数据，随组件自带）：短标题 + 说明各占一行 */
   const HIGHLIGHTS: { title: string; desc: string }[] = [
     { title: "新建或打开文档", desc: "工具栏或「文件」菜单；也支持把文件直接拖进窗口。" },
-    { title: "快捷排版", desc: "Ctrl+B 加粗、Ctrl+I 斜体、Ctrl+Shift+K 链接、Ctrl+1~6 标题。" },
-    { title: "命令面板", desc: "按 Ctrl+K 搜索并执行菜单里的任意命令。" },
+    { title: "快捷排版", desc: "Ctrl+B 加粗、Ctrl+I 斜体、Ctrl+K 链接、Ctrl+Shift+K 代码块、Ctrl+1~6 标题。" },
+    { title: "命令面板", desc: "按 Ctrl+P 搜索并执行菜单里的任意命令。" },
     { title: "跨文件搜索", desc: "侧边栏「搜索」标签可在当前文件夹内全文查找。" },
     { title: "导出与云同步", desc: "可导出 Word / PDF / HTML，也支持 WebDAV 云端多版本。" },
   ];

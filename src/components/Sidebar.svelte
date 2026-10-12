@@ -196,7 +196,7 @@
       <button class:active={view === "props"} onclick={() => onView("props")} title={t("当前文件属性")}>{t("属性")}</button>
       <button class:active={view === "search"} onclick={() => onView("search")} title={t("在当前文件夹中全文搜索")}>{t("搜索")}</button>
     </div>
-    <button class="close" onclick={onClose} title={t("关闭侧边栏（F9）")}>✕</button>
+    <button class="close" onclick={onClose} title={t("关闭侧边栏（Ctrl+Shift+L）")}>✕</button>
   </div>
 
   <div class="side-body">

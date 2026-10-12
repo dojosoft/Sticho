@@ -19,6 +19,7 @@
     setEditorMode,
     applyFormat,
     applyHeading,
+    clearHeading,
     insertLocalImage,
     insertMathBlock,
     insertMermaidBlock,
@@ -159,7 +160,7 @@
   let historyEntries = $state<HistoryEntry[]>([]);
   // 版本差异视图（批次三）：null = 未打开
   let diffView = $state<{ title: string; leftLabel: string; rightLabel: string; lines: DiffLine[] } | null>(null);
-  // 命令面板（批次四）：Ctrl+K 打开；commands 在每次打开时按当前菜单求值（动态子菜单要新鲜数据）
+  // 命令面板（批次四）：Ctrl+P 打开；commands 在每次打开时按当前菜单求值（动态子菜单要新鲜数据）
   let paletteOpen = $state(false);
   let paletteCommands = $state<PaletteCommand[]>([]);
   // 入门指南（批次四）：首次启动弹一次，帮助菜单可随时重开；welcomeShown 落设置
@@ -3777,13 +3778,15 @@
   async function showShortcuts(): Promise<void> {
     await messageDialog(
       [
-        t("文件：Ctrl+N 新建标签 / Ctrl+O 打开 / Ctrl+S 保存 / Ctrl+Shift+S 另存为"),
+        t("文件：Ctrl+N 新建标签 / Ctrl+O 打开 / Ctrl+P 命令面板 / Ctrl+S 保存 / Ctrl+Shift+S 另存为 / Ctrl+, 设置 / Ctrl+Q 退出"),
         t("标签：Ctrl+W 关闭 / Ctrl+Tab 下一个 / Ctrl+Shift+Tab 上一个 / 中键点标签也可关闭"),
         t("导出：Ctrl+Shift+E Word / Ctrl+Shift+P PDF / Ctrl+Shift+H HTML / Ctrl+Shift+T 纯文本"),
         t("编辑：Ctrl+Z 撤销 / Ctrl+Y 重做 / Ctrl+X 剪切 / Ctrl+C 复制 / Ctrl+V 粘贴"),
         t("查找：Ctrl+F 查找 / F3 查找下一个 / Shift+F3 查找上一个 / Ctrl+H 替换"),
-        t("格式：Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+Shift+K 链接 / Ctrl+1~6 标题 1~6 级"),
-        t("视图：Ctrl+K 命令面板 / F9 显示/隐藏侧边栏 / Alt+F/E/O/V/S/H 展开对应菜单 / Esc 关闭菜单与查找栏"),
+        t("段落：Ctrl+1~6 标题 1~6 级 / Ctrl+0 正文 / Ctrl+Shift+[ 有序列表 / Ctrl+Shift+] 无序列表 / Ctrl+[ 增加缩进 / Ctrl+] 减少缩进 / Ctrl+Shift+Q 引用"),
+        t("格式：Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+K 链接 / Ctrl+Shift+K 代码块 / Ctrl+Shift+` 行内代码 / Ctrl+Shift+M 行间公式 / Ctrl+Shift+I 插入图片 / Alt+Shift+5 删除线"),
+        t("视图：Ctrl+Shift+L 侧边栏 / Ctrl+Shift+1 大纲 / Ctrl+Shift+3 文件目录树 / F8 段落聚焦 / F9 打字机 / F11 沉浸式全屏 / Ctrl+E 阅读模式"),
+        t("其他：Alt+F/E/P/O/V/T/H 展开对应菜单 / Esc 关闭菜单与查找栏"),
       ].join("\n"),
       { title: t("快捷键一览"), kind: "info" },
     );
@@ -3863,6 +3866,8 @@
       items: [
         { label: t("新建标签"), shortcut: "Ctrl+N", disabled: () => busy, action: newTab },
         { label: t("打开…"), shortcut: "Ctrl+O", disabled: () => busy, action: openFile },
+        // 命令面板对齐 Typora 的「快速打开」（Ctrl+P）：同一处肌肉记忆，也顺手挡住 WebView2 的打印弹窗
+        { label: t("命令面板…"), shortcut: "Ctrl+P", action: openCommandPalette },
         {
           label: t("打开最近文件"),
           disabled: () => recentFiles.length === 0,
@@ -3949,6 +3954,9 @@
         },
         { label: t("转为 Markdown 编辑"), disabled: () => docKind !== "html", action: () => void convertToMarkdown() },
         { sep: true },
+        // 偏好设置对齐 Typora：放在「文件」菜单末尾、Ctrl+,
+        { label: t("设置…"), shortcut: "Ctrl+,", action: () => { settingsOpen = true; } },
+        { sep: true },
         { label: t("退出程序"), shortcut: "Ctrl+Q", action: exitApp },
       ],
     },
@@ -3985,15 +3993,17 @@
             action: () => applyHeading(n),
           })),
         },
+        // 正文对齐 Typora 的 Ctrl+0：清掉当前行的标题，回到普通段落
+        { label: t("正文"), shortcut: "Ctrl+0", action: clearHeading },
         { sep: true },
-        { label: t("无序列表"), action: () => applyFormat("list") },
-        { label: t("有序列表"), action: () => applyFormat("ordered-list") },
+        { label: t("无序列表"), shortcut: "Ctrl+Shift+]", action: () => applyFormat("list") },
+        { label: t("有序列表"), shortcut: "Ctrl+Shift+[", action: () => applyFormat("ordered-list") },
         { label: t("任务列表"), action: () => applyFormat("check") },
         { sep: true },
-        { label: t("增加缩进"), action: () => applyFormat("indent") },
-        { label: t("减少缩进"), action: () => applyFormat("outdent") },
+        { label: t("增加缩进"), shortcut: "Ctrl+[", action: () => applyFormat("indent") },
+        { label: t("减少缩进"), shortcut: "Ctrl+]", action: () => applyFormat("outdent") },
         { sep: true },
-        { label: t("引用"), action: () => applyFormat("quote") },
+        { label: t("引用"), shortcut: "Ctrl+Shift+Q", action: () => applyFormat("quote") },
         { label: t("分隔线"), action: () => applyFormat("line") },
         {
           // 批次七：Vditor 只在 IR 模式的快捷键里提供整列对齐，这里提到菜单中
@@ -4015,15 +4025,15 @@
       items: [
         { label: t("加粗"), shortcut: "Ctrl+B", action: () => applyFormat("bold") },
         { label: t("斜体"), shortcut: "Ctrl+I", action: () => applyFormat("italic") },
-        { label: t("删除线"), action: () => applyFormat("strike") },
-        { label: t("行内代码"), action: () => applyFormat("inline-code") },
+        { label: t("删除线"), shortcut: "Alt+Shift+5", action: () => applyFormat("strike") },
+        { label: t("行内代码"), shortcut: "Ctrl+Shift+`", action: () => applyFormat("inline-code") },
         { sep: true },
-        { label: t("链接"), shortcut: "Ctrl+Shift+K", action: () => applyFormat("link") },
-        { label: t("插入图片"), action: () => insertLocalImage() },
+        { label: t("链接"), shortcut: "Ctrl+K", action: () => applyFormat("link") },
+        { label: t("插入图片"), shortcut: "Ctrl+Shift+I", action: () => insertLocalImage() },
         { label: t("表情"), action: () => applyFormat("emoji") },
         { sep: true },
-        { label: t("代码块"), action: () => applyFormat("code") },
-        { label: t("行间公式"), action: insertMathBlock },
+        { label: t("代码块"), shortcut: "Ctrl+Shift+K", action: () => applyFormat("code") },
+        { label: t("行间公式"), shortcut: "Ctrl+Shift+M", action: insertMathBlock },
         { label: t("Mermaid 图"), action: insertMermaidBlock },
         { label: t("表格"), action: () => applyFormat("table") },
         { sep: true },
@@ -4069,10 +4079,10 @@
         {
           label: t("侧边栏"),
           sub: [
-            { label: t("显示侧边栏"), shortcut: "F9", checked: () => sidebarVisible, action: toggleSidebar },
+            { label: t("显示侧边栏"), shortcut: "Ctrl+Shift+L", checked: () => sidebarVisible, action: toggleSidebar },
             { sep: true },
-            { label: t("文件目录树"), radio: true, checked: () => sidebarVisible && sidebarView === "tree", action: () => setSidebarView("tree") },
-            { label: t("文档大纲"), radio: true, checked: () => sidebarVisible && sidebarView === "outline", action: () => setSidebarView("outline") },
+            { label: t("文件目录树"), shortcut: "Ctrl+Shift+3", radio: true, checked: () => sidebarVisible && sidebarView === "tree", action: () => setSidebarView("tree") },
+            { label: t("文档大纲"), shortcut: "Ctrl+Shift+1", radio: true, checked: () => sidebarVisible && sidebarView === "outline", action: () => setSidebarView("outline") },
             { label: t("文件属性"), radio: true, checked: () => sidebarVisible && sidebarView === "props", action: () => setSidebarView("props") },
             { label: t("跨文件搜索"), radio: true, checked: () => sidebarVisible && sidebarView === "search", action: () => setSidebarView("search") },
           ],
@@ -4092,18 +4102,64 @@
           // 打字机 / 段落聚焦在 Markdown 与纯文本两种模式下都支持（HTML 模式下光标在 iframe 里，
           // 正文既不被编辑也量不到光标）。Markdown 走 Vditor，纯文本走 CodeMirror 的等价实现。
           label: t("打字机模式"),
+          shortcut: "F9",
           checked: () => typewriterOn && docKind !== "html",
           disabled: () => docKind === "html",
           action: toggleTypewriter,
         },
         {
           label: t("段落聚焦"),
+          shortcut: "F8",
           checked: () => paragraphFocus && docKind !== "html",
           disabled: () => docKind === "html",
           action: toggleParagraphFocus,
         },
         { sep: true },
-        { label: t("沉浸式全屏编辑"), action: toggleEditorFullscreen },
+        { label: t("沉浸式全屏编辑"), shortcut: "F11", action: toggleEditorFullscreen },
+      ],
+    },
+    {
+      // 主题菜单对齐 Typora 的 Themes：明/暗档位与自定义主题集中在一处，不必再进设置面板
+      id: "theme",
+      label: t("主题"),
+      key: "t",
+      items: [
+        {
+          label: t("浅色"),
+          radio: true,
+          checked: () => userThemeSet && theme === "light",
+          action: () => void setThemeChoice("light"),
+        },
+        {
+          label: t("深色"),
+          radio: true,
+          checked: () => userThemeSet && theme === "dark",
+          action: () => void setThemeChoice("dark"),
+        },
+        {
+          label: t("跟随系统"),
+          radio: true,
+          checked: () => !userThemeSet,
+          action: () => void setThemeChoice("system"),
+        },
+        { sep: true },
+        {
+          // 自定义主题目录里的 .css：与设置面板同一份数据，展开时按需刷新
+          label: t("自定义主题"),
+          disabled: () => themeFiles.length === 0,
+          dynamic: () => [
+            { label: t("默认"), radio: true, checked: () => userTheme === null, action: () => void selectUserTheme(null) },
+            ...themeFiles.map((f) => ({
+              label: f.name,
+              radio: true,
+              checked: () => userTheme === f.name,
+              action: () => void selectUserTheme(f.name),
+            })),
+          ],
+        },
+        { label: t("打开主题文件夹"), action: () => void openThemesFolder() },
+        { sep: true },
+        { label: t("更多外观设置…"), action: () => { settingsOpen = true; } },
       ],
     },
     {
@@ -4127,6 +4183,8 @@
     subOpen = null;
     // 展开「文件」菜单时刷新历史版本列表，供「文件历史」动态子菜单使用
     if (willOpen && id === "file") void refreshHistory();
+    // 展开「主题」菜单时刷新自定义主题列表，画面里新放进主题文件夹的 .css 才会出现
+    if (willOpen && id === "theme") void refreshThemes();
   }
 
   function runMenuItem(item: MenuItem): void {
@@ -4135,7 +4193,7 @@
     void item.action?.();
   }
 
-  // ---- 命令面板（批次四，Ctrl+K）----
+  // ---- 命令面板（批次四，Ctrl+P）----
 
   /**
    * 把菜单树拍平成命令列表：展开 sub 与 dynamic 子项，跳过分隔线、无动作项与当前不可用的项。
@@ -4366,7 +4424,14 @@
       return;
     }
 
-    // Alt+字母：展开对应一级菜单（文件/编辑/段落/格式/视图/帮助）
+    // Alt+Shift+5：删除线（对齐 Typora）。必须排在 Alt+字母 之前——那个分支会吞掉所有 Alt 组合键
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "Digit5") {
+      e.preventDefault();
+      if (docKind === "markdown") applyFormat("strike");
+      return;
+    }
+
+    // Alt+字母：展开对应一级菜单（文件/编辑/段落/格式/视图/主题/帮助）
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const hit = MENUS.find((m) => m.key === e.key.toLowerCase());
       if (hit) {
@@ -4376,21 +4441,63 @@
       return;
     }
 
-    // 功能键
+    // 功能键：F3 查找下一个 / F8 段落聚焦 / F9 打字机 / F11 沉浸式全屏（对齐 Typora）
     if (e.key === "F3") {
       e.preventDefault();
       findNext(e.shiftKey);
       return;
     }
 
+    if (e.key === "F8") {
+      e.preventDefault();
+      void toggleParagraphFocus();
+      return;
+    }
+
     if (e.key === "F9") {
       e.preventDefault();
-      void toggleSidebar();
+      void toggleTypewriter();
+      return;
+    }
+
+    if (e.key === "F11") {
+      e.preventDefault();
+      void toggleEditorFullscreen();
       return;
     }
 
     if (!(e.ctrlKey || e.metaKey)) return;
     const key = e.key.toLowerCase();
+
+    // 方括号 / 反引号 / 数字键按住 Shift 时 e.key 会变成 { } ~ ! #，用字符比较会漏判，
+    // 这几组一律按物理键位 e.code 判定（对齐 Typora 的方括号与反引号组合）
+    if (e.code === "BracketLeft" && docKind === "markdown") {
+      e.preventDefault();
+      applyFormat(e.shiftKey ? "ordered-list" : "indent");
+      return;
+    }
+    if (e.code === "BracketRight" && docKind === "markdown") {
+      e.preventDefault();
+      applyFormat(e.shiftKey ? "list" : "outdent");
+      return;
+    }
+    if (e.code === "Backquote" && e.shiftKey && docKind === "markdown") {
+      e.preventDefault();
+      applyFormat("inline-code");
+      return;
+    }
+    if (e.shiftKey && e.code === "Digit1") {
+      // Ctrl+Shift+1：文档大纲（对齐 Typora）
+      e.preventDefault();
+      void setSidebarView("outline");
+      return;
+    }
+    if (e.shiftKey && e.code === "Digit3") {
+      // Ctrl+Shift+3：文件目录树（对齐 Typora）
+      e.preventDefault();
+      void setSidebarView("tree");
+      return;
+    }
 
     if (key === "n" && !e.shiftKey) {
       e.preventDefault();
@@ -4412,16 +4519,37 @@
     } else if (key === "s" && e.shiftKey) {
       e.preventDefault();
       void saveFileAs();
-    } else if (key === "q") {
+    } else if (key === "q" && !e.shiftKey) {
       e.preventDefault();
       void exitApp();
-    } else if (key === "k" && !e.shiftKey) {
-      // Ctrl+K：命令面板（批次四）；「链接」让位给 Ctrl+Shift+K
+    } else if (key === "q" && e.shiftKey) {
+      // Ctrl+Shift+Q：引用（对齐 Typora）；退出改由 Ctrl+Q 独占
+      e.preventDefault();
+      if (docKind === "markdown") applyFormat("quote");
+    } else if (key === "p" && !e.shiftKey) {
+      // Ctrl+P：命令面板，对齐 Typora 的「快速打开」，同时挡住 WebView2 的打印弹窗
       e.preventDefault();
       openCommandPalette();
-    } else if (key === "k" && e.shiftKey) {
+    } else if (key === "k" && !e.shiftKey) {
+      // Ctrl+K：链接（对齐 Typora）
       e.preventDefault();
-      applyFormat("link");
+      if (docKind === "markdown") applyFormat("link");
+    } else if (key === "k" && e.shiftKey) {
+      // Ctrl+Shift+K：代码块（对齐 Typora）
+      e.preventDefault();
+      if (docKind === "markdown") applyFormat("code");
+    } else if (key === "i" && e.shiftKey) {
+      // Ctrl+Shift+I：插入图片（对齐 Typora）
+      e.preventDefault();
+      if (docKind === "markdown") insertLocalImage();
+    } else if (key === "m" && e.shiftKey) {
+      // Ctrl+Shift+M：行间公式（对齐 Typora）
+      e.preventDefault();
+      if (docKind === "markdown") insertMathBlock();
+    } else if (key === "l" && e.shiftKey) {
+      // Ctrl+Shift+L：显示 / 隐藏侧边栏（对齐 Typora）
+      e.preventDefault();
+      void toggleSidebar();
     } else if (key === "f" && !e.shiftKey) {
       e.preventDefault();
       void openFind();
@@ -4444,6 +4572,14 @@
     } else if (key === "t" && e.shiftKey) {
       e.preventDefault();
       void exportTxtFile();
+    } else if (key === "," && !e.shiftKey) {
+      // Ctrl+,：偏好设置（对齐 Typora）
+      e.preventDefault();
+      settingsOpen = true;
+    } else if (docKind === "markdown" && !e.shiftKey && key === "0") {
+      // Ctrl+0：正文，清除当前行的标题（对齐 Typora）
+      e.preventDefault();
+      clearHeading();
     } else if (docKind === "markdown" && !e.shiftKey && /^[1-6]$/.test(key)) {
       // Ctrl+1~6 是 Markdown 标题快捷方式；代码模式下必须忽略，
       // 否则会改到被覆盖层挡住的 Vditor，把代码文件白白标成「未保存」
@@ -5223,7 +5359,7 @@
     />
   {/if}
 
-  <!-- 命令面板（批次四）：Ctrl+K 打开，回车执行菜单里的任意命令 -->
+  <!-- 命令面板（批次四）：Ctrl+P 打开，回车执行菜单里的任意命令 -->
   {#if paletteOpen}
     <CommandPalette
       {locale}
