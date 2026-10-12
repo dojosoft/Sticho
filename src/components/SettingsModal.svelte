@@ -210,6 +210,13 @@
           </section>
 
           <section class="set-group">
+            <h3>{t("更新")}</h3>
+            <p class="set-tip">
+              {t("未配置更新源则不检查更新；如需升级，请到发布页下载新版安装包。")}
+            </p>
+          </section>
+
+          <section class="set-group">
             <h3>{t("系统集成")}</h3>
             <label class="set-row">
               <input

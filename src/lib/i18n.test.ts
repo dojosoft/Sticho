@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { makeT } from "./i18n";
+import { EN, makeT } from "./i18n";
 
 describe("makeT", () => {
   it("中文下原样返回键（中文原文即键）", () => {
@@ -24,5 +24,17 @@ describe("makeT", () => {
   it("英文词表同样支持插值", () => {
     const t = makeT("en-US");
     expect(t("版本 {n}", { n: 2 })).toBe("Version 2");
+  });
+});
+
+describe("EN 词表", () => {
+  it("英文值都不为空串（缺失应回落中文，而不是变成空白）", () => {
+    const blank = Object.entries(EN).filter(([, value]) => value.trim() === "");
+    expect(blank).toEqual([]);
+  });
+
+  it("英文值与键不是同一串（同串等于没翻译，会静默漏掉）", () => {
+    const same = Object.entries(EN).filter(([key, value]) => key === value);
+    expect(same).toEqual([]);
   });
 });

@@ -2812,23 +2812,8 @@
     findStatus = t("已替换 {n} 处", { n: hits.length });
   }
 
-  function findNext(backwards = false): void {
-    if (!findText) return;
-    // 同上：超大代码文件没有 CM，交给下面的 isLargeDocMode 分支（在整篇源码上定位）
-    if (docKind === "code" && codeLargeText === null) {
-      findNextInCode(backwards);
-      return;
-    }
-    if (docKind === "html") {
-      if (htmlView === "source") findNextInSource(backwards);
-      else findNextInPreview(backwards);
-      return;
-    }
-    // 大文档分节通路的正文是虚拟化的，得先挂载目标分节才建得出 Range
-    if (isLargeDocMode()) {
-      findNextLarge(backwards);
-      return;
-    }
+  /** 编辑器常规通路（Markdown / 纯文本）的「下一个 / 上一个」：在正文 Range 上定位并居中 */
+  function findNextInEditor(backwards: boolean): void {
     const hits = editorHits();
     if (hits === null) {
       findIdx = -1;
@@ -2853,6 +2838,33 @@
     range.startContainer.parentElement?.scrollIntoView({ block: "center" });
     applyFindHighlights(hits, findIdx);
     findStatus = `${findIdx + 1} / ${hits.length}`;
+  }
+
+  /**
+   * 查找「下一个 / 上一个」的分派表：每条通路一项「判定 + 执行」，按序取第一条命中的。
+   *
+   * 五条通路（代码视图 / HTML 源码 / HTML 预览 / 大文档分节 / 编辑器常规）的优先级集中
+   * 写在一处，新增视图时只加一行即可，不必在 if 链里层层找位置。顺序即优先级，与原实现一致：
+   * 代码视图在前、编辑器常规兜底。判定用闭包延迟求值，读的是调用时的当前视图状态。
+   */
+  const FIND_ROUTES: { match: () => boolean; next: (backwards: boolean) => void }[] = [
+    // 超大代码文件没有 CM（codeLargeText 非空），落到下面的编辑器常规通路
+    { match: () => docKind === "code" && codeLargeText === null, next: findNextInCode },
+    { match: () => docKind === "html" && htmlView === "source", next: findNextInSource },
+    { match: () => docKind === "html", next: findNextInPreview },
+    // 大文档分节通路的正文是虚拟化的，得先挂载目标分节才建得出 Range
+    { match: () => isLargeDocMode(), next: findNextLarge },
+    { match: () => true, next: findNextInEditor },
+  ];
+
+  function findNext(backwards = false): void {
+    if (!findText) return;
+    for (const route of FIND_ROUTES) {
+      if (route.match()) {
+        route.next(backwards);
+        return;
+      }
+    }
   }
 
   function onFindInput(): void {

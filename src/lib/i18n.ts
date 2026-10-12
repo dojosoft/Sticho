@@ -36,8 +36,10 @@ export function vditorLang(locale: Locale): "zh_CN" | "en_US" {
 /**
  * en-US 词表：键为中文原文（与 t() 的入参完全一致）。
  * 未收录的键自动回落中文，不会显示成空串。
+ *
+ * 导出仅为让单测能整体断言「英文值不为空串」，界面逻辑一律走 makeT。
  */
-const EN: Record<string, string> = {
+export const EN: Record<string, string> = {
   // ---- 一级菜单 ----
   文件: "File",
   编辑: "Edit",
@@ -571,6 +573,86 @@ const EN: Record<string, string> = {
   本地版本历史保留份数: "Versions kept per file",
   "保存覆盖前自动留档，可在「文件 → 文件历史」回滚；份数越多占用磁盘越多。":
     "A copy is archived before each overwrite and can be restored from File → File History; keeping more versions uses more disk space.",
+
+  // ---- 文件历史 / 版本差异（批次九、批 3 补齐）----
+  对该历史版本的操作: "Actions for this version",
+  查看与当前内容的差异: "Compare with current content",
+  用该版本覆盖当前编辑内容: "Overwrite current editor content with this version",
+  查看差异: "View Diff",
+  版本差异: "Version Comparison",
+  当前内容: "Current Content",
+  "云端版本 {n}": "Cloud Version {n}",
+  云端当前内容: "Current Cloud Content",
+  "未变 {n} 行": "{n} unchanged line(s)",
+  两个版本内容完全相同: "The two versions are identical",
+  "读取历史版本失败：": "Failed to read the version: ",
+
+  // ---- 命令面板 / 跨文件搜索 / 引导页（批 4 补齐）----
+  命令面板: "Command Palette",
+  "输入命令名称…": "Type a command name…",
+  没有匹配的命令: "No matching commands",
+  跨文件搜索: "Search in Files",
+  搜索: "Search",
+  在当前文件夹中全文搜索: "Full-text search in the current folder",
+  "在当前文件夹中搜索…": "Search in the current folder…",
+  "搜索中…": "Searching…",
+  "输入关键词开始搜索（字面量匹配，可切换区分大小写）。":
+    "Type a keyword to start searching (literal matching; case sensitivity can be toggled).",
+  没有找到匹配内容: "No matches found",
+  "在 {files} 个文件中找到 {n} 处": "Found {n} match(es) in {files} file(s)",
+  "（结果已截断，请缩小范围）": "(Results truncated — narrow the scope)",
+  "（该文件命中过多，仅显示前若干条）":
+    "(Too many matches in this file; only the first few are shown)",
+  "未选择文件夹。请先切到「文件」标签，点「选择…」指定一个目录，再回到这里搜索。":
+    "No folder selected. Switch to the “Files” tab, click “Choose…” to pick a folder, then come back here to search.",
+  "入门指南…": "Getting Started…",
+  "欢迎使用 Sticho": "Welcome to Sticho",
+  "轻量级 Markdown / HTML 文档编辑器，转换全部在本机完成。":
+    "A lightweight Markdown / HTML document editor; all conversions happen on your machine.",
+  开始使用: "Get Started",
+  新建或打开文档: "Create or open a document",
+  "工具栏或「文件」菜单；也支持把文件直接拖进窗口。":
+    "Use the toolbar or the File menu; you can also drag a file into the window.",
+  快捷排版: "Quick formatting",
+  "Ctrl+B 加粗、Ctrl+I 斜体、Ctrl+Shift+K 链接、Ctrl+1~6 标题。":
+    "Ctrl+B bold, Ctrl+I italic, Ctrl+Shift+K link, Ctrl+1~6 headings.",
+  "按 Ctrl+K 搜索并执行菜单里的任意命令。":
+    "Press Ctrl+K to search for and run any command in the menus.",
+  "侧边栏「搜索」标签可在当前文件夹内全文查找。":
+    "The sidebar's “Search” tab looks through the full text of the current folder.",
+  导出与云同步: "Export and cloud sync",
+  "可导出 Word / PDF / HTML，也支持 WebDAV 云端多版本。":
+    "Export to Word / PDF / HTML, and keep multiple versions in the cloud over WebDAV.",
+
+  // ---- 云同步冲突副本 / 更新占位（批 5）----
+  冲突处理方式: "Conflict Handling",
+  "保留冲突副本（推荐）": "Keep a Conflict Copy (Recommended)",
+  直接覆盖云端: "Overwrite the Cloud Copy",
+  "云端文件被其他设备改过时：保留副本会在同目录另存一份，绝不覆盖对方内容；直接覆盖则以其为准。":
+    "When a cloud file has been changed by another device: “Keep a Conflict Copy” saves a separate copy in the same folder and never overwrites the other side; “Overwrite” makes this copy authoritative.",
+  更新: "Updates",
+  "未配置更新源则不检查更新；如需升级，请到发布页下载新版安装包。":
+    "With no update source configured the app never checks for updates; to upgrade, download a new installer from the releases page.",
+
+  // ---- 代码文件 / 文件类型提示（补齐）----
+  代码文件: "Code File",
+  保存代码文件: "Save Code File",
+  所有支持的文档: "All Supported Documents",
+  "目录树中仅支持打开 Markdown / HTML / 纯文本 / 代码文件（.{ext} 需要先转换）。":
+    "The tree only supports opening Markdown / HTML / plain-text / code files (a .{ext} file must be converted first).",
+  "暂不支持该文件类型（.{ext}），仅支持 md / html / docx / pdf / 代码文件。":
+    "Unsupported file type (.{ext}); only md / html / docx / pdf / code files are supported.",
+
+  // ---- 导出图片嵌入报告 ----
+  "\n…另有 {n} 张": "\n…and {n} more",
+  "已嵌入 {n} 张图片。以下图片未能嵌入，已回落为占位文字：\n{list}{more}":
+    "Embedded {n} image(s). The following images could not be embedded and fell back to placeholder text:\n{list}{more}",
+
+  // ---- 快捷键一览（批 4 改键后的文案）----
+  "格式：Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+Shift+K 链接 / Ctrl+1~6 标题 1~6 级":
+    "Format: Ctrl+B Bold / Ctrl+I Italic / Ctrl+Shift+K Link / Ctrl+1~6 Heading Levels 1~6",
+  "视图：Ctrl+K 命令面板 / F9 显示/隐藏侧边栏 / Alt+F/E/O/V/S/H 展开对应菜单 / Esc 关闭菜单与查找栏":
+    "View: Ctrl+K Command Palette / F9 Toggle Sidebar / Alt+F/E/O/V/S/H Open Menu / Esc Close Menu and Find Bar",
 };
 
 /** 生成翻译函数：locale 变化时由 $derived 重新生成，标记文本随之更新 */

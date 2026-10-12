@@ -37,6 +37,9 @@ jobs:
       - name: 安装前端依赖
         run: npm ci
 
+      - name: 版本号一致性（package.json / tauri.conf.json / Cargo.toml）
+        run: npm run check-version
+
       - name: 前端单元测试
         run: npm test
 
