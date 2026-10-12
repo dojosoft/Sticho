@@ -418,6 +418,8 @@ export const EN: Record<string, string> = {
   纯文本模式: "Plain Text Mode",
   "Markdown 模式": "Markdown Mode",
   "HTML 模式": "HTML Mode",
+  当前文档模式: "Current Document Mode",
+  渲染模式: "Render Mode",
   显示行号: "Show Line Numbers",
   语法高亮语言: "Syntax Highlighting Language",
   "自动（按扩展名）": "Auto (by Extension)",
@@ -450,14 +452,8 @@ export const EN: Record<string, string> = {
   "基于 Tauri + Svelte + Vditor 构建。": "Built with Tauri + Svelte + Vditor.",
   "Word 转换由 Pandoc 独立进程完成（GPL-2.0，未随本程序分发）。":
     "Word conversion is done by a separate Pandoc process (GPL-2.0, not bundled with this app).",
-  "标签：Ctrl+W 关闭 / Ctrl+Tab 下一个 / Ctrl+Shift+Tab 上一个 / 中键点标签也可关闭":
-    "Tabs: Ctrl+W Close / Ctrl+Tab Next / Ctrl+Shift+Tab Previous / middle-click a tab to close",
-  "导出：Ctrl+Shift+E Word / Ctrl+Shift+P PDF / Ctrl+Shift+H HTML / Ctrl+Shift+T 纯文本":
-    "Export: Ctrl+Shift+E Word / Ctrl+Shift+P PDF / Ctrl+Shift+H HTML / Ctrl+Shift+T Plain Text",
-  "编辑：Ctrl+Z 撤销 / Ctrl+Y 重做 / Ctrl+X 剪切 / Ctrl+C 复制 / Ctrl+V 粘贴":
-    "Edit: Ctrl+Z Undo / Ctrl+Y Redo / Ctrl+X Cut / Ctrl+C Copy / Ctrl+V Paste",
-  "查找：Ctrl+F 查找 / F3 查找下一个 / Shift+F3 查找上一个 / Ctrl+H 替换":
-    "Find: Ctrl+F Find / F3 Find Next / Shift+F3 Find Previous / Ctrl+H Replace",
+  快捷键: "Shortcut",
+  功能: "Function",
 
   // ---- 侧边栏 ----
   大纲: "Outline",
@@ -656,18 +652,6 @@ export const EN: Record<string, string> = {
   "\n…另有 {n} 张": "\n…and {n} more",
   "已嵌入 {n} 张图片。以下图片未能嵌入，已回落为占位文字：\n{list}{more}":
     "Embedded {n} image(s). The following images could not be embedded and fell back to placeholder text:\n{list}{more}",
-
-  // ---- 快捷键一览（对齐 Typora 后的文案）----
-  "文件：Ctrl+N 新建标签 / Ctrl+O 打开 / Ctrl+P 命令面板 / Ctrl+S 保存 / Ctrl+Shift+S 另存为 / Ctrl+, 设置 / Ctrl+Q 退出":
-    "File: Ctrl+N New Tab / Ctrl+O Open / Ctrl+P Command Palette / Ctrl+S Save / Ctrl+Shift+S Save As / Ctrl+, Settings / Ctrl+Q Exit",
-  "段落：Ctrl+1~6 标题 1~6 级 / Ctrl+0 正文 / Ctrl+Shift+[ 有序列表 / Ctrl+Shift+] 无序列表 / Ctrl+[ 增加缩进 / Ctrl+] 减少缩进 / Ctrl+Shift+Q 引用":
-    "Paragraph: Ctrl+1~6 Headings 1~6 / Ctrl+0 Paragraph / Ctrl+Shift+[ Ordered List / Ctrl+Shift+] Bullet List / Ctrl+[ Increase Indent / Ctrl+] Decrease Indent / Ctrl+Shift+Q Quote",
-  "格式：Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+K 链接 / Ctrl+Shift+K 代码块 / Ctrl+Shift+` 行内代码 / Ctrl+Shift+M 行间公式 / Ctrl+Shift+I 插入图片 / Alt+Shift+5 删除线":
-    "Format: Ctrl+B Bold / Ctrl+I Italic / Ctrl+K Link / Ctrl+Shift+K Code Block / Ctrl+Shift+` Inline Code / Ctrl+Shift+M Math Block / Ctrl+Shift+I Insert Image / Alt+Shift+5 Strikethrough",
-  "视图：Ctrl+Shift+L 侧边栏 / Ctrl+Shift+1 大纲 / Ctrl+Shift+3 文件目录树 / F8 段落聚焦 / F9 打字机 / F11 沉浸式全屏 / Ctrl+E 阅读模式":
-    "View: Ctrl+Shift+L Sidebar / Ctrl+Shift+1 Outline / Ctrl+Shift+3 File Tree / F8 Paragraph Focus / F9 Typewriter / F11 Immersive Fullscreen / Ctrl+E Reading Mode",
-  "其他：Alt+F/E/P/O/V/H 展开对应菜单 / Esc 关闭菜单与查找栏":
-    "Other: Alt+F/E/P/O/V/H Open Menu / Esc Close Menu and Find Bar",
 
   // ---- 命令面板 / 偏好设置入口 ----
   "命令面板…": "Command Palette…",

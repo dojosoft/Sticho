@@ -24,6 +24,10 @@
 
     docKind: "markdown" | "html" | "code";
 
+    /** Markdown 渲染模式（IR / 所见即所得 / 分屏预览）：状态栏以图标呈现并可点击切换 */
+    editorMode: "ir" | "wysiwyg" | "sv";
+    onSetEditorMode: (mode: "ir" | "wysiwyg" | "sv") => void;
+
     /** 阅读（只读）/ 编辑模式：状态栏分段开关（本轮从右上角移入） */
     browseMode: boolean;
     onSetBrowseMode: (read: boolean) => void;
@@ -68,6 +72,8 @@
     currentPath,
     dirty,
     docKind,
+    editorMode,
+    onSetEditorMode,
     browseMode,
     onSetBrowseMode,
     htmlView,
@@ -97,6 +103,10 @@
 <footer class="statusbar">
   <!-- 实时统计（批次七）：随输入 400ms 防抖刷新，口径与侧栏「文件属性」一致 -->
   <span class="count">{t("{w} 字 · {c} 字符 · {l} 行", { w: wordCount.toLocaleString(), c: charCount.toLocaleString(), l: lineCount.toLocaleString() })}</span>
+  <!-- 当前文档模式：纯文本 / Markdown / HTML（与「视图 → 模式」三选一致） -->
+  <span class="mode-chip" title={t("当前文档模式")}>
+    {docKind === "markdown" ? t("Markdown 模式") : docKind === "html" ? t("HTML 模式") : t("纯文本模式")}
+  </span>
   <!-- 占位撑开：把右侧控件推到状态栏右端（原先由已移除的路径文本承担） -->
   <span class="spacer"></span>
 
@@ -217,6 +227,46 @@
       </div>
     {/if}
   </span>
+
+  <!-- Markdown 渲染模式（IR / 所见即所得 / 分屏预览）：仅 Markdown 模式下出现，图标点击即切换 -->
+  {#if docKind === "markdown"}
+    <span class="render-switch" title={t("渲染模式")}>
+      <button
+        class:active={editorMode === "ir"}
+        title={t("即时渲染（IR）")}
+        aria-label={t("即时渲染（IR）")}
+        onclick={() => onSetEditorMode("ir")}
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z" />
+          <path d="M14.5 6.5l3 3" />
+        </svg>
+      </button>
+      <button
+        class:active={editorMode === "wysiwyg"}
+        title={t("所见即所得（WYSIWYG）")}
+        aria-label={t("所见即所得（WYSIWYG）")}
+        onclick={() => onSetEditorMode("wysiwyg")}
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 3h8l4 4v14H6z" />
+          <path d="M14 3v4h4" />
+          <path d="M9 12h6M9 16h6" />
+        </svg>
+      </button>
+      <button
+        class:active={editorMode === "sv"}
+        title={t("分屏预览（SV）")}
+        aria-label={t("分屏预览（SV）")}
+        onclick={() => onSetEditorMode("sv")}
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="1.5" />
+          <path d="M12 4v16" />
+        </svg>
+      </button>
+    </span>
+  {/if}
 
   <!-- 阅读 / 编辑模式切换：放在编码切换右侧；阅读态只读，编辑态高亮 -->
   <span
@@ -372,6 +422,36 @@
     border: 1px solid var(--border, #ddd);
     border-radius: 5px;
     overflow: hidden;
+  }
+
+  /* Markdown 渲染模式图标组：三个等宽方按钮，选中项高亮 */
+  .render-switch {
+    display: flex;
+    flex-shrink: 0;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+
+  .render-switch button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.12rem 0.35rem;
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.65;
+  }
+
+  .render-switch button:hover {
+    opacity: 1;
+  }
+
+  .render-switch button.active {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+    opacity: 1;
   }
 
   .html-switch button,

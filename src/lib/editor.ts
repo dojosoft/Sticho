@@ -31,6 +31,8 @@ async function ensureVditor(): Promise<typeof Vditor> {
   return VditorCtor;
 }
 let changeListener: ((value: string) => void) | null = null;
+/** 渲染模式变更回调（状态栏图标、视图菜单复选同步用） */
+let modeListener: ((mode: "ir" | "wysiwyg" | "sv") => void) | null = null;
 
 /**
  * 编辑器是否已初始化完成。
@@ -822,6 +824,7 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
       expandEmojiSet();
       attachLineNumbers();
       attachCodeLanguagePicker();
+      attachModeWatcher();
       // 启动前读到的用户设置此刻才有正文元素可用（打字机模式要设选项、聚光灯要挂遮罩）
       setTypewriterMode(typewriterMode);
       attachSpotlight();
@@ -1525,6 +1528,39 @@ export function undoEditor(): void {
 export function redoEditor(): void {
   if (blockedByReadonly()) return;
   toolbarItem("redo")?.children[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+}
+
+/**
+ * 注册渲染模式变更回调（状态栏的模式图标、视图菜单的复选都读它同步）。
+ *
+ * Vditor 工具栏的「编辑模式」下拉是它自己渲染的，不经 setEditorMode，故回调不能只在
+ * setEditorMode 里触发。这里在工具栏项上做一次事件委托，无论切换来自下拉面板还是
+ * 菜单动作，都能捕获到。
+ */
+export function onEditorModeChange(cb: (mode: "ir" | "wysiwyg" | "sv") => void): void {
+  modeListener = cb;
+  attachModeWatcher();
+}
+
+let modeWatcherAttached = false;
+
+/** 事件委托：捕捉工具栏「编辑模式」下拉里任意模式按钮的点击 */
+function attachModeWatcher(): void {
+  if (modeWatcherAttached) return;
+  const item = toolbarItem("edit-mode");
+  if (!item) return;
+  modeWatcherAttached = true;
+  item.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target?.closest?.("button[data-mode]")) return;
+    // Vditor 在点击后同步切换正文元素，等它的处理器跑完再读回当前模式
+    window.setTimeout(() => modeListener?.(getEditorMode()), 0);
+  });
+}
+
+/** 编辑器当前是否处于沉浸式全屏（Vditor 给根元素加 vditor--fullscreen） */
+export function isEditorFullscreen(): boolean {
+  return !!vditor?.vditor.element?.classList.contains("vditor--fullscreen");
 }
 
 /** 切换 Vditor 的沉浸式全屏编辑（视图菜单，复用工具栏 fullscreen 项） */

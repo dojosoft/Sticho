@@ -17,6 +17,7 @@
     insertEditorText,
     getEditorMode,
     setEditorMode,
+    onEditorModeChange,
     applyFormat,
     applyHeading,
     clearHeading,
@@ -27,6 +28,7 @@
     undoEditor,
     redoEditor,
     toggleEditorFullscreen,
+    isEditorFullscreen,
     setEditorToolbarVisible,
     setLineNumbersVisible,
     setTypewriterMode,
@@ -183,6 +185,10 @@
   let lineCount = $state(0); // 状态栏实时统计：行数（批次七）
   let dragOver = $state(false); // 拖拽悬停高亮
   let showToolbar = $state(true); // 是否显示编辑器自带排版工具栏
+  // 当前 Vditor 渲染模式（状态栏图标 / 视图菜单复选共用）。仅 Markdown 模式有意义，
+  // 由 onEditorModeChange 持续同步（含工具栏下拉与菜单两条切换路径）。
+  let editorMode = $state<"ir" | "wysiwyg" | "sv">("ir");
+  let shortcutsOpen = $state(false); // 「快捷键一览」模态（帮助菜单）
   let showLineNumbers = $state(true); // 是否显示正文行号（默认显示）
   let typewriterOn = $state(false); // 打字机模式：光标行始终停在视口垂直中线
   let paragraphFocus = $state(false); // 段落聚焦：只亮当前编辑块，其余内容压暗
@@ -3811,21 +3817,109 @@
   });
 
   // ---- 帮助 ----
-  async function showShortcuts(): Promise<void> {
-    await messageDialog(
-      [
-        t("文件：Ctrl+N 新建标签 / Ctrl+O 打开 / Ctrl+P 命令面板 / Ctrl+S 保存 / Ctrl+Shift+S 另存为 / Ctrl+, 设置 / Ctrl+Q 退出"),
-        t("标签：Ctrl+W 关闭 / Ctrl+Tab 下一个 / Ctrl+Shift+Tab 上一个 / 中键点标签也可关闭"),
-        t("导出：Ctrl+Shift+E Word / Ctrl+Shift+P PDF / Ctrl+Shift+H HTML / Ctrl+Shift+T 纯文本"),
-        t("编辑：Ctrl+Z 撤销 / Ctrl+Y 重做 / Ctrl+X 剪切 / Ctrl+C 复制 / Ctrl+V 粘贴"),
-        t("查找：Ctrl+F 查找 / F3 查找下一个 / Shift+F3 查找上一个 / Ctrl+H 替换"),
-        t("段落：Ctrl+1~6 标题 1~6 级 / Ctrl+0 正文 / Ctrl+Shift+[ 有序列表 / Ctrl+Shift+] 无序列表 / Ctrl+[ 增加缩进 / Ctrl+] 减少缩进 / Ctrl+Shift+Q 引用"),
-        t("格式：Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+K 链接 / Ctrl+Shift+K 代码块 / Ctrl+Shift+` 行内代码 / Ctrl+Shift+M 行间公式 / Ctrl+Shift+I 插入图片 / Alt+Shift+5 删除线"),
-        t("视图：Ctrl+Shift+L 侧边栏 / Ctrl+Shift+1 大纲 / Ctrl+Shift+3 文件目录树 / F8 段落聚焦 / F9 打字机 / F11 沉浸式全屏 / Ctrl+E 阅读模式"),
-        t("其他：Alt+F/E/P/O/V/H 展开对应菜单 / Esc 关闭菜单与查找栏"),
-      ].join("\n"),
-      { title: t("快捷键一览"), kind: "info" },
-    );
+  /**
+   * 快捷键一览（帮助菜单）：用表格呈现，按分类分组，两列「快捷键 / 功能」便于速查。
+   *
+   * 按键本身不翻译（键位跨语言一致），功能描述与分组名走 t()（中文原文即键）。
+   */
+  const SHORTCUT_GROUPS: { group: string; items: { keys: string; desc: string }[] }[] = [
+    {
+      group: "文件",
+      items: [
+        { keys: "Ctrl+N", desc: "新建标签" },
+        { keys: "Ctrl+O", desc: "打开…" },
+        { keys: "Ctrl+P", desc: "命令面板…" },
+        { keys: "Ctrl+S", desc: "保存" },
+        { keys: "Ctrl+Shift+S", desc: "另存为…" },
+        { keys: "Ctrl+,", desc: "设置" },
+        { keys: "Ctrl+Q", desc: "退出" },
+      ],
+    },
+    {
+      group: "标签",
+      items: [
+        { keys: "Ctrl+W", desc: "关闭标签" },
+        { keys: "Ctrl+Tab", desc: "下一个标签" },
+        { keys: "Ctrl+Shift+Tab", desc: "上一个标签" },
+        { keys: "鼠标中键", desc: "点标签也可关闭" },
+      ],
+    },
+    {
+      group: "导出",
+      items: [
+        { keys: "Ctrl+Shift+E", desc: "导出为 Word 文档" },
+        { keys: "Ctrl+Shift+P", desc: "导出为 PDF 文档" },
+        { keys: "Ctrl+Shift+H", desc: "导出为 HTML 文档" },
+        { keys: "Ctrl+Shift+T", desc: "导出为纯文本文件" },
+      ],
+    },
+    {
+      group: "编辑",
+      items: [
+        { keys: "Ctrl+Z", desc: "撤销" },
+        { keys: "Ctrl+Y", desc: "重做" },
+        { keys: "Ctrl+X", desc: "剪切" },
+        { keys: "Ctrl+C", desc: "复制" },
+        { keys: "Ctrl+V", desc: "粘贴" },
+      ],
+    },
+    {
+      group: "查找",
+      items: [
+        { keys: "Ctrl+F", desc: "查找" },
+        { keys: "F3", desc: "查找下一个" },
+        { keys: "Shift+F3", desc: "查找上一个" },
+        { keys: "Ctrl+H", desc: "替换" },
+      ],
+    },
+    {
+      group: "段落",
+      items: [
+        { keys: "Ctrl+1~6", desc: "标题 1~6 级" },
+        { keys: "Ctrl+0", desc: "正文" },
+        { keys: "Ctrl+Shift+[", desc: "有序列表" },
+        { keys: "Ctrl+Shift+]", desc: "无序列表" },
+        { keys: "Ctrl+[", desc: "增加缩进" },
+        { keys: "Ctrl+]", desc: "减少缩进" },
+        { keys: "Ctrl+Shift+Q", desc: "引用" },
+      ],
+    },
+    {
+      group: "格式",
+      items: [
+        { keys: "Ctrl+B", desc: "加粗" },
+        { keys: "Ctrl+I", desc: "斜体" },
+        { keys: "Ctrl+K", desc: "链接" },
+        { keys: "Ctrl+Shift+K", desc: "代码块" },
+        { keys: "Ctrl+Shift+`", desc: "行内代码" },
+        { keys: "Ctrl+Shift+M", desc: "行间公式" },
+        { keys: "Ctrl+Shift+I", desc: "插入图片" },
+        { keys: "Alt+Shift+5", desc: "删除线" },
+      ],
+    },
+    {
+      group: "视图",
+      items: [
+        { keys: "Ctrl+Shift+L", desc: "侧边栏" },
+        { keys: "Ctrl+Shift+1", desc: "文档大纲" },
+        { keys: "Ctrl+Shift+3", desc: "文件目录树" },
+        { keys: "F8", desc: "段落聚焦" },
+        { keys: "F9", desc: "打字机模式" },
+        { keys: "F11", desc: "沉浸式全屏编辑" },
+        { keys: "Ctrl+E", desc: "阅读模式" },
+      ],
+    },
+    {
+      group: "其他",
+      items: [
+        { keys: "Alt+F/E/P/O/V/H", desc: "展开对应菜单" },
+        { keys: "Esc", desc: "关闭菜单与查找栏" },
+      ],
+    },
+  ];
+
+  function showShortcuts(): void {
+    shortcutsOpen = true;
   }
 
   async function showAbout(): Promise<void> {
@@ -4109,9 +4203,9 @@
         { label: t("Markdown 模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "markdown", action: () => void setDocMode("markdown") },
         { label: t("HTML 模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "html", action: () => void setDocMode("html") },
         { sep: true },
-        { label: t("即时渲染（IR）"), disabled: () => docKind !== "markdown", checked: () => getEditorMode() === "ir", action: () => switchEditorMode("ir") },
-        { label: t("所见即所得（WYSIWYG）"), disabled: () => docKind !== "markdown", checked: () => getEditorMode() === "wysiwyg", action: () => switchEditorMode("wysiwyg") },
-        { label: t("分屏预览（SV）"), disabled: () => docKind !== "markdown", checked: () => getEditorMode() === "sv", action: () => switchEditorMode("sv") },
+        { label: t("即时渲染（IR）"), disabled: () => docKind !== "markdown", checked: () => editorMode === "ir", action: () => switchEditorMode("ir") },
+        { label: t("所见即所得（WYSIWYG）"), disabled: () => docKind !== "markdown", checked: () => editorMode === "wysiwyg", action: () => switchEditorMode("wysiwyg") },
+        { label: t("分屏预览（SV）"), disabled: () => docKind !== "markdown", checked: () => editorMode === "sv", action: () => switchEditorMode("sv") },
         { sep: true },
         {
           label: t("侧边栏"),
@@ -4125,7 +4219,8 @@
           ],
         },
         { sep: true },
-        { label: t("显示排版工具栏"), checked: () => showToolbar, action: toggleEditorToolbar },
+        // 排版工具栏是 Vditor 独有的，只有 Markdown 模式有；纯文本 / HTML 模式下置灰
+        { label: t("显示排版工具栏"), checked: () => showToolbar, disabled: () => docKind !== "markdown", action: toggleEditorToolbar },
         // 行号在代码模式下仍可勾选：Markdown 由 Vditor 侧的行号栏消费，代码由 CM 的 lineNumbers() 消费
         { label: t("显示行号"), checked: () => showLineNumbers && docKind !== "html", disabled: () => docKind === "html", action: toggleLineNumbers },
         { sep: true },
@@ -4152,7 +4247,7 @@
           action: toggleParagraphFocus,
         },
         { sep: true },
-        { label: t("沉浸式全屏编辑"), shortcut: "F11", action: toggleEditorFullscreen },
+        { label: t("沉浸式全屏编辑"), shortcut: "F11", checked: () => isEditorFullscreen(), action: toggleEditorFullscreen },
       ],
     },
     {
@@ -4394,6 +4489,9 @@
         e.preventDefault();
       } else if (settingsOpen) {
         settingsOpen = false;
+        e.preventDefault();
+      } else if (shortcutsOpen) {
+        shortcutsOpen = false;
         e.preventDefault();
       } else if (codeToolsOpen) {
         codeToolsOpen = false;
@@ -4707,6 +4805,8 @@
       setEditorReadonly(true);
       void initEditor(host, WELCOME, theme === "dark");
       onEditorChange(() => syncFromEditor());
+      // 渲染模式变化（工具栏下拉或菜单）：同步状态栏图标与视图菜单复选
+      onEditorModeChange((mode) => (editorMode = mode));
       // 大文档走分节渲染通路时（editor.ts 自动判定），把应用层拉回阅读模式：
       // 那条通路只有只读的分节正文，界面必须如实反映「现在是阅读态」。
       onLargeModeChange((active) => {
@@ -5198,6 +5298,8 @@
     {currentPath}
     {dirty}
     {docKind}
+    {editorMode}
+    onSetEditorMode={switchEditorMode}
     {htmlView}
     onSetHtmlView={setHtmlView}
     {htmlScripts}
@@ -5223,6 +5325,42 @@
 
   {#if dragOver}
     <div class="drop-overlay">{t("松开鼠标打开文件（支持 md / html / docx / pdf）")}</div>
+  {/if}
+
+  <!-- 快捷键一览（帮助菜单）：表格按分类分组，比原先的一行行文本更好速查 -->
+  {#if shortcutsOpen}
+    <div
+      class="modal-mask"
+      role="none"
+      onclick={(e) => {
+        if (e.target === e.currentTarget) shortcutsOpen = false;
+      }}
+    >
+      <div class="modal modal--shortcuts" role="dialog" aria-label={t("快捷键一览")}>
+        <div class="modal-head">
+          <span>{t("快捷键一览")}</span>
+          <button class="icon-btn" title={t("关闭")} aria-label={t("关闭")} onclick={() => (shortcutsOpen = false)}>✕</button>
+        </div>
+        <div class="modal-body">
+          <table class="sc-table">
+            <thead>
+              <tr><th>{t("快捷键")}</th><th>{t("功能")}</th></tr>
+            </thead>
+            {#each SHORTCUT_GROUPS as group (group.group)}
+              <tbody>
+                <tr class="sc-group"><td colspan="2">{t(group.group)}</td></tr>
+                {#each group.items as item (item.desc)}
+                  <tr>
+                    <td class="sc-keys"><kbd>{item.keys}</kbd></td>
+                    <td>{t(item.desc)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            {/each}
+          </table>
+        </div>
+      </div>
+    </div>
   {/if}
 
   <!-- 多选一对话框（批次七）：外部变更三选 -->
@@ -5721,6 +5859,57 @@
   .choice-actions button.primary {
     border-color: var(--accent);
     color: var(--accent);
+  }
+
+  /* ---- 快捷键一览表格（帮助菜单）---- */
+  .modal--shortcuts {
+    width: 640px;
+  }
+
+  .sc-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+  }
+
+  .sc-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 0.35rem 0.5rem;
+    text-align: left;
+    font-weight: 600;
+    opacity: 0.85;
+    background: var(--bg, #fff);
+    border-bottom: 1px solid var(--border, #ddd);
+  }
+
+  .sc-table td {
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--border, #eee);
+    vertical-align: top;
+  }
+
+  /* 分类行：跨两列的浅色标题条，把表格分段 */
+  .sc-table .sc-group td {
+    font-weight: 600;
+    opacity: 0.9;
+    background: var(--hover, rgba(0, 0, 0, 0.04));
+  }
+
+  .sc-table .sc-keys {
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  .sc-table .sc-keys kbd {
+    display: inline-block;
+    font-family: inherit;
+    font-size: 0.75rem;
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 4px;
+    background: var(--hover, rgba(0, 0, 0, 0.05));
   }
 
   .set-group h3 {
