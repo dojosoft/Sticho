@@ -1,17 +1,18 @@
 <script lang="ts">
   /**
-   * 底部状态栏：实时统计、路径、各文档模式专属控件（HTML 预览/源码/脚本、代码语言与光标）、
-   * 编码切换、云同步指示、保存状态。
+   * 底部状态栏：实时统计、阅读/编辑模式开关、各文档模式专属控件（HTML 预览/源码/脚本、
+   * 代码语言与光标、语法高亮方案）、编码切换、云同步指示、保存状态。
    *
    * 与 App.svelte 的分工：这里只做「显示 + 触发回调」，不判断任何业务分支。
-   * `encodingOpen` 用双向绑定保留在父级：编码下拉既会被应用层的 `applyEncoding`
-   * 关闭，也会被窗口空白处点击（onWindowClick）关闭，两处都需要能改动它。
+   * `encodingOpen` / `codeLangOpen` 用双向绑定保留在父级：两个下拉既会被应用层的动作
+   * 关闭，也会被窗口空白处点击（onWindowClick）关闭，两处都需要能改动它们。
    *
    * 样式自带的类名与 App.svelte 里的用法一致（`.statusbar` / `.encoding*` / `.enc-item`
    * / `.html-switch` / `.html-edit` / `.code-info`），按 Svelte 的组件作用域一并搬来。
    */
   import { makeT, type Locale } from "../lib/i18n";
   import { ENCODINGS, encodingLabel } from "../lib/encoding";
+  import { LANG_LIST } from "../lib/codeLang";
 
   interface Props {
     locale: Locale;
@@ -22,6 +23,10 @@
     dirty: boolean;
 
     docKind: "markdown" | "html" | "code";
+
+    /** 阅读（只读）/ 编辑模式：状态栏分段开关（本轮从右上角移入） */
+    browseMode: boolean;
+    onSetBrowseMode: (read: boolean) => void;
 
     /** HTML 文档：预览 / 源码切换 */
     htmlView: "preview" | "source";
@@ -34,7 +39,15 @@
     codeLangLabel: string;
     codeCursor: { line: number; column: number };
     codeMatch: number;
-    browseMode: boolean;
+
+    /** 代码文件：语法高亮方案（undefined = 自动按扩展名，null = 纯文本，字符串 = 语言 id） */
+    codeLangOverride: string | null | undefined;
+    onSetCodeLang: (id: string | null | undefined) => void;
+    codeLangOpen?: boolean;
+
+    /** 打字机模式 / 段落聚焦：处于开启状态时在状态栏做提示（HTML 文档下不适用） */
+    typewriterOn: boolean;
+    paragraphFocus: boolean;
 
     /** 编码：当前 id、下拉展开状态（双向绑定）、手动切换 / 重新检测 */
     encoding: string;
@@ -55,6 +68,8 @@
     currentPath,
     dirty,
     docKind,
+    browseMode,
+    onSetBrowseMode,
     htmlView,
     onSetHtmlView,
     htmlScripts,
@@ -63,7 +78,11 @@
     codeLangLabel,
     codeCursor,
     codeMatch,
-    browseMode,
+    codeLangOverride,
+    onSetCodeLang,
+    codeLangOpen = $bindable(false),
+    typewriterOn,
+    paragraphFocus,
     encoding,
     encodingOpen = $bindable(false),
     onApplyEncoding,
@@ -78,7 +97,17 @@
 <footer class="statusbar">
   <!-- 实时统计（批次七）：随输入 400ms 防抖刷新，口径与侧栏「文件属性」一致 -->
   <span class="count">{t("{w} 字 · {c} 字符 · {l} 行", { w: wordCount.toLocaleString(), c: charCount.toLocaleString(), l: lineCount.toLocaleString() })}</span>
-  <span class="path" class:rtl={currentPath !== null} title={currentPath ?? t("尚未保存到磁盘")}>{currentPath ?? t("未保存到磁盘")}</span>
+  <!-- 占位撑开：把右侧控件推到状态栏右端（原先由已移除的路径文本承担） -->
+  <span class="spacer"></span>
+
+  <!-- 阅读 / 编辑模式切换（本轮从右上角工具栏移入状态栏）：阅读态只读，编辑态高亮 -->
+  <span
+    class="mode-switch"
+    title={browseMode ? t("当前为阅读模式，文档只读。点击切换到编辑模式（Ctrl+E）") : t("当前为编辑模式，可以修改文档。点击回到阅读模式（Ctrl+E）")}
+  >
+    <button class:active={browseMode} onclick={() => onSetBrowseMode(true)}>{t("阅读模式")}</button>
+    <button class:active={!browseMode} onclick={() => onSetBrowseMode(false)}>{t("编辑模式")}</button>
+  </span>
 
   <!-- HTML 文档模式：预览 / 源码切换 + 是否执行脚本。
        预览的可编辑性不再单设按钮——它就是「阅读 / 编辑模式」在 HTML 文档上的表现（见 previewEditable） -->
@@ -109,6 +138,65 @@
           : ""}{browseMode ? t("（只读）") : ""}
       {/if}
     </span>
+
+    <!-- 语法高亮方案切换（本轮新增）：与编码切换同构，仅普通代码文件可用（超大文件无高亮） -->
+    {#if codeLargeText === null}
+      <span class="lang-wrap">
+        <button
+          class="encoding"
+          onclick={(e) => {
+            e.stopPropagation();
+            codeLangOpen = !codeLangOpen;
+          }}
+          title={t("语法高亮方案：默认按扩展名自动判定，可手动指定")}
+        >{codeLangLabel} ▾</button>
+        {#if codeLangOpen}
+          <div class="encoding-pop">
+            <button
+              class="enc-item"
+              onclick={() => {
+                onSetCodeLang(undefined);
+                codeLangOpen = false;
+              }}
+            >
+              <span class="mark">{codeLangOverride === undefined ? "✓" : ""}</span>
+              <span class="label">{t("自动（按扩展名）")}</span>
+            </button>
+            <button
+              class="enc-item"
+              onclick={() => {
+                onSetCodeLang(null);
+                codeLangOpen = false;
+              }}
+            >
+              <span class="mark">{codeLangOverride === null ? "✓" : ""}</span>
+              <span class="label">{t("纯文本")}</span>
+            </button>
+            <div class="menu-sep"></div>
+            {#each LANG_LIST as lang (lang.id)}
+              <button
+                class="enc-item"
+                onclick={() => {
+                  onSetCodeLang(lang.id);
+                  codeLangOpen = false;
+                }}
+              >
+                <span class="mark">{codeLangOverride === lang.id ? "✓" : ""}</span>
+                <span class="label">{lang.name}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </span>
+    {/if}
+  {/if}
+
+  <!-- 打字机模式 / 段落聚焦：仅 Markdown / 纯文本下有意义（HTML 文档光标在 iframe 里，做不到） -->
+  {#if typewriterOn && docKind !== "html"}
+    <span class="mode-chip" title={t("打字机模式：当前行始终保持在屏幕垂直中央")}>{t("打字机模式")}</span>
+  {/if}
+  {#if paragraphFocus && docKind !== "html"}
+    <span class="mode-chip" title={t("段落聚焦：仅高亮当前段落，其余内容淡出")}>{t("段落聚焦")}</span>
   {/if}
 
   <!-- 编码（阶段 11）：显示当前编码，点击可手动切换或重新自动检测 -->
@@ -165,19 +253,10 @@
     flex-shrink: 0;
   }
 
-  .statusbar .path {
+  /* 撑开空白：把计数左侧留出、右侧控件推到右端 */
+  .statusbar .spacer {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    opacity: 0.85;
-  }
-
-  /* 长路径优先显示尾部（文件名部分）：对 ASCII 路径可靠截断 */
-  .statusbar .path.rtl {
-    direction: rtl;
-    text-align: left;
   }
 
   .statusbar .count {
@@ -206,8 +285,9 @@
     opacity: 1;
   }
 
-  /* ---- 状态栏编码切换（阶段 11）---- */
-  .encoding-wrap {
+  /* ---- 状态栏下拉（编码 / 语法高亮方案）---- */
+  .encoding-wrap,
+  .lang-wrap {
     position: relative;
     flex-shrink: 0;
   }
@@ -283,8 +363,9 @@
     background: var(--border, #ddd);
   }
 
-  /* 状态栏「预览 / 源码」分段切换 */
-  .html-switch {
+  /* 状态栏分段切换：「预览 / 源码」「阅读 / 编辑」共用同一套外观 */
+  .html-switch,
+  .mode-switch {
     display: flex;
     flex-shrink: 0;
     border: 1px solid var(--border, #ddd);
@@ -292,7 +373,8 @@
     overflow: hidden;
   }
 
-  .html-switch button {
+  .html-switch button,
+  .mode-switch button {
     font: inherit;
     font-size: 0.75rem;
     padding: 0.05rem 0.5rem;
@@ -303,10 +385,21 @@
     opacity: 0.7;
   }
 
-  .html-switch button.active {
+  .html-switch button.active,
+  .mode-switch button.active {
     background: var(--hover, rgba(0, 0, 0, 0.07));
     opacity: 1;
     font-weight: 600;
+  }
+
+  /* 打字机模式 / 段落聚焦的状态提示（开启时才出现） */
+  .mode-chip {
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 999px;
+    opacity: 0.85;
   }
 
   /* 状态栏「执行脚本」开关（仅 HTML 文档出现）。原「直接编辑」按钮已并入阅读 / 编辑模式 */

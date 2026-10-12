@@ -195,6 +195,12 @@
   // ---- 自动保存与崩溃恢复（批次四）----
   let autoSaveEnabled = $state(true); // 持久化键 "autoSave"，默认开
 
+  /**
+   * 默认打开模式（本轮新增）：打开 / 新建 / 导入文档后先进阅读模式还是直接进编辑模式。
+   * 只在「新文档落点」生效（见 resetToBrowseMode），不影响标签间切换时各自已有的模式。
+   */
+  let defaultOpenMode = $state<"read" | "edit">("read");
+
   // ---- WebDAV 云同步与多版本（批次九）----
   // 配置持久化在 settings.json（含明文密码）；davVerified 刻意不持久化：
   // 每次启动都要重新「测试连接」，避免配置早已失效却还在后台上传。
@@ -315,6 +321,7 @@
   // ---- 编码（阶段 11）：打开时自动检测，可在状态栏或「文件 → 编码」手动切换 ----
   let encoding = $state("utf-8"); // 当前文档编码 id，保存时按此写回
   let encodingOpen = $state(false); // 状态栏编码下拉是否展开
+  let codeLangOpen = $state(false); // 状态栏「语法高亮方案」下拉是否展开
 
   // ---- 侧边栏（阶段 11）----
   let sidebarVisible = $state(true);
@@ -383,6 +390,11 @@
   let skinOpen = $state(false); // 皮肤设置面板
   let themeFiles = $state<ThemeFile[]>([]); // 自定义主题目录里的 .css（批次八）
   let userTheme = $state<string | null>(null); // 当前选用的自定义主题文件名
+
+  // ---- 打印预览（本轮新增）：预览模态里的 iframe 直接吃这份成品 HTML ----
+  let printPreviewOpen = $state(false);
+  let printDocHtml = $state(""); // 组装好的完整打印 HTML（含 @page 与打印样式）
+  let printTitle = $state(""); // 预览标题栏显示，同时是打印时的文档名
 
   // ---- 界面语言（批次八）----
   let locale = $state<Locale>("zh-CN");
@@ -566,12 +578,18 @@
     if (!on && docKind === "code") focusCodeEditor(); // 切到编辑模式后光标直接落在代码里
   }
 
-  /** 打开 / 新建 / 导入文档后回到阅读模式：新拿到的文档先只读，避免误改 */
+  /**
+   * 打开 / 新建 / 导入文档后的起始模式。
+   *
+   * 遵循「默认打开模式」设置；但大文档与超大代码文件走的是只读分节通路（没有可编辑
+   * DOM），无论如何都强制阅读模式，否则界面会谎报「可编辑」。
+   */
   function resetToBrowseMode(): void {
-    browseMode = true;
-    setEditorReadonly(true);
-    setCodeReadonly(true);
-    syncHtmlFromPreview(); // 预览若有未落回的改动，退出编辑态前先写回源码
+    const read = defaultOpenMode === "read" || isLargeDocMode() || codeLargeText !== null;
+    browseMode = read;
+    setEditorReadonly(read);
+    setCodeReadonly(read);
+    syncHtmlFromPreview(); // 预览若有未落回的改动，先写回源码
   }
 
   /**
@@ -2192,6 +2210,45 @@
   const exportLatexFile = () => exportViaPandoc(t("导出为 LaTeX 文档"), "tex", t("LaTeX 文档"), "latex");
   const exportEpubFile = () => exportViaPandoc(t("导出为 Epub 电子书"), "epub", t("Epub 电子书"), "epub");
 
+  /**
+   * 组装打印用 HTML。
+   *
+   * 与「导出 PDF」共用 export-pdf 里的打印样式，故走动态加载（那条链路拖着 markdown-it）。
+   * 打印三种形态：Markdown 走渲染、HTML 原样、代码走 <pre> 转义，都收口在 lib/print 里。
+   */
+  async function buildPrintDoc(): Promise<{ html: string; title: string }> {
+    const m = await import("./lib/print");
+    const title = docBaseName();
+    const html = m.buildPrintDocument({
+      source: currentText(),
+      kind: docKind,
+      title,
+      dir: docDirPath(),
+    });
+    return { html, title };
+  }
+
+  /** 打印预览：组装成品 HTML 后挂进预览模态 */
+  async function openPrintPreview(): Promise<void> {
+    const doc = await buildPrintDoc();
+    printDocHtml = doc.html;
+    printTitle = doc.title;
+    printPreviewOpen = true;
+  }
+
+  /** 直接调起系统打印对话框（不经过预览） */
+  async function printDirectly(): Promise<void> {
+    const doc = await buildPrintDoc();
+    const m = await import("./lib/print");
+    await m.printHtml(doc.html);
+  }
+
+  /** 预览模态里的「打印…」：对当前预览内容调系统打印 */
+  async function printHtmlInPreview(): Promise<void> {
+    const m = await import("./lib/print");
+    await m.printHtml(printDocHtml);
+  }
+
   /** 导入 Word（阶段 5）：docx → Pandoc → GFM Markdown，图片内联 data URI */
   async function importWord(): Promise<void> {
     if (busy) return;
@@ -3347,6 +3404,12 @@
     await refreshHistory(); // 调小份数时立即反映当前文档的可回滚范围
   }
 
+  /** 切换「默认打开模式」并持久化（只影响之后打开 / 新建的文档） */
+  async function setDefaultOpenMode(mode: "read" | "edit"): Promise<void> {
+    defaultOpenMode = mode;
+    await saveSetting("defaultOpenMode", mode);
+  }
+
   // ---- 配置文件保存位置（批次十）----
 
   /** 读取当前位置模式与根目录路径（启动时与切换后刷新界面用） */
@@ -3786,7 +3849,7 @@
         t("段落：Ctrl+1~6 标题 1~6 级 / Ctrl+0 正文 / Ctrl+Shift+[ 有序列表 / Ctrl+Shift+] 无序列表 / Ctrl+[ 增加缩进 / Ctrl+] 减少缩进 / Ctrl+Shift+Q 引用"),
         t("格式：Ctrl+B 加粗 / Ctrl+I 斜体 / Ctrl+K 链接 / Ctrl+Shift+K 代码块 / Ctrl+Shift+` 行内代码 / Ctrl+Shift+M 行间公式 / Ctrl+Shift+I 插入图片 / Alt+Shift+5 删除线"),
         t("视图：Ctrl+Shift+L 侧边栏 / Ctrl+Shift+1 大纲 / Ctrl+Shift+3 文件目录树 / F8 段落聚焦 / F9 打字机 / F11 沉浸式全屏 / Ctrl+E 阅读模式"),
-        t("其他：Alt+F/E/P/O/V/T/H 展开对应菜单 / Esc 关闭菜单与查找栏"),
+        t("其他：Alt+F/E/P/O/V/H 展开对应菜单 / Esc 关闭菜单与查找栏"),
       ].join("\n"),
       { title: t("快捷键一览"), kind: "info" },
     );
@@ -3908,6 +3971,8 @@
             { label: t("导出为 Epub（.epub）"), action: exportEpubFile },
           ],
         },
+        { label: t("打印预览…"), action: () => void openPrintPreview() },
+        { label: t("打印…"), action: () => void printDirectly() },
         { sep: true },
         {
           label: t("编码"),
@@ -4119,50 +4184,6 @@
       ],
     },
     {
-      // 主题菜单对齐 Typora 的 Themes：明/暗档位与自定义主题集中在一处，不必再进设置面板
-      id: "theme",
-      label: t("主题"),
-      key: "t",
-      items: [
-        {
-          label: t("浅色"),
-          radio: true,
-          checked: () => userThemeSet && theme === "light",
-          action: () => void setThemeChoice("light"),
-        },
-        {
-          label: t("深色"),
-          radio: true,
-          checked: () => userThemeSet && theme === "dark",
-          action: () => void setThemeChoice("dark"),
-        },
-        {
-          label: t("跟随系统"),
-          radio: true,
-          checked: () => !userThemeSet,
-          action: () => void setThemeChoice("system"),
-        },
-        { sep: true },
-        {
-          // 自定义主题目录里的 .css：与设置面板同一份数据，展开时按需刷新
-          label: t("自定义主题"),
-          disabled: () => themeFiles.length === 0,
-          dynamic: () => [
-            { label: t("默认"), radio: true, checked: () => userTheme === null, action: () => void selectUserTheme(null) },
-            ...themeFiles.map((f) => ({
-              label: f.name,
-              radio: true,
-              checked: () => userTheme === f.name,
-              action: () => void selectUserTheme(f.name),
-            })),
-          ],
-        },
-        { label: t("打开主题文件夹"), action: () => void openThemesFolder() },
-        { sep: true },
-        { label: t("更多外观设置…"), action: () => { settingsOpen = true; } },
-      ],
-    },
-    {
       id: "help",
       label: t("帮助"),
       key: "h",
@@ -4183,8 +4204,6 @@
     subOpen = null;
     // 展开「文件」菜单时刷新历史版本列表，供「文件历史」动态子菜单使用
     if (willOpen && id === "file") void refreshHistory();
-    // 展开「主题」菜单时刷新自定义主题列表，画面里新放进主题文件夹的 .css 才会出现
-    if (willOpen && id === "theme") void refreshThemes();
   }
 
   function runMenuItem(item: MenuItem): void {
@@ -4386,7 +4405,10 @@
   function onKeydown(e: KeyboardEvent): void {
     // Esc：优先关闭菜单 / 查找栏
     if (e.key === "Escape") {
-      if (diffView) {
+      if (printPreviewOpen) {
+        printPreviewOpen = false;
+        e.preventDefault();
+      } else if (diffView) {
         diffView = null;
         e.preventDefault();
       } else if (paletteOpen) {
@@ -4431,7 +4453,7 @@
       return;
     }
 
-    // Alt+字母：展开对应一级菜单（文件/编辑/段落/格式/视图/主题/帮助）
+    // Alt+字母：展开对应一级菜单（文件/编辑/段落/格式/视图/帮助）
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const hit = MENUS.find((m) => m.key === e.key.toLowerCase());
       if (hit) {
@@ -4600,6 +4622,9 @@
     if (!(e.target as Element | null)?.closest?.(".encoding-wrap")) {
       encodingOpen = false;
     }
+    if (!(e.target as Element | null)?.closest?.(".lang-wrap")) {
+      codeLangOpen = false;
+    }
     if (!(e.target as Element | null)?.closest?.(".tab-menu")) {
       tabMenu = null;
     }
@@ -4671,6 +4696,7 @@
       // 阅读排版（字体 / 字号 / 行距 / 文字色 / 护眼底色）：只对 Markdown / 纯文本生效
       readerStyle = (s["readerStyle"] as ReaderStyle | undefined) ?? {};
       autoSaveEnabled = (s["autoSave"] as boolean | undefined) ?? true;
+      defaultOpenMode = (s["defaultOpenMode"] as "read" | "edit" | undefined) ?? "read";
       findCase = (s["findCase"] as boolean | undefined) ?? false;
       findWord = (s["findWord"] as boolean | undefined) ?? false;
       findRegex = (s["findRegex"] as boolean | undefined) ?? false;
@@ -4953,19 +4979,9 @@
       {/each}
     </div>
 
-    <!-- 右上角图标按钮（阶段 12）：皮肤设置（衣服）/ 软件设置（齿轮） -->
+    <!-- 右上角图标按钮（阶段 12）：皮肤设置（衣服）/ 软件设置（齿轮）。
+         阅读 / 编辑模式开关已移到状态栏（见 StatusBar.svelte） -->
     <div class="corner-tools">
-      <!-- 阅读 / 编辑模式开关：打开文档默认阅读（只读），切到编辑模式才能改。
-           放在标签栏右侧与设置按钮并列，比原先的状态栏左下角更容易点到 -->
-      <button
-        class="mode-toggle"
-        class:editing={!browseMode}
-        onclick={() => void setBrowseMode(!browseMode)}
-        title={browseMode ? t("当前为阅读模式，文档只读。点击切换到编辑模式（Ctrl+E）") : t("当前为编辑模式，可以修改文档。点击回到阅读模式（Ctrl+E）")}
-      >
-        {browseMode ? t("阅读模式") : t("编辑模式")}
-      </button>
-
       <div class="menu-root skin-root">
         <button
           class="icon-btn"
@@ -5222,6 +5238,12 @@
     {codeCursor}
     {codeMatch}
     {browseMode}
+    onSetBrowseMode={(read) => void setBrowseMode(read)}
+    codeLangOverride={codeLangChoice()}
+    onSetCodeLang={(id) => void setCodeLang(id)}
+    bind:codeLangOpen
+    {typewriterOn}
+    {paragraphFocus}
     {encoding}
     bind:encodingOpen
     onApplyEncoding={(id) => void applyEncoding(id)}
@@ -5232,6 +5254,31 @@
 
   {#if dragOver}
     <div class="drop-overlay">{t("松开鼠标打开文件（支持 md / html / docx / pdf）")}</div>
+  {/if}
+
+  <!-- 打印预览（本轮新增）：iframe 内嵌成品打印 HTML，底部「打印…」直接调系统打印 -->
+  {#if printPreviewOpen}
+    <div
+      class="modal-mask modal-mask--print"
+      role="none"
+      onclick={(e) => {
+        if (e.target === e.currentTarget) printPreviewOpen = false;
+      }}
+    >
+      <div class="modal modal--print" role="dialog" aria-label={t("打印预览")}>
+        <div class="modal-head">
+          <span>{t("打印预览")}{printTitle ? ` · ${printTitle}` : ""}</span>
+          <button class="icon-btn" title={t("关闭（Esc）")} aria-label={t("关闭")} onclick={() => (printPreviewOpen = false)}>✕</button>
+        </div>
+        <div class="print-frame-wrap">
+          <iframe class="print-frame" title={t("打印预览")} srcdoc={printDocHtml}></iframe>
+        </div>
+        <div class="modal-foot">
+          <button class="set-action" onclick={() => (printPreviewOpen = false)}>{t("关闭")}</button>
+          <button class="print-go" onclick={() => void printHtmlInPreview()}>{t("打印…")}</button>
+        </div>
+      </div>
+    </div>
   {/if}
 
   <!-- 多选一对话框（批次七）：外部变更三选 -->
@@ -5270,6 +5317,8 @@
       selectLocale={(id) => void selectLocale(id)}
       {autoSaveEnabled}
       onToggleAutoSave={() => void toggleAutoSave()}
+      {defaultOpenMode}
+      onSetDefaultOpenMode={(m) => void setDefaultOpenMode(m)}
       {historyKeep}
       onSetHistoryKeep={(n) => void setHistoryKeep(n)}
       {notepadAll}
@@ -5692,6 +5741,56 @@
     overflow: auto;
   }
 
+  /* ---- 打印预览（本轮新增）---- */
+  .modal-mask--print {
+    z-index: 650; /* 盖在软件设置之上，仍低于多选一对话框 */
+  }
+
+  .modal--print {
+    width: min(920px, 94vw);
+    height: min(88vh, 1100px);
+    max-height: 92vh;
+  }
+
+  /* 预览区吃掉剩余高度：iframe 需要确定高度才能撑满，故用 flex + min-height:0 而非 height:100% */
+  .print-frame-wrap {
+    flex: 1;
+    min-height: 0;
+    padding: 0.6rem;
+    background: #f3f4f6;
+  }
+
+  .print-frame {
+    width: 100%;
+    height: 100%;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 4px;
+    background: #fff;
+  }
+
+  .modal-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding: 0.6rem 0.8rem;
+    border-top: 1px solid var(--border, #ddd);
+  }
+
+  .print-go {
+    font: inherit;
+    font-size: 0.8125rem;
+    padding: 0.35rem 0.9rem;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+  }
+
+  .print-go:hover {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+  }
+
   .set-group + .set-group {
     margin-top: 1rem;
   }
@@ -5963,34 +6062,6 @@
 
   /* 状态栏的 .code-info / .html-switch / .html-edit 与整套状态栏样式，
      随组件搬到 components/StatusBar.svelte（Svelte 样式按组件作用域隔离） */
-
-  /* 「阅读 / 编辑模式」开关（右上角工具栏）：阅读（默认，只读）为浅描边，编辑态高亮强调。
-     与右侧的皮肤 / 设置按钮留一点间距，避免三个控件挤成一团。 */
-  .mode-toggle {
-    flex-shrink: 0;
-    font: inherit;
-    font-size: 0.75rem;
-    padding: 0.1rem 0.5rem;
-    margin-right: 0.3rem;
-    border: 1px solid var(--border, #ddd);
-    border-radius: 5px;
-    background: transparent;
-    color: inherit;
-    cursor: pointer;
-    opacity: 0.7;
-  }
-
-  .mode-toggle:hover {
-    opacity: 1;
-  }
-
-  .mode-toggle.editing {
-    background: var(--accent, #2563eb);
-    border-color: var(--accent, #2563eb);
-    color: #fff;
-    opacity: 1;
-    font-weight: 600;
-  }
 
   /* 编辑态给预览区一圈内描边，明确「现在改的是文档本身」 */
   .html-view iframe.editing {

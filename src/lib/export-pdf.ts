@@ -40,8 +40,8 @@ function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/** 完整打印文档：A4 纵向 + 中文排版 + 分页控制 */
-function buildPrintHtml(bodyHtml: string, title: string): string {
+/** 完整打印文档：A4 纵向 + 中文排版 + 分页控制。导出 PDF 与「打印」共用同一份样式 */
+export function buildPrintHtml(bodyHtml: string, title: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>

@@ -368,6 +368,9 @@ export const EN: Record<string, string> = {
   "导出为纯文本": "Export as Plain Text",
   "导出为 LaTeX（.tex）": "Export as LaTeX (.tex)",
   "导出为 Epub（.epub）": "Export as Epub (.epub)",
+  "打印预览…": "Print Preview…",
+  "打印…": "Print…",
+  打印预览: "Print Preview",
   "文件属性…": "File Properties…",
   退出程序: "Quit",
   撤销: "Undo",
@@ -422,6 +425,16 @@ export const EN: Record<string, string> = {
   沉浸式全屏编辑: "Immersive Fullscreen Editing",
   打字机模式: "Typewriter Mode",
   段落聚焦: "Paragraph Focus",
+  "打字机模式：当前行始终保持在屏幕垂直中央":
+    "Typewriter mode: the current line stays vertically centered",
+  "段落聚焦：仅高亮当前段落，其余内容淡出":
+    "Paragraph focus: highlight only the current paragraph and dim the rest",
+  "语法高亮方案：默认按扩展名自动判定，可手动指定":
+    "Syntax highlighting scheme: auto-detected by extension by default; can be set manually",
+  "默认打开模式": "Default Open Mode",
+  打开: "Open",
+  "打开或新建文档后的初始模式，只影响之后打开的文档；大文档与超大代码文件始终以只读方式打开。":
+    "The initial mode for documents you open or create; it only affects documents opened afterwards. Large documents and oversized code files always open in read-only mode.",
   浅色主题: "Light Theme",
   深色主题: "Dark Theme",
   跟随系统主题: "Follow System Theme",
@@ -654,15 +667,13 @@ export const EN: Record<string, string> = {
     "Format: Ctrl+B Bold / Ctrl+I Italic / Ctrl+K Link / Ctrl+Shift+K Code Block / Ctrl+Shift+` Inline Code / Ctrl+Shift+M Math Block / Ctrl+Shift+I Insert Image / Alt+Shift+5 Strikethrough",
   "视图：Ctrl+Shift+L 侧边栏 / Ctrl+Shift+1 大纲 / Ctrl+Shift+3 文件目录树 / F8 段落聚焦 / F9 打字机 / F11 沉浸式全屏 / Ctrl+E 阅读模式":
     "View: Ctrl+Shift+L Sidebar / Ctrl+Shift+1 Outline / Ctrl+Shift+3 File Tree / F8 Paragraph Focus / F9 Typewriter / F11 Immersive Fullscreen / Ctrl+E Reading Mode",
-  "其他：Alt+F/E/P/O/V/T/H 展开对应菜单 / Esc 关闭菜单与查找栏":
-    "Other: Alt+F/E/P/O/V/T/H Open Menu / Esc Close Menu and Find Bar",
+  "其他：Alt+F/E/P/O/V/H 展开对应菜单 / Esc 关闭菜单与查找栏":
+    "Other: Alt+F/E/P/O/V/H Open Menu / Esc Close Menu and Find Bar",
 
-  // ---- 主题菜单（对齐 Typora 的 Themes）----
+  // ---- 命令面板 / 偏好设置入口 ----
   "命令面板…": "Command Palette…",
   "设置…": "Settings…",
   正文: "Paragraph",
-  自定义主题: "Custom Theme",
-  "更多外观设置…": "More Appearance Settings…",
 
   // ---- 恢复中心（统一浏览恢复草稿与本地版本历史）----
   "恢复中心…": "Recovery Center…",

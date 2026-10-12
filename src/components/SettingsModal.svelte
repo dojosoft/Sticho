@@ -26,6 +26,8 @@
     selectLocale: (id: Locale) => void;
     autoSaveEnabled: boolean;
     onToggleAutoSave: () => void;
+    defaultOpenMode: "read" | "edit";
+    onSetDefaultOpenMode: (mode: "read" | "edit") => void;
     historyKeep: number;
     onSetHistoryKeep: (n: number) => void;
     notepadAll: boolean;
@@ -87,6 +89,8 @@
     selectLocale,
     autoSaveEnabled,
     onToggleAutoSave,
+    defaultOpenMode,
+    onSetDefaultOpenMode,
     historyKeep,
     onSetHistoryKeep,
     notepadAll,
@@ -190,6 +194,22 @@
               {/each}
             </div>
             <p class="set-tip">{t("切换后立即生效；编辑器工具栏的气泡提示需重启程序才会更新。")}</p>
+          </section>
+
+          <section class="set-group">
+            <h3>{t("打开")}</h3>
+            <label class="set-row set-row--field">
+              <span class="set-label">{t("默认打开模式")}</span>
+              <select
+                class="set-select"
+                value={defaultOpenMode}
+                onchange={(e) => onSetDefaultOpenMode(e.currentTarget.value as "read" | "edit")}
+              >
+                <option value="read">{t("阅读模式")}</option>
+                <option value="edit">{t("编辑模式")}</option>
+              </select>
+            </label>
+            <p class="set-tip">{t("打开或新建文档后的初始模式，只影响之后打开的文档；大文档与超大代码文件始终以只读方式打开。")}</p>
           </section>
 
           <section class="set-group">
