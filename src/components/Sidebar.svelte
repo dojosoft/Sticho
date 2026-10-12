@@ -9,7 +9,7 @@
   import { untrack } from "svelte";
   import { listDir, type DirEntry } from "../lib/tauri-api";
   import type { OutlineItem, SidebarView } from "../lib/sidebar";
-  import { highlightSegments, type SearchGroup, type SearchHit } from "../lib/fileSearch";
+  import { highlightSegments, highlightRegexSegments, type SearchGroup, type SearchHit, type TextSegment } from "../lib/fileSearch";
 
   type Props = {
     view: SidebarView;
@@ -33,8 +33,8 @@
     onOpenFile: (path: string) => void;
     onPickRoot: () => void;
     onGotoHeading: (index: number) => void;
-    /** 发起跨文件搜索（查询词 + 是否区分大小写） */
-    onSearch?: (query: string, caseSensitive: boolean) => void;
+    /** 发起跨文件搜索（查询词 + 是否区分大小写 + 是否按正则解释） */
+    onSearch?: (query: string, caseSensitive: boolean, regex: boolean) => void;
     /** 点击某条命中：打开对应文件并定位 */
     onOpenHit?: (hit: SearchHit) => void;
     /** 界面翻译函数（以中文原文为键）；未传入时原样返回，便于单独渲染 / 测试 */
@@ -66,6 +66,7 @@
   // ---- 跨文件搜索的本地输入状态（结果本身由应用层持有） ----
   let query = $state("");
   let caseSensitive = $state(false);
+  let regexMode = $state(false); // 按正则解释查询词（粗筛在后端，二次匹配在前端）
   let debounce = 0;
 
   /** 输入防抖：停顿后再发起遍历，避免逐字触发整目录扫描 */
@@ -73,17 +74,24 @@
     if (debounce !== 0) clearTimeout(debounce);
     debounce = window.setTimeout(() => {
       debounce = 0;
-      onSearch(query.trim(), caseSensitive);
+      onSearch(query.trim(), caseSensitive, regexMode);
     }, 250);
   }
 
-  /** 立即搜索（回车、切换大小写时） */
+  /** 立即搜索（回车、切换大小写 / 正则时） */
   function runSearchNow(): void {
     if (debounce !== 0) {
       clearTimeout(debounce);
       debounce = 0;
     }
-    onSearch(query.trim(), caseSensitive);
+    onSearch(query.trim(), caseSensitive, regexMode);
+  }
+
+  /** 命中行的高亮切片：正则模式按正则切，否则按字面量切 */
+  function segmentsFor(text: string): TextSegment[] {
+    return regexMode
+      ? highlightRegexSegments(text, query, caseSensitive)
+      : highlightSegments(text, query, caseSensitive);
   }
 
   /** 已展示的命中总数（用于统计行） */
@@ -271,6 +279,17 @@
             />
             Aa
           </label>
+          <label class="search-case" title={t("正则表达式")}>
+            <input
+              type="checkbox"
+              checked={regexMode}
+              onchange={() => {
+                regexMode = !regexMode;
+                runSearchNow();
+              }}
+            />
+            .*
+          </label>
         </div>
 
         {#if searchError}
@@ -278,7 +297,7 @@
         {:else if searchBusy}
           <div class="hint">{t("搜索中…")}</div>
         {:else if query.trim() === ""}
-          <div class="hint">{t("输入关键词开始搜索（字面量匹配，可切换区分大小写）。")}</div>
+          <div class="hint">{t("输入关键词开始搜索（可切换区分大小写 / 正则表达式）。")}</div>
         {:else if totalHits === 0}
           <div class="hint">{t("没有找到匹配内容")}</div>
         {:else}
@@ -295,7 +314,7 @@
                 <button class="shit" onclick={() => onOpenHit(hit)} title={`${group.path}:${hit.line}`}>
                   <span class="shit-ln">{hit.line}</span>
                   <span class="shit-text">
-                    {#each highlightSegments(hit.text, query, caseSensitive) as seg, si (si)}
+                    {#each segmentsFor(hit.text) as seg, si (si)}
                       {#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}
                     {/each}
                   </span>

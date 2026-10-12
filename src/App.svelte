@@ -139,7 +139,7 @@
   import SettingsModal from "./components/SettingsModal.svelte";
   import CommandPalette, { type PaletteCommand } from "./components/CommandPalette.svelte";
   import WelcomeDialog from "./components/WelcomeDialog.svelte";
-  import { groupSearchHits, type SearchGroup, type SearchHit } from "./lib/fileSearch";
+  import { groupSearchHits, literalAnchor, type SearchGroup, type SearchHit } from "./lib/fileSearch";
   // 导出 / 导入实现（export-pdf、export-html、export-txt、import-html、export-docx、
   // import-pdf）统一走调用点动态加载：它们拖着 markdown-it / turndown / docx /
   // pdfjs-dist 这类大依赖，却只在对应菜单动作时才用得上。
@@ -172,6 +172,7 @@
   let searchTruncated = $state(false);
   let searchQuery = $state(""); // 最近一次搜索的查询词与大小写设置，供「点击命中定位」复用
   let searchCaseSensitive = $state(false);
+  let searchRegex = $state(false); // 最近一次搜索是否按正则解释（供定位时复用同一套匹配语义）
   let searchSeq = 0; // 搜索序号：丢弃过期请求的结果，避免快速输入时结果乱序
   let theme = $state<"light" | "dark">("light");
   let userThemeSet = $state(false); // 用户是否显式选过主题（否则跟随系统）
@@ -4189,26 +4190,74 @@
   // ---- 跨文件搜索（批次四）----
 
   /**
+   * 编译跨文件搜索用的正则：**非全局**——复用 exec 取首个匹配位置，非全局才无 lastIndex 状态。
+   * 语法有误返回 null（由调用方给提示）。
+   */
+  function compileSearchRegex(source: string, caseSensitive: boolean): RegExp | null {
+    try {
+      return new RegExp(source, caseSensitive ? "" : "i");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 在当前目录树根内搜索。查询为空则清空结果；
    * 用自增序号丢弃过期请求：快速输入时先发的慢请求不会覆盖后发的快结果。
+   *
+   * 正则模式：Rust 侧只认字面量（不引 regex crate），先抽一段「必然出现」的字面量做粗筛，
+   * 再用完整正则在**前端**对候选行二次匹配，去掉粗筛带来的误报。
    */
-  async function runSearch(query: string, caseSensitive: boolean): Promise<void> {
+  async function runSearch(query: string, caseSensitive: boolean, regex: boolean): Promise<void> {
     if (!treeRoot) return;
     searchQuery = query;
     searchCaseSensitive = caseSensitive;
-    if (query === "") {
+    searchRegex = regex;
+
+    const clear = (message: string): void => {
       searchGroups = [];
       searchFileCount = 0;
       searchTruncated = false;
-      searchError = "";
+      searchError = message;
+    };
+
+    if (query === "") {
+      clear("");
       return;
     }
+
+    const re = regex ? compileSearchRegex(query, caseSensitive) : null;
+    let needle = query;
+    if (regex) {
+      if (!re) {
+        clear(t("正则表达式语法有误。"));
+        return;
+      }
+      needle = literalAnchor(query);
+      if (needle === "") {
+        clear(
+          t("该正则里没有可直接搜索的字面量（文字 / 数字 / 符号），无法先缩小范围。请在正则里补上一段确定的文字。"),
+        );
+        return;
+      }
+    }
+
     const seq = ++searchSeq;
     searchBusy = true;
     try {
-      const res = await searchFiles(treeRoot, query, caseSensitive, 500);
+      const res = await searchFiles(treeRoot, needle, caseSensitive, 500);
       if (seq !== searchSeq) return;
-      searchGroups = groupSearchHits(res.hits);
+      if (re) {
+        // 二次匹配：粗筛按字面量返回的行里，只保留整行真的命中正则的，并回填命中列号
+        const hits: SearchHit[] = [];
+        for (const hit of res.hits) {
+          const m = re.exec(hit.text);
+          if (m) hits.push({ ...hit, column: hit.text.slice(0, m.index).length });
+        }
+        searchGroups = groupSearchHits(hits);
+      } else {
+        searchGroups = groupSearchHits(res.hits);
+      }
       searchFileCount = res.files;
       searchTruncated = res.truncated;
       searchError = "";
@@ -4256,7 +4305,7 @@
     findText = searchQuery;
     findCase = searchCaseSensitive;
     findWord = false;
-    findRegex = false;
+    findRegex = searchRegex; // 定位沿用搜索时的匹配语义（字面量 / 正则）
     findIdx = -1;
     // Vditor / CodeMirror 的正文渲染是异步的，等一拍再收集命中，否则拿到空列表
     await new Promise((resolve) => window.setTimeout(resolve, 120));
@@ -4976,7 +5025,7 @@
         onOpenFile={openFromTree}
         onPickRoot={pickTreeRoot}
         onGotoHeading={gotoHeading}
-        onSearch={(q, cs) => void runSearch(q, cs)}
+        onSearch={(q, cs, re) => void runSearch(q, cs, re)}
         onOpenHit={(hit) => void openSearchHit(hit)}
         t={t}
       />

@@ -596,8 +596,11 @@ export const EN: Record<string, string> = {
   在当前文件夹中全文搜索: "Full-text search in the current folder",
   "在当前文件夹中搜索…": "Search in the current folder…",
   "搜索中…": "Searching…",
-  "输入关键词开始搜索（字面量匹配，可切换区分大小写）。":
-    "Type a keyword to start searching (literal matching; case sensitivity can be toggled).",
+  "输入关键词开始搜索（可切换区分大小写 / 正则表达式）。":
+    "Type a keyword to start searching (case sensitivity and regex can be toggled).",
+  "正则表达式语法有误。": "Invalid regular expression.",
+  "该正则里没有可直接搜索的字面量（文字 / 数字 / 符号），无法先缩小范围。请在正则里补上一段确定的文字。":
+    "This regex contains no searchable literal text (letters / digits / symbols), so the scope cannot be narrowed first. Add a fixed piece of text to the regex.",
   没有找到匹配内容: "No matches found",
   "在 {files} 个文件中找到 {n} 处": "Found {n} match(es) in {files} file(s)",
   "（结果已截断，请缩小范围）": "(Results truncated — narrow the scope)",
