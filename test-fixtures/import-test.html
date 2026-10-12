@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>HTML 导入验收测试</title>
+<style>body { font-family: sans-serif; }</style>
+<script>console.log("这段脚本应被剔除");</script>
+</head>
+<body>
+<h1>中文文档标题</h1>
+<h2>功能特性</h2>
+<p>这是一段<strong>加粗</strong>与<em>斜体</em>混排的中文段落，包含一个<a href="https://example.com">链接</a>与行内代码 <code>inline_code()</code>。</p>
+<table>
+<thead><tr><th>功能</th><th>状态</th><th>优先级</th></tr></thead>
+<tbody>
+<tr><td>打开 HTML</td><td>已完成</td><td>P0</td></tr>
+<tr><td>导出 HTML</td><td>已完成</td><td>P2</td></tr>
+</tbody>
+</table>
+<ul>
+<li>无序列表项一</li>
+<li>无序列表项二</li>
+</ul>
+<pre><code>function greet() {
+  return "你好，世界";
+}</code></pre>
+<blockquote>引用块：turndown 应转换为 Markdown 引用语法。</blockquote>
+</body>
+</html>

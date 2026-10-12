@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sticho 导出文档</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "SimSun", sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+    color: #1f2328;
+    background: #ffffff;
+    margin: 0;
+    padding: 2.5rem 1rem 5rem;
+  }
+  main { max-width: 820px; margin: 0 auto; }
+
+  h1 { font-size: 1.9em; color: #0a3069; margin: 0 0 0.6em; }
+  h2 { font-size: 1.45em; color: #0550ae; margin: 1.2em 0 0.5em; }
+  h3 { font-size: 1.22em; margin: 1.1em 0 0.45em; }
+  h4, h5, h6 { font-size: 1.05em; color: #57606a; margin: 1em 0 0.4em; }
+
+  p { margin: 0.6em 0; }
+
+  code {
+    font-family: Consolas, "Microsoft YaHei", monospace;
+    font-size: 0.88em;
+    background: #f0f1f3;
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+  }
+  a { color: #0969da; }
+  del { color: #6e7781; }
+
+  table { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: 0.94em; }
+  th, td { border: 1px solid #c9ced4; padding: 6px 10px; text-align: left; }
+  th { background: #eef2f5; font-weight: 600; }
+
+  pre {
+    background: #f5f6f8;
+    border: 1px solid #dcdee2;
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin: 1em 0;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; font-size: 0.86em; line-height: 1.6; }
+
+  blockquote {
+    margin: 0.8em 0;
+    padding: 0.3em 1em;
+    border-left: 4px solid #b4b9c0;
+    background: #f6f8fa;
+    color: #57606a;
+    border-radius: 0 4px 4px 0;
+  }
+
+  ul, ol { padding-left: 1.8em; margin: 0.6em 0; }
+  li { margin: 0.25em 0; }
+  img { max-width: 100%; }
+  hr { border: none; border-top: 1px solid #99a0a8; margin: 1.5em 0; }
+
+  @media print {
+    body { padding: 0; }
+    @page { margin: 18mm 16mm; }
+  }
+</style>
+</head>
+<body>
+<main>
+<h1>Sticho 中文测试文档</h1>
+<p>这是一个用于验收的中文测试文件，覆盖常见的 Markdown 元素与中英文混排场景。</p>
+<h2>1. 中英文混排</h2>
+<p>本项目使用 Tauri 2 框架构建，前端采用 Svelte 5 与 Vditor 编辑器。全角标点：，。、；：？！「」『』（）《》。</p>
+<p>特殊字符：€ £ ¥ © ® ™ § ¶ † ‡ • … ± × ÷ ≠ ≤ ≥ ∞ ∑ √ ∂ ∇</p>
+<p>Emoji 表情：😀🎉📄📝✅❌⏳🔥💡⚠️🔍🚀</p>
+<h2>2. 文本样式</h2>
+<p><strong>加粗文本</strong>、<em>斜体文本</em>、<em><strong>粗斜体</strong></em>、<s>删除线</s>、<code>行内代码</code>、<a href="https://example.com">超链接</a>。</p>
+<h2>3. 列表</h2>
+<p>无序列表：</p>
+<ul>
+<li>第一项：苹果 Apple</li>
+<li>第二项：香蕉 Banana</li>
+<li>第三项：樱桃 Cherry
+<ul>
+<li>嵌套项：血橙 Blood Orange</li>
+</ul>
+</li>
+</ul>
+<p>有序列表：</p>
+<ol>
+<li>打开文件</li>
+<li>编辑内容</li>
+<li>保存文档
+<ol>
+<li>点击保存按钮</li>
+<li>选择保存路径</li>
+</ol>
+</li>
+</ol>
+<p>任务列表：</p>
+<ul>
+<li>[X]  已完成事项</li>
+<li>[ ]  待办事项</li>
+</ul>
+<h2>4. 引用</h2>
+<blockquote>
+<p>这是一段引用文本。</p>
+<p>引用可以包含多个段落，也可以包含 <strong>加粗</strong>、<code>代码</code> 等行内元素。</p>
+<blockquote>
+<p>引用还可以嵌套。</p>
+</blockquote>
+</blockquote>
+<h2>5. 表格</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">功能</th>
+<th style="text-align:center">快捷键</th>
+<th style="text-align:center">优先级</th>
+<th style="text-align:center">状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left">新建</td>
+<td style="text-align:center">Ctrl+N</td>
+<td style="text-align:center">P0</td>
+<td style="text-align:center">✅</td>
+</tr>
+<tr>
+<td style="text-align:left">打开</td>
+<td style="text-align:center">Ctrl+O</td>
+<td style="text-align:center">P0</td>
+<td style="text-align:center">✅</td>
+</tr>
+<tr>
+<td style="text-align:left">保存</td>
+<td style="text-align:center">Ctrl+S</td>
+<td style="text-align:center">P0</td>
+<td style="text-align:center">✅</td>
+</tr>
+<tr>
+<td style="text-align:left">导出 Word</td>
+<td style="text-align:center">-</td>
+<td style="text-align:center">P0</td>
+<td style="text-align:center">开发中</td>
+</tr>
+<tr>
+<td style="text-align:left">导出 PDF</td>
+<td style="text-align:center">-</td>
+<td style="text-align:center">P0</td>
+<td style="text-align:center">开发中</td>
+</tr>
+</tbody>
+</table>
+<h2>6. 代码块</h2>
+<pre><code class="language-rust">fn main() {
+    let greeting = &quot;你好，世界！&quot;;
+    println!(&quot;{}&quot;, greeting);
+}
+</code></pre>
+<pre><code class="language-javascript">// 中文注释：输出问候语
+const greeting = &quot;你好，世界！&quot;;
+console.log(greeting);
+</code></pre>
+<pre><code class="language-sql">-- 查询用户表中的中文姓名
+SELECT id, 姓名, 部门 FROM 用户表 WHERE 状态 = '在职';
+</code></pre>
+<h2>7. 数学与分隔线</h2>
+<p>行内公式 $E = mc^2$（Vditor 支持数学公式渲染）。</p>
+<hr>
+<p>以上内容用于验证：中文不乱码、表格边框正确、代码高亮正常、列表缩进合理、emoji 显示完整。快捷键</p>
+
+</main>
+</body>
+</html>

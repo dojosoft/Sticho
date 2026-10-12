@@ -1,0 +1,386 @@
+<script lang="ts">
+  /**
+   * 左侧侧边栏（任务书阶段 11）
+   *
+   * 三个视图互相切换：文件目录树 / 文档大纲 / 文件属性。
+   * 目录树按需加载（展开时才读目录），大纲与文件属性的数据由 App 侧提供，
+   * 本组件只负责渲染与交互，避免把文件状态逻辑散落到两个文件里。
+   */
+  import { untrack } from "svelte";
+  import { listDir, type DirEntry } from "../lib/tauri-api";
+  import type { OutlineItem, SidebarView } from "../lib/sidebar";
+
+  type Props = {
+    view: SidebarView;
+    /** 目录树根目录（跟随当前文档所在文件夹，也可手动选择） */
+    root: string | null;
+    currentPath: string | null;
+    outline: OutlineItem[];
+    fileProps: [string, string][];
+    /** 当前是代码文件：大纲模板不适用，提示语要换成「代码文件无大纲」 */
+    codeFile?: boolean;
+    onView: (view: SidebarView) => void;
+    onClose: () => void;
+    onOpenFile: (path: string) => void;
+    onPickRoot: () => void;
+    onGotoHeading: (index: number) => void;
+    /** 界面翻译函数（以中文原文为键）；未传入时原样返回，便于单独渲染 / 测试 */
+    t?: (key: string, vars?: Record<string, string | number>) => string;
+  };
+
+  let { view, root, currentPath, outline, fileProps, codeFile = false, onView, onClose, onOpenFile, onPickRoot, onGotoHeading, t = (s: string) => s }: Props = $props();
+
+  // ---- 目录树状态：已加载的子项缓存 + 展开集合（均重新赋值以触发响应） ----
+  let cache = $state<Record<string, DirEntry[]>>({});
+  let expanded = $state<string[]>([]);
+  let loading = $state<string[]>([]);
+  let treeError = $state("");
+
+  async function load(dir: string): Promise<void> {
+    if (cache[dir] || loading.includes(dir)) return;
+    loading = [...loading, dir];
+    try {
+      const entries = await listDir(dir);
+      cache = { ...cache, [dir]: entries };
+      treeError = "";
+    } catch (e) {
+      treeError = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = loading.filter((d) => d !== dir);
+    }
+  }
+
+  function toggleDir(dir: string): void {
+    if (expanded.includes(dir)) {
+      expanded = expanded.filter((d) => d !== dir);
+      return;
+    }
+    expanded = [...expanded, dir];
+    void load(dir);
+  }
+
+  function activate(entry: DirEntry): void {
+    if (entry.isDir) toggleDir(entry.path);
+    else onOpenFile(entry.path);
+  }
+
+  // 根目录变化（打开/另存文档、手动选目录）时清空缓存重新加载。
+  // untrack：cache/loading 的读取只是加载前的判重，若被当作依赖会导致
+  // 「加载完成 → 写入缓存 → 效应重跑 → 清空缓存」的死循环。
+  $effect(() => {
+    const current = root;
+    untrack(() => {
+      cache = {};
+      expanded = [];
+      treeError = "";
+      if (current) {
+        expanded = [current];
+        void load(current);
+      }
+    });
+  });
+
+  function rootName(): string {
+    return root ? (root.split(/[\\/]/).filter(Boolean).pop() ?? root) : "";
+  }
+</script>
+
+{#snippet nodes(entries: DirEntry[], depth: number)}
+  {#each entries as entry (entry.path)}
+    <div
+      class="node"
+      class:current={entry.path === currentPath}
+      class:dir={entry.isDir}
+      style="padding-left: {0.5 + depth * 0.7}rem"
+      title={`${entry.path}\n${entry.isDir ? t("点击展开 / 收起") : t("点击在编辑器中打开")}`}
+      role="button"
+      tabindex="0"
+      onclick={() => activate(entry)}
+      onkeydown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          activate(entry);
+        }
+      }}
+    >
+      <span class="icon">{entry.isDir ? (expanded.includes(entry.path) ? "▾" : "▸") : "·"}</span>
+      <span class="name">{entry.name}</span>
+    </div>
+    {#if entry.isDir && expanded.includes(entry.path)}
+      {#if cache[entry.path]}
+        {@render nodes(cache[entry.path]!, depth + 1)}
+      {:else}
+        <div class="hint" style="padding-left: {0.5 + (depth + 1) * 0.7}rem">{t("加载中…")}</div>
+      {/if}
+    {/if}
+  {/each}
+{/snippet}
+
+<aside class="sidebar">
+  <div class="side-head">
+    <div class="tabs">
+      <button class:active={view === "tree"} onclick={() => onView("tree")} title={t("按文件夹浏览文件")}>{t("文件")}</button>
+      <button class:active={view === "outline"} onclick={() => onView("outline")} title={t("按标题层级跳转")}>{t("大纲")}</button>
+      <button class:active={view === "props"} onclick={() => onView("props")} title={t("当前文件属性")}>{t("属性")}</button>
+    </div>
+    <button class="close" onclick={onClose} title={t("关闭侧边栏（F9）")}>✕</button>
+  </div>
+
+  <div class="side-body">
+    {#if view === "tree"}
+      <div class="tree-head">
+        <span class="tree-root" title={root ?? t("尚未选择文件夹")}>{root ? rootName() : t("未选择文件夹")}</span>
+        <button onclick={onPickRoot} title={t("选择文件夹")}>{t("选择…")}</button>
+      </div>
+
+      {#if treeError}
+        <div class="hint error">{treeError}</div>
+      {/if}
+
+      {#if root === null}
+        <div class="hint">{t("未打开文档时，可点「选择…」指定一个文件夹作为目录树根。")}</div>
+      {:else if !cache[root]}
+        <div class="hint">{t("加载中…")}</div>
+      {:else if cache[root]!.length === 0}
+        <div class="hint">{t("该文件夹为空")}</div>
+      {:else}
+        {@render nodes(cache[root]!, 0)}
+      {/if}
+    {:else if view === "outline"}
+      {#if outline.length === 0}
+        <div class="hint">
+          {codeFile
+            ? t("代码文件没有标题大纲（正文高亮与折叠请直接用编辑区）")
+            : t("当前文档没有标题（用 # 或下划线式写法设置标题后会显示在这里）")}
+        </div>
+      {:else}
+        {#each outline as item, i (i)}
+          <button
+            class="outline-item"
+            style="padding-left: {0.5 + (item.level - 1) * 0.7}rem"
+            onclick={() => onGotoHeading(i)}
+            title={item.text}
+          >
+            <span class="lv">H{item.level}</span>
+            <span class="name">{item.text}</span>
+          </button>
+        {/each}
+      {/if}
+    {:else}
+      <dl class="props">
+        {#each fileProps as [label, value] (label)}
+          <dt>{label}</dt>
+          <dd title={value}>{value}</dd>
+        {/each}
+      </dl>
+    {/if}
+  </div>
+</aside>
+
+<style>
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 240px;
+    flex-shrink: 0;
+    min-height: 0;
+    background: var(--sidebar-bg, #fafafa);
+    border-right: 1px solid var(--border, #ddd);
+    user-select: none;
+    font-size: 0.8125rem;
+  }
+
+  .side-head {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.35rem;
+    border-bottom: 1px solid var(--border, #ddd);
+    flex-shrink: 0;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0.15rem;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .tabs button {
+    font: inherit;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .tabs button:hover {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+  }
+
+  .tabs button.active {
+    background: var(--hover, rgba(0, 0, 0, 0.1));
+    font-weight: 600;
+  }
+
+  .close {
+    font: inherit;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.4rem;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+    opacity: 0.7;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .close:hover {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+    opacity: 1;
+  }
+
+  .side-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 0.3rem 0;
+  }
+
+  /* ---- 目录树 ---- */
+  .tree-head {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0 0.5rem 0.35rem;
+    border-bottom: 1px solid var(--border, #ddd);
+    margin-bottom: 0.3rem;
+  }
+
+  .tree-root {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.75rem;
+    opacity: 0.8;
+  }
+
+  .tree-head button {
+    font: inherit;
+    font-size: 0.75rem;
+    padding: 0.15rem 0.4rem;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .tree-head button:hover {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+  }
+
+  .node {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding-top: 0.15rem;
+    padding-bottom: 0.15rem;
+    padding-right: 0.4rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .node:hover {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+  }
+
+  .node.current {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    font-weight: 600;
+  }
+
+  .node .icon {
+    flex: 0 0 0.8rem;
+    text-align: center;
+    opacity: 0.75;
+  }
+
+  .node .name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ---- 大纲 ---- */
+  .outline-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    font-size: 0.8125rem;
+    padding: 0.2rem 0.4rem 0.2rem 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .outline-item:hover {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+  }
+
+  .outline-item .lv {
+    flex: 0 0 auto;
+    font-size: 0.6875rem;
+    opacity: 0.55;
+  }
+
+  .outline-item .name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ---- 文件属性 ---- */
+  .props {
+    margin: 0;
+    padding: 0 0.6rem;
+  }
+
+  .props dt {
+    font-size: 0.75rem;
+    opacity: 0.6;
+    margin-top: 0.5rem;
+  }
+
+  .props dd {
+    margin: 0.1rem 0 0;
+    word-break: break-all;
+  }
+
+  .hint {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.75rem;
+    opacity: 0.65;
+    line-height: 1.5;
+  }
+
+  .hint.error {
+    color: var(--danger, #c0392b);
+    opacity: 1;
+  }
+</style>

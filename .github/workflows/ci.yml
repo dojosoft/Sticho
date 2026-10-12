@@ -1,0 +1,56 @@
+name: CI
+
+# 持续集成底座：把「前端构建 + 前端单测 + Rust 静态检查 + Rust 单测」串成一条流水线。
+#
+# 前提说明：当前项目目录尚未纳入 git，本工作流需在以下条件满足后才会生效——
+#   1. 以 **md-studio** 目录为仓库根初始化 git 并推送到 GitHub；
+#   2. 仓库默认分支为 main / master（或改下面的 branches 列表）。
+#
+# 之所以选 windows-latest：应用是 Windows 桌面程序，Rust 侧依赖
+# windows-sys / webview2-com 等平台库，只有 Windows runner 能完整编译与验证。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request: {}
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 前端单元测试
+        run: npm test
+
+      - name: 前端类型检查（svelte-check）
+        run: npm run check
+
+      - name: 前端静态检查（ESLint）
+        run: npm run lint
+
+      - name: 前端构建
+        run: npm run build
+
+      - name: Rust 静态检查
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Rust 单元测试
+        run: cargo test --manifest-path src-tauri/Cargo.toml

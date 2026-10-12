@@ -1,0 +1,430 @@
+/* Sticho 全局样式 —— 主题变量化（阶段 7）
+ * 由 JS 在 <html> 上切 light/dark 类驱动（用户显式选择优先，未设置时跟随系统）。
+ * color-scheme 让滚动条等原生控件同步深浅色。 */
+
+html,
+html.light {
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --toolbar-bg: #f5f5f5;
+  --statusbar-bg: #f5f5f5;
+  --sidebar-bg: #fafafa;
+  --border: #dddddd;
+  --hover: rgba(0, 0, 0, 0.07);
+  --danger: #c0392b;
+  /* 段落聚焦时压在非当前块上的暗色（浅色主题下用浅一点的遮罩就够） */
+  --spotlight-dim: rgba(0, 0, 0, 0.18);
+  /* 查找命中高亮（批次五）：普通命中用暖黄，当前命中用橙红以区分 */
+  --find-hl: #ffe58f;
+  --find-hl-active: #ff9c6e;
+  color-scheme: light;
+}
+
+html.dark {
+  --bg: #1e1e1e;
+  --fg: #d4d4d4;
+  --toolbar-bg: #252526;
+  --statusbar-bg: #252526;
+  --sidebar-bg: #252526;
+  --border: #3c3c3c;
+  --hover: rgba(255, 255, 255, 0.09);
+  --danger: #f48771;
+  --spotlight-dim: rgba(0, 0, 0, 0.45);
+  /* 深色下用低饱和的黄/橙，避免整片文字反而看不清 */
+  --find-hl: #6b5c1e;
+  --find-hl-active: #a1521f;
+  color-scheme: dark;
+}
+
+/**
+ * 查找命中高亮（批次五）：CSS Custom Highlight API。
+ *
+ * 只登记 Range，不往正文插任何元素——Vditor 每次 input 都会按 DOM 回写 Markdown，
+ * 用 <mark> 包裹会被当成正文内容一起写进去。WebView2 的 Chromium 低于 105 时
+ * 这条规则不生效，功能自动降级为「只计数不高亮」。
+ */
+::highlight(md-find) {
+  background-color: var(--find-hl);
+  color: inherit;
+}
+
+::highlight(md-find-current) {
+  background-color: var(--find-hl-active);
+  color: inherit;
+}
+
+:root {
+  --font-sans: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  /* 主题强调色（拖拽提示边框等） */
+  --accent: #2563eb;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--fg);
+  /* 禁止 WebView 中被误选中的蓝色高亮 */
+  user-select: none;
+}
+
+/**
+ * 段首空两格（preview.markdown.paragraphBeginningSpace）。
+ *
+ * Vditor 只负责给每个段落输出 indent--2 类名，对应的样式规则它自己没提供
+ * （全量检索 dist 下所有 CSS，只有 KaTeX 用了 indent 这个词），所以在应用侧补齐，
+ * 否则这个开关打开后毫无视觉效果。ir / wysiwyg / preview 三个模式的正文都在
+ * .vditor-reset 内，故一条规则即可覆盖。
+ */
+.vditor-reset p.indent--2 {
+  text-indent: 2em;
+}
+
+/**
+ * 表情面板的高度上限与列数（配套 editor.ts 的 expandEmojiSet）。
+ *
+ * Vditor 用 height 选项算面板的最大高度（height - 80），本项目 height 传的是字符串
+ * "100%"，相减得到 NaN，内联的 max-height 失效。默认只有 8 个表情时看不出来，
+ * 扩展到 1900 余条后没有上限会撑出上万像素，故在应用侧补一个滚动高度。
+ *
+ * 宽度固定为 7 × 30px（按钮尺寸见 Vditor 的 .vditor-emojis button）：这样「常用」区的
+ * 14 个表情正好占满前两行，其余表情接在分隔线之后。
+ */
+.vditor-emojis {
+  max-height: 300px;
+  width: 210px;
+}
+
+/* 常用表情与其余表情之间的分隔线（clear 掉按钮的浮动，另起一行） */
+.md-studio-emojis__divider {
+  clear: both;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
+/*
+ * 表情面板展开时屏蔽该按钮的浮动说明（配套 editor.ts 的 attachEmojiPanel）。
+ *
+ * 说明框是 .vditor-tooltipped 的 ::after（content 取自 aria-label，由 :hover/:active/:focus
+ * 触发显示），而表情按钮的说明方向是 __s——正好落在按钮正下方，也就是面板所在的位置。
+ * 点开面板后指针仍停在按钮上，:hover 不退出，那条深色说明框就一直盖在面板顶部一行。
+ */
+.md-studio-emojis-open .vditor-tooltipped::before,
+.md-studio-emojis-open .vditor-tooltipped::after {
+  display: none !important;
+}
+
+/**
+ * 阅读模式（只读）下正文保持与编辑模式一致的正常配色（配套 editor.ts 的 applyReadonlyState）。
+ *
+ * Vditor 官方 CSS 对三种模式的正文元素在 contenteditable="false" 时统一压到 opacity:0.3
+ * （见 vditor/dist/index.css 的 .vditor-ir/.vditor-wysiwyg/.vditor-sv[contenteditable="false"]），
+ * 导致阅读模式整篇文字发灰看不清。这里在应用侧覆盖回 1：只读是「不能改」，不该是「看不清」。
+ *
+ * 官方还给同一批选择器加了 cursor: not-allowed——阅读模式下整篇正文顶着「禁止」光标，
+ * 看上去像不能碰，与「只读但可选中复制」的实际能力对不上，所以一并改回文本光标。
+ */
+.vditor-ir > pre.vditor-reset[contenteditable="false"],
+.vditor-wysiwyg > pre.vditor-reset[contenteditable="false"],
+.vditor-sv[contenteditable="false"] {
+  opacity: 1;
+  cursor: text;
+}
+
+/**
+ * 阅读模式下正文要能选中（复制、以及后续右键菜单处理选中文本都以此为前提）。
+ *
+ * body 上那条 user-select: none 是为了点工具栏 / 标签栏 / 状态栏时不出现误选的蓝色高亮，
+ * 但它是继承属性：正文一旦被置为 contenteditable="false"（阅读模式、只读的 CodeMirror、
+ * 只读 textarea），浏览器不再为可编辑元素豁免这条规则，于是整篇文字都选不中。
+ * 这里把「正文容器」显式改回可选择——只读是「不能改」，不该是「不能选」。
+ * 工具栏、菜单、状态栏、行号栏都不在这些容器内，依旧不可选中。
+ */
+.vditor-reset,
+.vditor-sv,
+.md-large-reader,
+.cm-editor,
+.html-view textarea {
+  user-select: text;
+}
+
+/**
+ * 正文行号栏（配套 editor.ts 的 attachLineNumbers）。
+ *
+ * 行号栏挂在正文滚动容器的父元素下、与正文元素互为兄弟：Vditor 在初始化、切换模式、
+ * 窗口缩放时会给正文元素写内联的 padding 简写（setPadding），若用 CSS 给正文留出
+ * 左侧空位会被覆盖。故行号栏独立在正文之外，水平位置由 JS 按正文实际的 paddingLeft
+ * 推算（见 editor.ts 的 renderLineNumbers）。
+ */
+.md-studio-linenumber-gutter {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 44px;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 行号按「视口坐标 - 滚动容器顶」换算（与聚光灯同一套坐标），滚动时每帧重算 top，故不需要整体平移 */
+.md-studio-linenumber-rows {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+/* 每个可见行一个行号：高度由 JS 按该行矩形设置，宽度撑满行号栏（栏宽随可用空隙收窄），
+   文字在其中垂直居中、右对齐 */
+.md-studio-linenumber-row {
+  position: absolute;
+  left: 0;
+  right: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  font-size: 0.75rem;
+  line-height: 1;
+  color: var(--fg);
+  opacity: 0.35;
+  white-space: nowrap;
+}
+
+/**
+ * 行号栏与 Vditor 的标题层级标签共用正文左侧同一条空白车道。
+ *
+ * Vditor 给 IR 模式的每个标题渲染 H1..H6 的 :before 标签（float:left + margin-left:-29px），
+ * 与行号栏位置重叠。让出标签车道后行号栏还放得下 MIN_NUMBER_WIDTH 时，editor.ts 的
+ * renderLineNumbers 会把整栏左移并加上 .md-studio-linenumbers-roomy，标签照常显示；
+ * 实在挤不下才在这里把标签收起——宁可少一个视觉提示，也不能让两三位数的行号压到标签上。
+ * 收起只影响这几类行首标签，标题本身不受影响。
+ */
+.md-studio-linenumbers.vditor-ir:not(.md-studio-linenumbers-roomy)
+  > .vditor-reset
+  > :is(h1, h2, h3, h4, h5, h6, .vditor-toc)::before,
+.md-studio-linenumbers.vditor-ir:not(.md-studio-linenumbers-roomy)
+  > .vditor-reset
+  > :is(div[data-type="link-ref-defs-block"], div[data-type="footnotes-block"])::before,
+.md-studio-linenumbers.vditor-wysiwyg:not(.md-studio-linenumbers-roomy)
+  > .vditor-reset
+  > :is(h1, h2, h3, h4, h5, h6, .vditor-toc)::before,
+.md-studio-linenumbers.vditor-wysiwyg:not(.md-studio-linenumbers-roomy)
+  > .vditor-reset
+  > :is(div[data-type="link-ref-defs-block"], div[data-type="footnotes-block"])::before {
+  content: none;
+}
+
+/**
+ * SV 分屏预览：把右侧渲染栏的正文与左侧源码栏对齐到同一条起始基线。
+ *
+ * 两栏是两个独立滚动容器，各自有 10px 的内边距：左栏 `.vditor-sv` 的 padding:10px，
+ * 右栏 `.vditor-preview > .vditor-reset` 的 padding:10px。但右栏首个块还带着
+ * `.vditor-reset h1 { margin-top: 24px }` 之类的上边距（实测首个标题因此落在 34px），
+ * 一打开就比左栏低 24px。这里只把首个块的上边距归零，让两栏的正文都从 10px 起。
+ * （滚动过程中的持续对齐由 editor.ts 的 attachSvScrollSync 负责。）
+ */
+.vditor-preview > .vditor-reset > :first-child {
+  margin-top: 0;
+}
+
+/**
+ * 代码块语言下拉面板（配套 editor.ts 的 openLangPanel）。
+ *
+ * 面板由 editor.ts 直接创建并挂到 body 上，拿不到 App.svelte 里 scoped 的 .menu-panel
+ * 样式，所以这里按同一套观感单独写一份。
+ */
+.md-studio-lang-panel {
+  position: fixed;
+  z-index: 400;
+  width: 220px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+}
+
+.md-studio-lang-search {
+  width: 100%;
+  padding: 3px 6px;
+  margin-bottom: 6px;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  color: var(--fg);
+  background: var(--toolbar-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: none;
+}
+
+/* 语言按钮区：固定高度 + 换行，语言多时在面板内滚动而不是把面板撑长 */
+.md-studio-lang-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.md-studio-lang-list button {
+  padding: 2px 7px;
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  font-size: 0.75rem;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.md-studio-lang-list button:hover {
+  background: var(--hover);
+}
+
+/* 当前语言：只做边框强调，不用品牌色填充（与设置面板的按钮观感一致） */
+.md-studio-lang-list button.current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 常用语言与其余语言之间的分隔线（撑满一行，另起一排） */
+.md-studio-lang-sep {
+  flex-basis: 100%;
+  height: 1px;
+  margin: 3px 0;
+  background: var(--border);
+}
+
+/**
+ * 代码块右上角的「语言」按钮（配套 editor.ts 的 langBadgeFor）。
+ *
+ * 挂在 Vditor 复制按钮所在的 div.vditor-copy 里，所以和复制按钮共用「悬停代码块才
+ * 显示」的行为；位置放在复制按钮左侧（复制按钮是 right: 15px，见 Vditor 的
+ * .vditor-copy span）。
+ */
+.md-studio-lang-badge {
+  position: absolute;
+  top: 0.5em;
+  right: 38px;
+  padding: 0 5px;
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: nowrap;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  opacity: 0.8;
+  cursor: pointer;
+  user-select: none;
+}
+
+.md-studio-lang-badge:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+/**
+ * 大文档阅读通路（配套 largeReader.ts）。
+ *
+ * 超过阈值的 Markdown 在阅读态不走 Vditor 的 IR（那份 DOM 会随文件线性膨胀），
+ * 改由 .md-large-reader 只渲染视口附近的分节。尺寸与 .vditor-ir 一致
+ * （flex: 1 / min-width: 1px，见 Vditor 的 .vditor-content），这样工具栏、状态栏
+ * 与滚动条位置都跟原来一样；正文留白用 --md-large-pad 从 IR 正文复制过来。
+ */
+.md-large-mode .vditor-ir,
+.md-large-mode .vditor-wysiwyg,
+.md-large-mode .vditor-sv,
+.md-large-mode .vditor-preview {
+  display: none !important;
+}
+
+.md-large-reader {
+  display: block;
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 1px;
+  /* 与 Vditor 的 .vditor-ir 一致：宽表格 / 长代码行可以横向滚动而不是被裁掉 */
+  overflow-x: auto;
+  overflow-y: auto;
+  /* 挂载/卸载分节时高度会变，关掉滚动锚定免得浏览器自行补偿造成跳动 */
+  overflow-anchor: none;
+}
+
+.md-large-reader__body {
+  box-sizing: border-box;
+  padding: var(--md-large-pad, 10px 35px 20px);
+}
+
+/* 分节容器：未渲染时高度由 largeReader 写死为实测值，渲染后交还给内容 */
+.md-large-reader__section {
+  min-height: 1px;
+}
+
+/**
+ * 超大代码文件的只读分节视图（配套 largeReader 的 plain 模式）。
+ *
+ * 每个分节里只有一个 <pre>，装的正是原文——不过 Lute、不装饰。Vditor 给
+ * `.vditor-reset pre` 加了代码块那套底色 / 内边距 / 圆角，这里全部还原成朴素正文：
+ * 等宽字体、保留空白、每行与源码一对一（行号栏靠这个对齐，见 editor.ts 的
+ * LINE_UNIT_SELECTOR 里的 `pre`）。
+ */
+.md-large-reader__body--plain {
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.md-large-reader__body--plain pre {
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  white-space: pre;
+  word-break: normal;
+}
+
+/**
+ * 段落聚焦（聚光灯，配套 editor.ts 的 attachSpotlight）。
+ *
+ * 结构：外层 .md-studio-spotlight-clip 正好盖住正文可视区并 overflow:hidden，
+ * 内层 .md-studio-spotlight 的高度对齐当前编辑块，四周用一条超大幅 box-shadow 压暗。
+ * 用 box-shadow 而不是四块遮罩是为了不出现接缝；裁剪交给外层——Vditor 的
+ * .vditor-ir / .vditor-content 都不裁剪，不套一层的话这条阴影会把工具栏和菜单栏也压暗。
+ *
+ * 只给 height 加过渡、top 不加：滚动时遮罩必须逐帧跟住正文，top 上加过渡会让它
+ * 慢半拍跟着内容跑，看起来像拖影。
+ */
+.md-studio-spotlight-clip {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.md-studio-spotlight {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  box-shadow: 0 0 0 9999px var(--spotlight-dim);
+  transition: height 0.12s ease;
+}

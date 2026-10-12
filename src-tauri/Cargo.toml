@@ -1,0 +1,62 @@
+[package]
+name = "sticho"
+version = "0.1.0"
+description = "Sticho - 轻量级 Markdown/HTML 文档编辑器"
+authors = ["Marvin"]
+edition = "2021"
+
+# 依赖全部为 MIT / Apache-2.0，符合许可证白名单（任务书 2.2）
+[dependencies]
+# protocol-asset：asset 协议（把本地绝对路径当 http://asset.localhost/… 加载），
+# 正文里的相对路径图片要靠它才能在预览里显示（tauri.conf.json 的 assetProtocol.enable
+# 只是注入这个 feature，两边都写才生效）
+tauri = { version = "2", features = ["protocol-asset"] }
+# 单实例：第二次启动（常见于文件关联后双击文档）不再开新进程，而是把文件路径
+# 转发给已有窗口新开一个标签页。必须作为第一个注册的插件。
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+# 编辑菜单的剪切/复制/粘贴：WebView2 的 navigator.clipboard 读取剪贴板受限，走原生插件
+tauri-plugin-clipboard-manager = "2"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 编码检测与转换（阶段 11）：chardetng 为 Firefox 的编码嗅探组件，
+# encoding_rs 是其配套的编解码库（两者均 Apache-2.0/MIT）
+encoding_rs = "0.8"
+chardetng = "0.1"
+# 文件关联（阶段 11）：读写 HKCU\Software\Classes，仅当前用户，无需管理员权限
+winreg = "0.52"
+
+# PDF 导出：WebView2 COM 打印接口（wry 的传递依赖，版本对齐，零额外体积）
+webview2-com = "0.38"
+windows-core = "0.61"
+# 启动失败时的原生提示框（MessageBoxW）：GUI 子系统无控制台，静默退出会让用户
+# 只看到「双击没反应」。windows-sys 本是传递依赖，这里只多开几个 feature。
+# UI_Shell：ShellExecuteW 打开官网/运行安装包；System_Registry：检测 WebView2 是否安装。
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_Registry",
+] }
+
+# 导入 Word：Pandoc 发行包下载与解压（GPL 的 pandoc.exe 本体不进入编译产物）
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Pandoc 发行包完整性校验
+sha2 = "0.10"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[lib]
+name = "sticho_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[profile.release]
+# 减小产物体积：启用 LTO + 去符号，符合安装包 ≤25MB 约束（任务书 2.3）
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
