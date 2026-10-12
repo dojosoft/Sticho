@@ -13,6 +13,8 @@
 
   type Props = {
     view: SidebarView;
+    /** 四个面板各自的开关（视图 → 侧边栏 的勾选项）：关闭的面板不出现、也不渲染 */
+    panels: Record<SidebarView, boolean>;
     /** 目录树根目录（跟随当前文档所在文件夹，也可手动选择） */
     root: string | null;
     currentPath: string | null;
@@ -43,6 +45,7 @@
 
   let {
     view,
+    panels,
     root,
     currentPath,
     outline,
@@ -191,16 +194,24 @@
 <aside class="sidebar">
   <div class="side-head">
     <div class="tabs">
-      <button class:active={view === "tree"} onclick={() => onView("tree")} title={t("按文件夹浏览文件")}>{t("文件")}</button>
-      <button class:active={view === "outline"} onclick={() => onView("outline")} title={t("按标题层级跳转")}>{t("大纲")}</button>
-      <button class:active={view === "props"} onclick={() => onView("props")} title={t("当前文件属性")}>{t("属性")}</button>
-      <button class:active={view === "search"} onclick={() => onView("search")} title={t("在当前文件夹中全文搜索")}>{t("搜索")}</button>
+      {#if panels.tree}
+        <button class:active={view === "tree"} onclick={() => onView("tree")} title={t("按文件夹浏览文件")}>{t("文件")}</button>
+      {/if}
+      {#if panels.outline}
+        <button class:active={view === "outline"} onclick={() => onView("outline")} title={t("按标题层级跳转")}>{t("大纲")}</button>
+      {/if}
+      {#if panels.props}
+        <button class:active={view === "props"} onclick={() => onView("props")} title={t("当前文件属性")}>{t("属性")}</button>
+      {/if}
+      {#if panels.search}
+        <button class:active={view === "search"} onclick={() => onView("search")} title={t("在当前文件夹中全文搜索")}>{t("搜索")}</button>
+      {/if}
     </div>
     <button class="close" onclick={onClose} title={t("关闭侧边栏（Ctrl+Shift+L）")}>✕</button>
   </div>
 
   <div class="side-body">
-    {#if view === "tree"}
+    {#if view === "tree" && panels.tree}
       <div class="tree-head">
         <span class="tree-root" title={root ?? t("尚未选择文件夹")}>{root ? rootName() : t("未选择文件夹")}</span>
         <button onclick={onPickRoot} title={t("选择文件夹")}>{t("选择…")}</button>
@@ -219,7 +230,7 @@
       {:else}
         {@render nodes(cache[root]!, 0)}
       {/if}
-    {:else if view === "outline"}
+    {:else if view === "outline" && panels.outline}
       {#if outline.length === 0}
         <div class="hint">
           {codeFile
@@ -239,14 +250,14 @@
           </button>
         {/each}
       {/if}
-    {:else if view === "props"}
+    {:else if view === "props" && panels.props}
       <dl class="props">
         {#each fileProps as [label, value] (label)}
           <dt>{label}</dt>
           <dd title={value}>{value}</dd>
         {/each}
       </dl>
-    {:else}
+    {:else if view === "search" && panels.search}
       <!-- 跨文件搜索：输入 + 结果（按文件分组，点击命中打开并定位） -->
       {#if root === null}
         <div class="hint">{t("未选择文件夹。请先切到「文件」标签，点「选择…」指定一个目录，再回到这里搜索。")}</div>

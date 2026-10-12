@@ -101,12 +101,12 @@
 </script>
 
 <footer class="statusbar">
-  <!-- 实时统计（批次七）：随输入 400ms 防抖刷新，口径与侧栏「文件属性」一致 -->
-  <span class="count">{t("{w} 字 · {c} 字符 · {l} 行", { w: wordCount.toLocaleString(), c: charCount.toLocaleString(), l: lineCount.toLocaleString() })}</span>
-  <!-- 当前文档模式：纯文本 / Markdown / HTML（与「视图 → 模式」三选一致） -->
+  <!-- 当前文档模式：纯文本 / Markdown / HTML。固定放最左侧，作为状态栏的第一信息 -->
   <span class="mode-chip" title={t("当前文档模式")}>
     {docKind === "markdown" ? t("Markdown 模式") : docKind === "html" ? t("HTML 模式") : t("纯文本模式")}
   </span>
+  <!-- 实时统计（批次七）：随输入 400ms 防抖刷新，口径与侧栏「文件属性」一致 -->
+  <span class="count">{t("{w} 字 · {c} 字符 · {l} 行", { w: wordCount.toLocaleString(), c: charCount.toLocaleString(), l: lineCount.toLocaleString() })}</span>
   <!-- 占位撑开：把右侧控件推到状态栏右端（原先由已移除的路径文本承担） -->
   <span class="spacer"></span>
 

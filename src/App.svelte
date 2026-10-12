@@ -333,6 +333,17 @@
   // ---- 侧边栏（阶段 11）----
   let sidebarVisible = $state(true);
   let sidebarView = $state<SidebarView>("outline");
+  /**
+   * 侧边栏四个面板各自的开关（视图 → 侧边栏 里的勾选项，默认全开）。
+   * 面板开关只决定「该面板是否作为可切换的视图存在」；同一时刻仍只显示一个面板
+   * （sidebarView）。四个全关时侧边栏没有任何内容可显示，会自动收起。
+   */
+  let sidebarPanels = $state<Record<SidebarView, boolean>>({
+    tree: true,
+    outline: true,
+    props: true,
+    search: true,
+  });
   let treeRoot = $state<string | null>(null); // 目录树根目录（跟随当前文档）
   let outlineMd = $state(""); // 用于生成大纲的 Markdown 快照（防抖更新）
   let outlineHtml = $state(""); // 用于生成大纲的 HTML 源码快照（防抖更新）
@@ -1921,7 +1932,11 @@
     await saveSetting("sidebarVisible", visible);
   }
 
-  const toggleSidebar = () => setSidebarVisible(!sidebarVisible);
+  const toggleSidebar = () => {
+    // 没有任何面板开启时，展开只会得到一个空侧边栏——此时「显示侧边栏」不可用
+    if (!sidebarVisible && enabledSidebarViews.length === 0) return;
+    return setSidebarVisible(!sidebarVisible);
+  };
 
   async function setSidebarView(view: SidebarView): Promise<void> {
     sidebarView = view;
@@ -1929,6 +1944,42 @@
     refreshSideNow();
     await saveSetting("sidebarView", view);
     await saveSetting("sidebarVisible", true);
+  }
+
+  /** 面板的固定排列顺序：文件树 → 大纲 → 属性 → 搜索 */
+  const SIDEBAR_ORDER: SidebarView[] = ["tree", "outline", "props", "search"];
+  /** 当前开启的面板（供菜单勾选态与「是否还有内容可显示」判断） */
+  const enabledSidebarViews = $derived(SIDEBAR_ORDER.filter((v) => sidebarPanels[v]));
+
+  /** 确保某面板处于开启状态并切到它，同时把侧边栏显示出来 */
+  async function showSidebarView(view: SidebarView): Promise<void> {
+    if (!sidebarPanels[view]) {
+      const next = { ...sidebarPanels, [view]: true };
+      sidebarPanels = next;
+      await saveSetting("sidebarPanels", next);
+    }
+    await setSidebarView(view);
+  }
+
+  /**
+   * 侧边栏面板开关（视图 → 侧边栏 的四项）。
+   * - 侧边栏收起、或该项尚未勾选：显示侧边栏并切到该面板；
+   * - 取消一项后若还有别的面板开启，且当前正显示它，则切到剩下的第一个；
+   * - 四个全取消则侧边栏自动收起。
+   */
+  async function toggleSidebarPanel(view: SidebarView): Promise<void> {
+    // 侧边栏收起时，这一项只负责「把它显示出来并切到该面板」：若仍按勾选逻辑走，
+    // 点一个已勾选的项会变成取消勾选，与「收起状态下选择即显示」的预期正好相反。
+    if (!sidebarVisible || !sidebarPanels[view]) {
+      await showSidebarView(view);
+      return;
+    }
+    const next = { ...sidebarPanels, [view]: false };
+    sidebarPanels = next;
+    await saveSetting("sidebarPanels", next);
+    const rest = SIDEBAR_ORDER.filter((v) => next[v]);
+    if (rest.length === 0) await setSidebarVisible(false);
+    else if (sidebarView === view) await setSidebarView(rest[0]!);
   }
 
   /** 目录树点击文件 → 复用打开管道（按扩展名分派） */
@@ -3210,6 +3261,9 @@
   function switchEditorMode(mode: "ir" | "wysiwyg" | "sv"): void {
     if (getEditorMode() === mode) return;
     setEditorMode(mode);
+    // 立即同步状态栏图标与菜单复选：靠编辑器的模式回调要等一拍，且回调只为兜住
+    // 「工具栏下拉」那条路径，这里直接落值，反馈更跟手（回调稍后会再确认一次）。
+    editorMode = mode;
   }
 
   function toggleEditorToolbar(): void {
@@ -4237,16 +4291,22 @@
           ],
         },
         { sep: true },
-        // 侧边栏：面板开关 + 面板内的视图切换
+        // 侧边栏：显示开关 + 四个面板各自的勾选开关（默认全开；全关则侧边栏自动收起）
         {
           label: t("侧边栏"),
           sub: [
-            { label: t("显示侧边栏"), shortcut: "Ctrl+Shift+L", checked: () => sidebarVisible, action: toggleSidebar },
+            {
+              label: t("显示侧边栏"),
+              shortcut: "Ctrl+Shift+L",
+              checked: () => sidebarVisible,
+              disabled: () => !sidebarVisible && enabledSidebarViews.length === 0,
+              action: toggleSidebar,
+            },
             { sep: true },
-            { label: t("文件目录树"), shortcut: "Ctrl+Shift+3", radio: true, checked: () => sidebarVisible && sidebarView === "tree", action: () => setSidebarView("tree") },
-            { label: t("文档大纲"), shortcut: "Ctrl+Shift+1", radio: true, checked: () => sidebarVisible && sidebarView === "outline", action: () => setSidebarView("outline") },
-            { label: t("文件属性"), radio: true, checked: () => sidebarVisible && sidebarView === "props", action: () => setSidebarView("props") },
-            { label: t("跨文件搜索"), radio: true, checked: () => sidebarVisible && sidebarView === "search", action: () => setSidebarView("search") },
+            { label: t("文件目录树"), shortcut: "Ctrl+Shift+3", checked: () => sidebarPanels.tree, action: () => void toggleSidebarPanel("tree") },
+            { label: t("文档大纲"), shortcut: "Ctrl+Shift+1", checked: () => sidebarPanels.outline, action: () => void toggleSidebarPanel("outline") },
+            { label: t("文件属性"), checked: () => sidebarPanels.props, action: () => void toggleSidebarPanel("props") },
+            { label: t("跨文件搜索"), checked: () => sidebarPanels.search, action: () => void toggleSidebarPanel("search") },
           ],
         },
         { sep: true },
@@ -4605,13 +4665,13 @@
     if (e.shiftKey && e.code === "Digit1") {
       // Ctrl+Shift+1：文档大纲（对齐 Typora）
       e.preventDefault();
-      void setSidebarView("outline");
+      void showSidebarView("outline");
       return;
     }
     if (e.shiftKey && e.code === "Digit3") {
       // Ctrl+Shift+3：文件目录树（对齐 Typora）
       e.preventDefault();
-      void setSidebarView("tree");
+      void showSidebarView("tree");
       return;
     }
 
@@ -4781,6 +4841,12 @@
       recentFiles = (s["recentFiles"] as string[] | undefined) ?? [];
       sidebarVisible = (s["sidebarVisible"] as boolean | undefined) ?? true;
       sidebarView = (s["sidebarView"] as SidebarView | undefined) ?? "outline";
+      // 面板开关：与默认值合并，兼容旧配置（没有该键时四项全开）
+      sidebarPanels = { tree: true, outline: true, props: true, search: true, ...(s["sidebarPanels"] as Partial<Record<SidebarView, boolean>> | undefined) };
+      // 四个面板全关时侧边栏没有内容可显示，强制收起（旧配置可能存着 sidebarVisible=true）
+      if (enabledSidebarViews.length === 0) sidebarVisible = false;
+      // 上次停留的面板被关掉时，落回第一个仍开启的面板
+      else if (!sidebarPanels[sidebarView]) sidebarView = enabledSidebarViews[0]!;
       showLineNumbers = (s["lineNumbers"] as boolean | undefined) ?? true;
       setLineNumbersVisible(showLineNumbers);
       typewriterOn = (s["typewriterMode"] as boolean | undefined) ?? false;
@@ -5259,6 +5325,7 @@
     {#if sidebarVisible}
       <Sidebar
         view={sidebarView}
+        panels={sidebarPanels}
         root={treeRoot}
         {currentPath}
         {outline}

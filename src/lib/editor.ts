@@ -1550,12 +1550,18 @@ function attachModeWatcher(): void {
   const item = toolbarItem("edit-mode");
   if (!item) return;
   modeWatcherAttached = true;
-  item.addEventListener("click", (event) => {
-    const target = event.target as HTMLElement | null;
-    if (!target?.closest?.("button[data-mode]")) return;
-    // Vditor 在点击后同步切换正文元素，等它的处理器跑完再读回当前模式
-    window.setTimeout(() => modeListener?.(getEditorMode()), 0);
-  });
+  // 必须挂在捕获阶段：Vditor 三个模式按钮自己的 click 里都调了 stopPropagation()，
+  // 冒泡阶段的委托根本收不到（这正是状态栏图标不跟随工具栏下拉切换的原因）。
+  item.addEventListener(
+    "click",
+    (event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest?.("button[data-mode]")) return;
+      // Vditor 在点击后同步切换正文元素，等它的处理器跑完再读回当前模式
+      window.setTimeout(() => modeListener?.(getEditorMode()), 0);
+    },
+    true,
+  );
 }
 
 /** 编辑器当前是否处于沉浸式全屏（Vditor 给根元素加 vditor--fullscreen） */
