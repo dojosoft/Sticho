@@ -10,6 +10,8 @@
    */
   import { onMount } from "svelte";
   import { makeT, type Locale } from "../lib/i18n";
+  import { diffLines, type DiffLine } from "../lib/diff";
+  import DiffView from "./DiffView.svelte";
   import {
     webdavDeleteVersion,
     webdavDownload,
@@ -45,6 +47,9 @@
   let versions = $state<VersionEntry[]>([]);
   let versionsLoading = $state(false);
   let busyPath = $state(""); // 正在下载 / 恢复的条目，用于禁用重复点击
+
+  // 版本差异视图（批次三）：旧 = 所选历史版本，新 = 远端当前正文
+  let diffFor = $state<{ title: string; leftLabel: string; rightLabel: string; lines: DiffLine[] } | null>(null);
 
   /** 根目录之下的相对层级（面包屑用） */
   const crumbs = $derived.by(() => {
@@ -151,6 +156,30 @@
     }
   }
 
+  /** 查看某云端历史版本与「远端当前正文」的差异（云版本只能取回远端正文） */
+  async function showDiff(v: VersionEntry): Promise<void> {
+    const remote = versionsFor;
+    if (remote === null || busyPath !== "") return;
+    busyPath = remote;
+    error = "";
+    try {
+      const [oldText, current] = await Promise.all([
+        webdavFetchVersion(dav, remote, v.n),
+        webdavDownload(conn, remote),
+      ]);
+      diffFor = {
+        title: t("版本差异"),
+        leftLabel: t("云端版本 {n}", { n: v.n }),
+        rightLabel: t("云端当前内容"),
+        lines: diffLines(oldText, current),
+      };
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      busyPath = "";
+    }
+  }
+
   function goUp(): void {
     void load(crumbs.length === 0 ? rootPath : `${rootPath}/${crumbs.slice(0, -1).join("/")}`);
   }
@@ -251,6 +280,7 @@
                         </button>
                         <span class="cb-size">{sizeText(v.size)}</span>
                         <span class="cb-size">{timeText(v.saved_at)}</span>
+                        <button class="cb-mini" disabled={busyPath !== ""} onclick={() => void showDiff(v)}>{t("查看差异")}</button>
                         <button class="cb-mini" onclick={() => void restore(v)}>{t("恢复到编辑器")}</button>
                         <button class="cb-mini" onclick={() => void removeVersion(v)}>{t("删除该版本")}</button>
                       </div>
@@ -266,6 +296,17 @@
 
     <div class="cb-foot">{t("云端文档将作为未命名文档打开，保存时请另存到本地")}</div>
   </div>
+
+  {#if diffFor}
+    <DiffView
+      {locale}
+      title={diffFor.title}
+      leftLabel={diffFor.leftLabel}
+      rightLabel={diffFor.rightLabel}
+      lines={diffFor.lines}
+      onClose={() => (diffFor = null)}
+    />
+  {/if}
 </div>
 
 <style>

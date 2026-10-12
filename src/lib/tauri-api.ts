@@ -213,6 +213,19 @@ export type VersionEntry = {
   saved_at: number;
 };
 
+/** 上传结果：`conflict` 表示检测到云端被别的设备改过、已另存冲突副本 */
+export type UploadResult = {
+  status: "ok" | "conflict";
+  /** 实际写入的远端路径（冲突时是副本路径） */
+  remote: string;
+  /** 上传后远端字节数 */
+  size: number;
+  /** 上传后远端 Last-Modified（Unix 秒） */
+  modified: number;
+  /** 可直接展示的短文案 */
+  message: string;
+};
+
 /**
  * 测试连接。成功时 resolve 出可直接展示的中文结论文案（如「连接成功（支持 WebDAV）」），
  * 失败时 reject 出中文原因（凭据错误 / 网络不可达 / 该地址不支持 WebDAV…）。
@@ -222,11 +235,27 @@ export function webdavTest(cfg: DavConfig): Promise<string> {
 }
 
 /**
- * 上传单个本地文档。`keep > 0` 时顺带记一份历史版本，返回含版本号的短文案。
+ * 上传单个本地文档。`keep > 0` 时顺带记一份历史版本。
  * 正文由 Rust 侧直接读刚落盘的本地文件，保证与磁盘内容一致。
+ *
+ * `policy` 决定云端被别的设备改过时怎么办：`copy` 另存冲突副本（默认，绝不丢数据）、
+ * `overwrite` 直接覆盖。`prev` 是上次上传后记录的远端状态（用于冲突判定），首次上传传 `null`。
  */
-export function webdavUpload(cfg: DavConfig, local: string, keep: number): Promise<string> {
-  return invoke<string>("webdav_upload", { ...cfg, local, keep });
+export function webdavUpload(
+  cfg: DavConfig,
+  local: string,
+  keep: number,
+  policy: "copy" | "overwrite",
+  prev: { size: number; modified: number } | null,
+): Promise<UploadResult> {
+  return invoke<UploadResult>("webdav_upload", {
+    ...cfg,
+    local,
+    keep,
+    policy,
+    prevSize: prev ? prev.size : null,
+    prevModified: prev ? prev.modified : null,
+  });
 }
 
 /** 列出远端某目录下的内容（path 为相对 base 的远端路径） */

@@ -65,6 +65,8 @@
     onToggleDavVersioning: () => void;
     davKeep: number;
     onSetDavKeep: (n: number) => void;
+    davConflictPolicy: "copy" | "overwrite";
+    onSetDavConflictPolicy: (p: "copy" | "overwrite") => void;
 
     /* 配置文件位置 */
     dataLocation: DataLocationMode;
@@ -120,6 +122,8 @@
     onToggleDavVersioning,
     davKeep,
     onSetDavKeep,
+    davConflictPolicy,
+    onSetDavConflictPolicy,
     dataLocation,
     locationBusy,
     onChangeDataLocation,
@@ -396,6 +400,21 @@
                 </select>
               </label>
             {/if}
+
+            <label class="set-row set-row--field">
+              <span class="set-label">{t("冲突处理方式")}</span>
+              <select
+                class="set-select"
+                value={davConflictPolicy}
+                onchange={(e) => onSetDavConflictPolicy(e.currentTarget.value as "copy" | "overwrite")}
+              >
+                <option value="copy">{t("保留冲突副本（推荐）")}</option>
+                <option value="overwrite">{t("直接覆盖云端")}</option>
+              </select>
+            </label>
+            <p class="set-tip">
+              {t("云端文件被其他设备改过时：保留副本会在同目录另存一份，绝不覆盖对方内容；直接覆盖则以其为准。")}
+            </p>
 
             <p class="set-tip">{t("凭据以明文保存在本机设置文件中")}</p>
             <p class="set-tip">{t("自签名证书的 HTTPS 服务器暂不支持，请使用公网证书或 http 内网地址")}</p>

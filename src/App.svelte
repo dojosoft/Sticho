@@ -74,6 +74,7 @@
     restartApp,
     openUrl,
     listHistory,
+    readHistory,
     restoreHistory,
     logEvent,
     exportDiagnostics,
@@ -130,6 +131,7 @@
   import Sidebar from "./components/Sidebar.svelte";
   import CodeTools from "./components/CodeTools.svelte";
   import CloudBrowser from "./components/CloudBrowser.svelte";
+  import DiffView from "./components/DiffView.svelte";
   import FindBar from "./components/FindBar.svelte";
   import StatusBar from "./components/StatusBar.svelte";
   import SettingsModal from "./components/SettingsModal.svelte";
@@ -137,6 +139,7 @@
   // import-pdf）统一走调用点动态加载：它们拖着 markdown-it / turndown / docx /
   // pdfjs-dist 这类大依赖，却只在对应菜单动作时才用得上。
   import { loadSetting, loadAllSettings, saveSetting, deleteSetting } from "./lib/settings";
+  import { diffLines, type DiffLine } from "./lib/diff";
   import { makeT, vditorLang, type Locale } from "./lib/i18n";
   import { invoke } from "@tauri-apps/api/core";
 
@@ -149,6 +152,8 @@
   let busy = $state(false); // 文件操作进行中，防重复触发
   // 当前文档的本地历史版本（文件菜单展开时刷新，供「文件历史」动态子菜单消费）
   let historyEntries = $state<HistoryEntry[]>([]);
+  // 版本差异视图（批次三）：null = 未打开
+  let diffView = $state<{ title: string; leftLabel: string; rightLabel: string; lines: DiffLine[] } | null>(null);
   let theme = $state<"light" | "dark">("light");
   let userThemeSet = $state(false); // 用户是否显式选过主题（否则跟随系统）
   let recentFiles = $state<string[]>([]);
@@ -181,6 +186,10 @@
   let davKeep = $state(3); // 最多保留版本数 1–10
   let historyKeep = $state(20); // 本地版本历史保留份数（每份文档各自保持这么多）
   let davVerified = $state(false); // 本会话内「测试连接」已通过
+  // 冲突处理策略：copy = 另存冲突副本（默认，绝不丢数据）/ overwrite = 直接覆盖
+  let davConflictPolicy = $state<"copy" | "overwrite">("copy");
+  // 同步索引：本地路径 → 上次上传后记录的远端状态，供「远端是否被别的设备改过」判定
+  let davSyncIndex = $state<Record<string, { remote: string; size: number; modified: number }>>({});
   let davTesting = $state(false); // 测试连接进行中
   let davTip = $state(""); // 设置面板里那行结论 / 错误提示
   let davSyncState = $state<"idle" | "busy" | "error">("idle"); // 状态栏同步指示
@@ -1078,6 +1087,38 @@
       await updateTitle();
     } catch (e) {
       await showError(t("恢复历史版本失败："), e);
+    }
+  }
+
+  /**
+   * 点某个历史版本后的二级选择：「查看差异」或「恢复此版本」。
+   *
+   * 菜单渲染只支持两级，历史版本项本身已是「文件历史」的子项，无法再挂二级子菜单，
+   * 因此这里用一个二选一对话框承接（复用 askChoice），不改动菜单渲染逻辑。
+   */
+  async function historyVersionMenu(file: string): Promise<void> {
+    const pick = await askChoice(t("对该历史版本的操作"), [
+      { label: t("查看与当前内容的差异"), value: "diff", primary: true },
+      { label: t("用该版本覆盖当前编辑内容"), value: "restore" },
+    ], t("文件历史"));
+    if (pick === "diff") await openHistoryDiff(file);
+    else if (pick === "restore") await restoreHistoryVersion(file);
+  }
+
+  /** 打开某历史版本与当前内容的差异视图（旧 = 历史版本，新 = 当前内容） */
+  async function openHistoryDiff(file: string): Promise<void> {
+    if (!currentPath) return;
+    try {
+      const oldText = await readHistory(currentPath, file);
+      const newText = currentText();
+      diffView = {
+        title: t("版本差异"),
+        leftLabel: t("历史版本"),
+        rightLabel: t("当前内容"),
+        lines: diffLines(oldText, newText),
+      };
+    } catch (e) {
+      await showError(t("读取历史版本失败："), e);
     }
   }
 
@@ -3221,6 +3262,12 @@
     await saveSetting("davKeep", davKeep);
   }
 
+  /** 切换云同步的冲突处理策略（copy = 另存副本，overwrite = 直接覆盖） */
+  async function setDavConflictPolicy(p: "copy" | "overwrite"): Promise<void> {
+    davConflictPolicy = p;
+    await saveSetting("davConflictPolicy", p);
+  }
+
   async function setHistoryKeep(n: number): Promise<void> {
     historyKeep = Math.min(200, Math.max(1, Math.round(n)));
     await saveSetting("historyKeep", historyKeep);
@@ -3407,13 +3454,30 @@
   function syncToCloud(local: string): void {
     const cfg = davConfig;
     const keep = davVersioning ? davKeep : 0;
+    const policy = davConflictPolicy;
+    const record = davSyncIndex[local];
+    const prev = record ? { size: record.size, modified: record.modified } : null;
     davSyncState = "busy";
     davSyncTip = "";
     davChain = davChain
       .then(async () => {
         try {
-          davSyncTip = await webdavUpload(cfg, local, keep);
+          const result = await webdavUpload(cfg, local, keep, policy, prev);
+          davSyncTip = result.message;
           davSyncState = "idle";
+          if (result.status === "conflict") {
+            // 冲突：只在同目录另存了副本，原远端文件（含对方的改动）完好无损。
+            // 刻意**不回填索引**——下次保存仍会再次判定冲突并另存，直到用户自行合并，
+            // 这样绝不会把对方的内容悄悄覆盖掉。
+            void messageDialog(result.message, { title: "Sticho", kind: "warning" });
+          } else {
+            // 正常上传：回填远端状态，作为下次「远端是否被别的设备改过」的比对基准
+            davSyncIndex = {
+              ...davSyncIndex,
+              [local]: { remote: result.remote, size: result.size, modified: result.modified },
+            };
+            void saveSetting("davSyncIndex", davSyncIndex);
+          }
         } catch (e) {
           davSyncState = "error";
           davSyncTip = e instanceof Error ? e.message : String(e);
@@ -3791,7 +3855,7 @@
               ? [{ label: t("（暂无历史版本）"), disabled: () => true }]
               : historyEntries.map((h) => ({
                   label: `${formatStamp(h.saved_at)} · ${formatSize(h.size)}`,
-                  action: () => restoreHistoryVersion(h.file),
+                  action: () => void historyVersionMenu(h.file),
                 })),
         },
         { sep: true },
@@ -3994,7 +4058,10 @@
   function onKeydown(e: KeyboardEvent): void {
     // Esc：优先关闭菜单 / 查找栏
     if (e.key === "Escape") {
-      if (choiceState) {
+      if (diffView) {
+        diffView = null;
+        e.preventDefault();
+      } else if (choiceState) {
         resolveChoice(null);
         e.preventDefault();
       } else if (settingsOpen) {
@@ -4193,6 +4260,11 @@
       davVersioning = (s["davVersioning"] as boolean | undefined) ?? false;
       davKeep = (s["davKeep"] as number | undefined) ?? 3;
       historyKeep = (s["historyKeep"] as number | undefined) ?? 20;
+      davConflictPolicy = (s["davConflictPolicy"] as "copy" | "overwrite" | undefined) ?? "copy";
+      davSyncIndex =
+        (s["davSyncIndex"] as
+          | Record<string, { remote: string; size: number; modified: number }>
+          | undefined) ?? {};
 
       // 主题与语言已就绪：界面壳此刻可以亮出来了，编辑器与主题目录的加载
       // 不再挡住窗口出现（tauri.conf.json 里 visible:false，这里负责首次 show）。
@@ -4799,6 +4871,8 @@
       onToggleDavVersioning={() => void toggleDavVersioning()}
       {davKeep}
       onSetDavKeep={(n) => void setDavKeep(n)}
+      {davConflictPolicy}
+      onSetDavConflictPolicy={(p) => void setDavConflictPolicy(p)}
       {dataLocation}
       {locationBusy}
       onChangeDataLocation={(m) => void changeDataLocation(m)}
@@ -4828,6 +4902,17 @@
       dav={davConfig}
       onOpen={(remote, content) => void openCloudDoc(remote, content)}
       onClose={() => (cloudOpen = false)}
+    />
+  {/if}
+
+  {#if diffView}
+    <DiffView
+      {locale}
+      title={diffView.title}
+      leftLabel={diffView.leftLabel}
+      rightLabel={diffView.rightLabel}
+      lines={diffView.lines}
+      onClose={() => (diffView = null)}
     />
   {/if}
 

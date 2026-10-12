@@ -30,6 +30,12 @@ const VERSION_DIR: &str = ".mdstudio-versions";
 /// 版本目录标识的最大长度（远端文件名长度限制不一，留足余量）
 const MAX_DOC_ID_LEN: usize = 90;
 
+/// 冲突判定容差（秒）：远端 size 相同、modified 相差不超过此值，视为「就是自己刚传的那份」。
+///
+/// WebDAV 服务器写入后回填的 Last-Modified 与本地记录可能有 1 秒级抖动，
+/// 不给容差会把「自己刚上传的文件」误判成冲突，白白多出冲突副本。
+const CONFLICT_TOLERANCE_SECS: u64 = 2;
+
 /// PROPFIND 请求体：只取列目录需要的 4 个属性
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
@@ -42,6 +48,24 @@ const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </d:propfind>"#;
 
 // ---------------------------------------------------------------- 数据结构
+
+/// 上传结果（`webdav_upload` 的返回值）。
+///
+/// 由 `String` 扩为结构体：前端不仅要展示短文案，还要据 `status` 决定是否提示冲突、
+/// 据 `size`/`modified` 回填同步索引（下次上传据此判定远端是否被别人改过）。
+#[derive(Serialize, Clone)]
+pub struct UploadResult {
+    /// `ok` = 正常上传；`conflict` = 检测到冲突并另存了副本
+    pub status: String,
+    /// 实际写入的远端路径；冲突时是冲突副本路径
+    pub remote: String,
+    /// 上传后远端文件字节数
+    pub size: u64,
+    /// 上传后远端 Last-Modified（Unix 秒；无法解析为 0）
+    pub modified: u64,
+    /// 可直接展示给用户的短文案
+    pub message: String,
+}
 
 /// 云端目录项（供前端浏览）
 #[derive(Serialize, Clone)]
@@ -343,6 +367,78 @@ pub fn next_version(existing: &[u32], keep: u32) -> (u32, Vec<u32>) {
     all.sort_unstable();
     let excess = all.len().saturating_sub(keep as usize);
     (next, all.into_iter().take(excess).collect())
+}
+
+// ---------------------------------------------------------------- 冲突判定
+
+/// 文件名里不允许出现的字符（Windows 侧限制）一律换成 `_`。
+fn sanitize_component(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || "\\/:*?\"<>|".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "未命名".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// `YYYYMMDD-HHMMSS`（日志模块的紧凑戳）→ `YYYY-MM-DD HHmmss`（冲突副本文件名用）。
+fn conflict_stamp(secs: u64) -> String {
+    let compact = crate::logging::compact_stamp(secs);
+    if compact.len() == 15 {
+        format!(
+            "{}-{}-{} {}",
+            &compact[0..4],
+            &compact[4..6],
+            &compact[6..8],
+            &compact[9..15]
+        )
+    } else {
+        compact
+    }
+}
+
+/// 冲突副本的远端路径：同目录下 `name (冲突副本 YYYY-MM-DD HHmmss).ext`。
+fn conflict_remote_path(remote: &str, secs: u64) -> String {
+    let (dir, name) = match remote.rsplit_once('/') {
+        Some((d, n)) => (d.to_string(), n.to_string()),
+        None => (String::new(), remote.to_string()),
+    };
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && !e.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.clone(), String::new()),
+    };
+    format!(
+        "{dir}/{} (冲突副本 {}){ext}",
+        sanitize_component(&stem),
+        conflict_stamp(secs)
+    )
+}
+
+/// 是否判定为「冲突」。`remote` = 远端当前 (size, modified)；`prev` = 上次同步记录。
+///
+/// 判据（防误判，宁可少判也不误判）：
+/// - 远端没有该文件 → 不算冲突（正常新建 / 覆盖）
+/// - 没有上次记录 → 首次同步，直接覆盖并回填，不算冲突
+/// - size 相同且 modified 相差 ≤ 容差 → 就是自己刚传的那份，正常覆盖
+/// - 其余 → 冲突（远端被别的设备改过）
+fn is_conflict(remote: Option<(u64, u64)>, prev: Option<(u64, u64)>) -> bool {
+    match (remote, prev) {
+        (None, _) => false,
+        (Some(_), None) => false,
+        (Some((rs, rm)), Some((ps, pm))) => {
+            !(rs == ps && rm.abs_diff(pm) <= CONFLICT_TOLERANCE_SECS)
+        }
+    }
 }
 
 // ---------------------------------------------------------------- HTTP 日期
@@ -667,6 +763,45 @@ fn parse_children(xml: &str, request_path: &str, remote: &str) -> Vec<ChildEntry
     out
 }
 
+/// 从 PROPFIND Depth:0 的响应里读出目标自身的 (是否目录, 字节数, 修改时间)。
+///
+/// Depth:0 只回一条 response（就是目标本身），故取首条即可。
+fn parse_self_props(xml: &str) -> (bool, u64, u64) {
+    let Some(resp) = find_elements(xml, "response").into_iter().next() else {
+        return (false, 0, 0);
+    };
+    let lower = resp.to_ascii_lowercase();
+    let is_dir = !find_elements_in(resp, &lower, "collection").is_empty();
+    let size = find_elements_in(resp, &lower, "getcontentlength")
+        .first()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    let modified = find_elements_in(resp, &lower, "getlastmodified")
+        .first()
+        .and_then(|s| parse_http_date(&unescape(s)))
+        .unwrap_or(0);
+    (is_dir, size, modified)
+}
+
+/// 探测远端某个文件的当前状态；不存在返回 `Ok(None)`。
+fn stat_remote(
+    agent: &ureq::Agent,
+    base: &str,
+    user: &str,
+    password: &str,
+    remote: &str,
+) -> Result<Option<(u64, u64)>, String> {
+    let target = join_url(base, remote);
+    match propfind(agent, &target, user, password, "0") {
+        Ok(xml) => {
+            let (_is_dir, size, modified) = parse_self_props(&xml);
+            Ok(Some((size, modified)))
+        }
+        Err(DavError::Status(404)) => Ok(None),
+        Err(e) => Err(e.message()),
+    }
+}
+
 /// 列出某文档已有的版本号（升序去重）。版本目录不存在时返回空表。
 fn list_versions(
     agent: &ureq::Agent,
@@ -727,6 +862,10 @@ pub async fn webdav_test(
 ///
 /// `local` 是本地绝对路径；Rust 侧直接读刚落盘的字节，保证上传内容与本地完全一致
 /// （也顺带避开前端编码转换的差异）。
+///
+/// 冲突处理：上传前先 `PROPFIND` 探测远端当前状态，与前端传来的上次同步记录
+/// （`prev_size` / `prev_modified`）比对。判定冲突且 `policy != "overwrite"` 时，
+/// 不覆盖原文件，而是另存为同目录的冲突副本——**绝不丢数据**。
 #[tauri::command]
 pub async fn webdav_upload(
     url: String,
@@ -735,7 +874,10 @@ pub async fn webdav_upload(
     root: String,
     local: String,
     keep: u32,
-) -> Result<String, String> {
+    policy: String,
+    prev_size: Option<u64>,
+    prev_modified: Option<u64>,
+) -> Result<UploadResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = std::fs::read(&local).map_err(|e| format!("读取本地文件失败：{e}"))?;
         let remote = remote_path(&root, &local);
@@ -743,9 +885,25 @@ pub async fn webdav_upload(
         let content_type = content_type_of(&remote);
 
         ensure_dirs(&agent, &url, &user, &password, &remote).map_err(map_err)?;
+
+        // 冲突探测：远端当前状态 vs 上次同步记录
+        let current = stat_remote(&agent, &url, &user, &password, &remote)?;
+        let prev = match (prev_size, prev_modified) {
+            (Some(s), Some(m)) => Some((s, m)),
+            _ => None,
+        };
+        let conflict = is_conflict(current, prev);
+        let make_copy = conflict && policy != "overwrite";
+        let target = if make_copy {
+            conflict_remote_path(&remote, crate::logging::now_secs())
+        } else {
+            remote.clone()
+        };
+
+        // 冲突副本与原文件同目录，父目录已由 ensure_dirs 建好
         put_bytes(
             &agent,
-            &join_url(&url, &remote),
+            &join_url(&url, &target),
             &user,
             &password,
             &bytes,
@@ -753,55 +911,72 @@ pub async fn webdav_upload(
         )
         .map_err(map_err)?;
 
-        if keep == 0 {
-            return Ok("已上传".to_string());
-        }
-
-        // 版本目录要先建出来，否则 PUT 会因为父目录不存在而 409
-        let vdir = version_dir_path(&root, &remote);
-        mkcol(&agent, &join_url(&url, &vdir), &user, &password).map_err(map_err)?;
-
-        // 版本号是「先查后写」：并发上传（多设备同时同步）时会算出同一个号并互相覆盖。
-        // 用 If-None-Match:* 条件写，撞号（412）就重查一次再试，最多 3 轮。
+        // 版本留档记在「真正写入的那个远端路径」上，历史才不会串到别的文件
         let mut version_label: Option<u32> = None;
-        for attempt in 0..3 {
-            let existing = list_versions(&agent, &url, &user, &password, &root, &remote)?;
-            let (next, outdated) = next_version(&existing, keep);
-            if next == 0 {
-                return Ok("已上传".to_string());
-            }
-            let created = put_bytes_create_only(
-                &agent,
-                &join_url(&url, &version_file_path(&root, &remote, next)),
-                &user,
-                &password,
-                &bytes,
-                content_type,
-            )
-            .map_err(map_err)?;
-            if !created {
-                if attempt == 2 {
-                    return Err("云端版本号冲突（可能有其他设备正在同步），请稍后重试".to_string());
+        if keep > 0 {
+            // 版本目录要先建出来，否则 PUT 会因为父目录不存在而 409
+            let vdir = version_dir_path(&root, &target);
+            mkcol(&agent, &join_url(&url, &vdir), &user, &password).map_err(map_err)?;
+
+            // 版本号是「先查后写」：并发上传（多设备同时同步）时会算出同一个号并互相覆盖。
+            // 用 If-None-Match:* 条件写，撞号（412）就重查一次再试，最多 3 轮。
+            for attempt in 0..3 {
+                let existing = list_versions(&agent, &url, &user, &password, &root, &target)?;
+                let (next, outdated) = next_version(&existing, keep);
+                if next == 0 {
+                    break;
                 }
-                continue; // 被抢先，重查版本号
-            }
-            // 清理超限的旧版本：失败不影响本次同步的结果
-            for n in outdated {
-                let _ = request(
+                let created = put_bytes_create_only(
                     &agent,
-                    "DELETE",
-                    &join_url(&url, &version_file_path(&root, &remote, n)),
+                    &join_url(&url, &version_file_path(&root, &target, next)),
                     &user,
                     &password,
+                    &bytes,
+                    content_type,
                 )
-                .call();
+                .map_err(map_err)?;
+                if !created {
+                    if attempt == 2 {
+                        return Err("云端版本号冲突（可能有其他设备正在同步），请稍后重试".to_string());
+                    }
+                    continue; // 被抢先，重查版本号
+                }
+                // 清理超限的旧版本：失败不影响本次同步的结果
+                for n in outdated {
+                    let _ = request(
+                        &agent,
+                        "DELETE",
+                        &join_url(&url, &version_file_path(&root, &target, n)),
+                        &user,
+                        &password,
+                    )
+                    .call();
+                }
+                version_label = Some(next);
+                break;
             }
-            version_label = Some(next);
-            break;
         }
-        Ok(match version_label {
-            Some(n) => format!("已上传（版本 v{n}）"),
-            None => "已上传".to_string(),
+
+        // 回读上传后的远端状态，供前端回填同步索引（下次据此判定远端是否被动过）
+        let (size, modified) = stat_remote(&agent, &url, &user, &password, &target)?
+            .unwrap_or((bytes.len() as u64, 0));
+
+        let message = if make_copy {
+            let name = target.rsplit('/').next().unwrap_or(target.as_str());
+            format!("云端文件已被其他设备修改，已另存为冲突副本：{name}")
+        } else {
+            match version_label {
+                Some(n) => format!("已上传（版本 v{n}）"),
+                None => "已上传".to_string(),
+            }
+        };
+
+        Ok(UploadResult {
+            status: if make_copy { "conflict" } else { "ok" }.to_string(),
+            remote: target,
+            size,
+            modified,
+            message,
         })
     })
     .await
@@ -1097,5 +1272,63 @@ mod tests {
     fn auth_header_skips_empty_user() {
         assert!(auth_header("", "x").is_none());
         assert_eq!(auth_header("u", "p").unwrap(), "Basic dTpw");
+    }
+
+    #[test]
+    fn parse_self_props_reads_single_response() {
+        let xml = r#"<d:multistatus xmlns:d="DAV:"><d:response>
+          <d:href>/dav/root/a.md</d:href>
+          <d:propstat><d:prop>
+            <d:resourcetype/>
+            <d:getcontentlength>1234</d:getcontentlength>
+            <d:getlastmodified>Thu, 08 Oct 2026 03:12:00 GMT</d:getlastmodified>
+          </d:prop></d:propstat>
+        </d:response></d:multistatus>"#;
+        let (is_dir, size, modified) = parse_self_props(xml);
+        assert!(!is_dir);
+        assert_eq!(size, 1234);
+        assert_eq!(modified, 1791429120);
+
+        // 目录：resourcetype 里含 collection
+        let dir_xml = r#"<d:multistatus xmlns:d="DAV:"><d:response>
+          <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat>
+        </d:response></d:multistatus>"#;
+        assert!(parse_self_props(dir_xml).0);
+    }
+
+    #[test]
+    fn conflict_rule_matches_spec() {
+        // 远端没有该文件 → 不冲突
+        assert!(!is_conflict(None, None));
+        assert!(!is_conflict(None, Some((10, 100))));
+        // 首次同步（无上次记录）→ 直接覆盖，不判冲突
+        assert!(!is_conflict(Some((10, 100)), None));
+        // size 相同且 modified 差 ≤ 2s → 视为自己刚传的
+        assert!(!is_conflict(Some((10, 100)), Some((10, 101))));
+        assert!(!is_conflict(Some((10, 100)), Some((10, 98))));
+        // 超过容差 → 冲突
+        assert!(is_conflict(Some((10, 200)), Some((10, 100))));
+        // size 不同 → 冲突
+        assert!(is_conflict(Some((11, 100)), Some((10, 100))));
+    }
+
+    #[test]
+    fn conflict_path_is_sibling_with_stamp() {
+        // 2026-10-12 14:30:25 UTC
+        let secs = 1_791_815_425;
+        assert_eq!(
+            conflict_remote_path("/Sticho/D/a/note.md", secs),
+            "/Sticho/D/a/note (冲突副本 2026-10-12 143025).md"
+        );
+        // 无扩展名
+        assert_eq!(
+            conflict_remote_path("/r/README", secs),
+            "/r/README (冲突副本 2026-10-12 143025)"
+        );
+        // 文件名里的非法字符被净化
+        assert_eq!(
+            conflict_remote_path("/r/a:b*c.md", secs),
+            "/r/a_b_c (冲突副本 2026-10-12 143025).md"
+        );
     }
 }
