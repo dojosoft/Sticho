@@ -100,15 +100,6 @@
   <!-- 占位撑开：把右侧控件推到状态栏右端（原先由已移除的路径文本承担） -->
   <span class="spacer"></span>
 
-  <!-- 阅读 / 编辑模式切换（本轮从右上角工具栏移入状态栏）：阅读态只读，编辑态高亮 -->
-  <span
-    class="mode-switch"
-    title={browseMode ? t("当前为阅读模式，文档只读。点击切换到编辑模式（Ctrl+E）") : t("当前为编辑模式，可以修改文档。点击回到阅读模式（Ctrl+E）")}
-  >
-    <button class:active={browseMode} onclick={() => onSetBrowseMode(true)}>{t("阅读模式")}</button>
-    <button class:active={!browseMode} onclick={() => onSetBrowseMode(false)}>{t("编辑模式")}</button>
-  </span>
-
   <!-- HTML 文档模式：预览 / 源码切换 + 是否执行脚本。
        预览的可编辑性不再单设按钮——它就是「阅读 / 编辑模式」在 HTML 文档上的表现（见 previewEditable） -->
   {#if docKind === "html"}
@@ -126,14 +117,15 @@
     </button>
   {/if}
 
-  <!-- 代码文件：语言名 + 光标行列（由 CodeMirror 的 updateListener 上报） -->
+  <!-- 代码文件：光标行列 / 分节只读提示（由 CodeMirror 的 updateListener 上报） -->
   {#if docKind === "code"}
     <span class="code-info">
       {#if codeLargeText !== null}
-        <!-- 超大代码文件走只读分节纯文本，没有 CM 也就没有光标行列可报 -->
+        <!-- 超大代码文件走只读分节纯文本：没有语言下拉按钮，语言名在这里显示一次 -->
         {codeLangLabel} · {t("分节只读视图")}
       {:else}
-        {codeLangLabel} · {t("行 {r}，列 {c}", { r: codeCursor.line, c: codeCursor.column })}{codeMatch >= 2
+        <!-- 普通代码文件：语言名已由右侧「语法高亮方案」下拉显示，这里不再重复，只报位置 -->
+        {t("行 {r}，列 {c}", { r: codeCursor.line, c: codeCursor.column })}{codeMatch >= 2
           ? ` · ${t("{n} 处匹配", { n: codeMatch })}`
           : ""}{browseMode ? t("（只读）") : ""}
       {/if}
@@ -224,6 +216,15 @@
         {/each}
       </div>
     {/if}
+  </span>
+
+  <!-- 阅读 / 编辑模式切换：放在编码切换右侧；阅读态只读，编辑态高亮 -->
+  <span
+    class="mode-switch"
+    title={browseMode ? t("当前为阅读模式，文档只读。点击切换到编辑模式（Ctrl+E）") : t("当前为编辑模式，可以修改文档。点击回到阅读模式（Ctrl+E）")}
+  >
+    <button class:active={browseMode} onclick={() => onSetBrowseMode(true)}>{t("阅读")}</button>
+    <button class:active={!browseMode} onclick={() => onSetBrowseMode(false)}>{t("编辑")}</button>
   </span>
 
   {#if davEnabled}

@@ -255,6 +255,7 @@ export const EN: Record<string, string> = {
   // ---- 阅读 / 编辑模式 ----
   阅读模式: "Reading Mode",
   编辑模式: "Edit Mode",
+  阅读: "Read",
   "当前为阅读模式，文档只读。点击切换到编辑模式（Ctrl+E）":
     "Reading mode: the document is read-only. Click to switch to edit mode (Ctrl+E)",
   "当前为编辑模式，可以修改文档。点击回到阅读模式（Ctrl+E）":
@@ -368,9 +369,7 @@ export const EN: Record<string, string> = {
   "导出为纯文本": "Export as Plain Text",
   "导出为 LaTeX（.tex）": "Export as LaTeX (.tex)",
   "导出为 Epub（.epub）": "Export as Epub (.epub)",
-  "打印预览…": "Print Preview…",
   "打印…": "Print…",
-  打印预览: "Print Preview",
   "文件属性…": "File Properties…",
   退出程序: "Quit",
   撤销: "Undo",

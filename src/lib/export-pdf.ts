@@ -99,6 +99,13 @@ export function buildPrintHtml(bodyHtml: string, title: string): string {
     page-break-inside: avoid;
   }
   pre code { background: none; padding: 0; font-size: 9pt; line-height: 1.5; }
+  /* 纯文本 / 代码文件的打印：只要等宽换行，不要灰底与边框（那圈框打印出来很难看） */
+  pre.plain {
+    background: none;
+    border: none;
+    padding: 0;
+    page-break-inside: auto;
+  }
 
   /* ---- 引用块 ---- */
   blockquote {

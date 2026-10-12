@@ -391,11 +391,6 @@
   let themeFiles = $state<ThemeFile[]>([]); // 自定义主题目录里的 .css（批次八）
   let userTheme = $state<string | null>(null); // 当前选用的自定义主题文件名
 
-  // ---- 打印预览（本轮新增）：预览模态里的 iframe 直接吃这份成品 HTML ----
-  let printPreviewOpen = $state(false);
-  let printDocHtml = $state(""); // 组装好的完整打印 HTML（含 @page 与打印样式）
-  let printTitle = $state(""); // 预览标题栏显示，同时是打印时的文档名
-
   // ---- 界面语言（批次八）----
   let locale = $state<Locale>("zh-CN");
   /** 翻译函数：以中文原文为键；locale 变化时重建，界面文案随之刷新 */
@@ -2211,42 +2206,20 @@
   const exportEpubFile = () => exportViaPandoc(t("导出为 Epub 电子书"), "epub", t("Epub 电子书"), "epub");
 
   /**
-   * 组装打印用 HTML。
+   * 打印：交给系统打印对话框（WebView2 自带打印预览，故本软件不再自建预览）。
    *
-   * 与「导出 PDF」共用 export-pdf 里的打印样式，故走动态加载（那条链路拖着 markdown-it）。
-   * 打印三种形态：Markdown 走渲染、HTML 原样、代码走 <pre> 转义，都收口在 lib/print 里。
+   * 打印样式与「导出 PDF」共用（export-pdf），故走动态加载；打印内容装进离屏 iframe
+   * 再 print()，只打正文，不会带上工具栏与侧边栏。
    */
-  async function buildPrintDoc(): Promise<{ html: string; title: string }> {
+  async function printDoc(): Promise<void> {
     const m = await import("./lib/print");
-    const title = docBaseName();
     const html = m.buildPrintDocument({
       source: currentText(),
       kind: docKind,
-      title,
+      title: docBaseName(),
       dir: docDirPath(),
     });
-    return { html, title };
-  }
-
-  /** 打印预览：组装成品 HTML 后挂进预览模态 */
-  async function openPrintPreview(): Promise<void> {
-    const doc = await buildPrintDoc();
-    printDocHtml = doc.html;
-    printTitle = doc.title;
-    printPreviewOpen = true;
-  }
-
-  /** 直接调起系统打印对话框（不经过预览） */
-  async function printDirectly(): Promise<void> {
-    const doc = await buildPrintDoc();
-    const m = await import("./lib/print");
-    await m.printHtml(doc.html);
-  }
-
-  /** 预览模态里的「打印…」：对当前预览内容调系统打印 */
-  async function printHtmlInPreview(): Promise<void> {
-    const m = await import("./lib/print");
-    await m.printHtml(printDocHtml);
+    await m.printHtml(html);
   }
 
   /** 导入 Word（阶段 5）：docx → Pandoc → GFM Markdown，图片内联 data URI */
@@ -3971,8 +3944,7 @@
             { label: t("导出为 Epub（.epub）"), action: exportEpubFile },
           ],
         },
-        { label: t("打印预览…"), action: () => void openPrintPreview() },
-        { label: t("打印…"), action: () => void printDirectly() },
+        { label: t("打印…"), action: () => void printDoc() },
         { sep: true },
         {
           label: t("编码"),
@@ -4405,10 +4377,7 @@
   function onKeydown(e: KeyboardEvent): void {
     // Esc：优先关闭菜单 / 查找栏
     if (e.key === "Escape") {
-      if (printPreviewOpen) {
-        printPreviewOpen = false;
-        e.preventDefault();
-      } else if (diffView) {
+      if (diffView) {
         diffView = null;
         e.preventDefault();
       } else if (paletteOpen) {
@@ -5256,31 +5225,6 @@
     <div class="drop-overlay">{t("松开鼠标打开文件（支持 md / html / docx / pdf）")}</div>
   {/if}
 
-  <!-- 打印预览（本轮新增）：iframe 内嵌成品打印 HTML，底部「打印…」直接调系统打印 -->
-  {#if printPreviewOpen}
-    <div
-      class="modal-mask modal-mask--print"
-      role="none"
-      onclick={(e) => {
-        if (e.target === e.currentTarget) printPreviewOpen = false;
-      }}
-    >
-      <div class="modal modal--print" role="dialog" aria-label={t("打印预览")}>
-        <div class="modal-head">
-          <span>{t("打印预览")}{printTitle ? ` · ${printTitle}` : ""}</span>
-          <button class="icon-btn" title={t("关闭（Esc）")} aria-label={t("关闭")} onclick={() => (printPreviewOpen = false)}>✕</button>
-        </div>
-        <div class="print-frame-wrap">
-          <iframe class="print-frame" title={t("打印预览")} srcdoc={printDocHtml}></iframe>
-        </div>
-        <div class="modal-foot">
-          <button class="set-action" onclick={() => (printPreviewOpen = false)}>{t("关闭")}</button>
-          <button class="print-go" onclick={() => void printHtmlInPreview()}>{t("打印…")}</button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
   <!-- 多选一对话框（批次七）：外部变更三选 -->
   {#if choiceState}
     <div
@@ -5739,56 +5683,6 @@
   .modal-body {
     padding: 0.8rem;
     overflow: auto;
-  }
-
-  /* ---- 打印预览（本轮新增）---- */
-  .modal-mask--print {
-    z-index: 650; /* 盖在软件设置之上，仍低于多选一对话框 */
-  }
-
-  .modal--print {
-    width: min(920px, 94vw);
-    height: min(88vh, 1100px);
-    max-height: 92vh;
-  }
-
-  /* 预览区吃掉剩余高度：iframe 需要确定高度才能撑满，故用 flex + min-height:0 而非 height:100% */
-  .print-frame-wrap {
-    flex: 1;
-    min-height: 0;
-    padding: 0.6rem;
-    background: #f3f4f6;
-  }
-
-  .print-frame {
-    width: 100%;
-    height: 100%;
-    border: 1px solid var(--border, #ddd);
-    border-radius: 4px;
-    background: #fff;
-  }
-
-  .modal-foot {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    padding: 0.6rem 0.8rem;
-    border-top: 1px solid var(--border, #ddd);
-  }
-
-  .print-go {
-    font: inherit;
-    font-size: 0.8125rem;
-    padding: 0.35rem 0.9rem;
-    border: 1px solid var(--accent);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--accent);
-    cursor: pointer;
-  }
-
-  .print-go:hover {
-    background: var(--hover, rgba(0, 0, 0, 0.07));
   }
 
   .set-group + .set-group {

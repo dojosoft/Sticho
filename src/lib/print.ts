@@ -1,9 +1,9 @@
 /**
- * 打印与打印预览（新增）
+ * 打印（新增）
  *
  * 为什么在前端做，而不复用 Rust 的 export_pdf：
  * - 导出 PDF 是「静默产出文件」，走不可见 WebView 的 PrintToPdf，全程没有用户交互；
- * - 打印要让用户看到系统打印对话框、选打印机与页数，走的是 window.print()。
+ * - 打印要让用户看到系统打印对话框（WebView2 自带打印预览）并选打印机与页数，走的是 window.print()。
  *   把一个装好打印样式的 iframe 挂进文档流再让它自己 print()，打印内容就只是这一帧，
  *   绝不会把应用工具栏、侧边栏一起打出去。
  *
@@ -30,10 +30,10 @@ export interface PrintSource {
   dir?: string | null;
 }
 
-/** 组装一份可直接打印（或塞进预览 iframe）的完整 HTML */
+/** 组装一份可直接打印的完整 HTML */
 export function buildPrintDocument({ source, kind, title, dir }: PrintSource): string {
   let body: string;
-  if (kind === "code") body = `<pre>${escapeHtml(source)}</pre>`;
+  if (kind === "code") body = `<pre class="plain">${escapeHtml(source)}</pre>`;
   else if (kind === "html") body = source;
   else body = md.render(source);
   if (dir) body = rewriteImageSrc(body, dir);
