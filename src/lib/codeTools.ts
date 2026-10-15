@@ -232,7 +232,9 @@ function scanJs(src: string): { lines: string[]; info: JsLineInfo[] } {
     const startMode = mode;
     let delta = 0;
     let leadingClosers = 0;
-    let sawSig = false;
+    // 本行是否仍处在「行首」：只见过收尾括号与空白。连续几个收尾括号都要计入缩进回退
+    // （`});` 该回退两级；旧实现遇到第一个 `}` 就把标志置真，只会回退一级）
+    let leading = true;
     let i = 0;
     const n = line.length;
 
@@ -287,7 +289,7 @@ function scanJs(src: string): { lines: string[]; info: JsLineInfo[] } {
           if (d === c) break;
         }
         i = j;
-        sawSig = true;
+        leading = false;
         prevSig = c;
         prevWord = "";
         continue;
@@ -295,7 +297,7 @@ function scanJs(src: string): { lines: string[]; info: JsLineInfo[] } {
       if (c === "`") {
         mode = "template";
         i += 1;
-        sawSig = true;
+        leading = false;
         prevSig = c;
         prevWord = "";
         continue;
@@ -318,7 +320,7 @@ function scanJs(src: string): { lines: string[]; info: JsLineInfo[] } {
           j += 1;
         }
         i = j;
-        sawSig = true;
+        leading = false;
         prevSig = "/";
         prevWord = "";
         continue;
@@ -329,18 +331,18 @@ function scanJs(src: string): { lines: string[]; info: JsLineInfo[] } {
         prevWord = line.slice(i, j);
         prevSig = c;
         i = j;
-        sawSig = true;
+        leading = false;
         continue;
       }
       if (c === "{" || c === "(" || c === "[") {
         delta += 1;
       } else if (c === "}" || c === ")" || c === "]") {
         delta -= 1;
-        if (!sawSig) leadingClosers += 1;
+        if (leading) leadingClosers += 1;
       }
       prevSig = c;
       prevWord = "";
-      sawSig = true;
+      leading = false;
       i += 1;
     }
 

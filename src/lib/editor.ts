@@ -750,7 +750,7 @@ function openLangPanel(infoEl: HTMLElement, anchor: HTMLElement): void {
   const panel = document.createElement("div");
   panel.className = "md-studio-lang-panel";
   panel.innerHTML = `
-    <input class="md-studio-lang-search" type="text" placeholder="${editorText("searchLanguage")}" />
+    <input class="md-studio-lang-search" type="text" placeholder="${escapeAttr(editorText("searchLanguage"))}" />
     <div class="md-studio-lang-list">
       ${langButtonHTML(COMMON_LANGUAGES)}
       <span class="md-studio-lang-sep"></span>
