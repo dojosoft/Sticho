@@ -96,9 +96,10 @@ struct Bootstrap {
 
 /// 去掉 Windows verbatim 前缀（`\\?\D:\x` → `D:\x`）。
 ///
-/// `current_exe()` 在个别场景下会返回带前缀的路径，带着前缀去拼文件名会让下游
-/// 把 `\\?\` 当成目录名的一部分。
-fn strip_verbatim(p: &Path) -> PathBuf {
+/// `current_exe()` 在个别场景下会返回带前缀的路径（长路径、以 verbatim 形式启动），
+/// 带着前缀去拼文件名会让下游把 `\\?\` 当成目录名的一部分；写进注册表的可执行路径
+/// 同理（见 commands/file_assoc.rs）。故本函数对 crate 内公开，各处共用一份实现。
+pub(crate) fn strip_verbatim(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     match s.strip_prefix(r"\\?\") {
         Some(rest) => PathBuf::from(rest),

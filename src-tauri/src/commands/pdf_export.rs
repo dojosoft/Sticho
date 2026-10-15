@@ -109,6 +109,22 @@ fn cdp_output(errorcode: windows_core::HRESULT, result: &PCWSTR, path: &str) -> 
     crate::commands::file_io::atomic_write(path, &bytes)
 }
 
+/// 阻塞等待打印结果（最长 `TIMEOUT`）。
+///
+/// `recv_timeout` 是阻塞调用，放进 blocking 线程池执行，避免占住异步 runtime 的工作线程
+/// （本命令最长要等两轮，合计可达 2×TIMEOUT）。`timeout_msg` 由调用方给出：CDP 那一轮
+/// 的超时也要带 `[CDP]` 前缀，才会被下面的回落逻辑当作「通路不可用」处理。
+async fn recv_print_result(
+    rx: mpsc::Receiver<Result<(), String>>,
+    timeout_msg: &'static str,
+) -> Result<(), String> {
+    match tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(TIMEOUT)).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(timeout_msg.to_string()),
+        Err(e) => Err(format!("Failed to wait for the print result: {e}")),
+    }
+}
+
 #[tauri::command]
 pub async fn export_pdf(app: AppHandle, path: String, html_b64: String) -> Result<(), String> {
     // 1. 解码前端传来的打印 HTML，落临时文件
@@ -165,12 +181,12 @@ pub async fn export_pdf(app: AppHandle, path: String, html_b64: String) -> Resul
         return Err(format!("Failed to create print view: {e}"));
     }
 
-    // 4. 等待打印完成（handler 回调发送结果）
-    let mut result = rx
-        .recv_timeout(TIMEOUT)
-        .unwrap_or_else(|_| Err("PDF generation timed out (60 seconds)".to_string()));
+    // 4. 等待打印完成（handler 回调发送结果）。CDP 这一轮的超时也带 "[CDP]" 前缀，
+    // 与接口拿不到 / 方法调用失败同等看待——CDP 只是比原生多一层「生成书签」的能力，
+    // 不该因为它慢（超大文档）就把整次导出判死，还有原生通路可兜。
+    let mut result = recv_print_result(rx, "[CDP] PDF generation timed out (60 seconds)").await;
 
-    // CDP 通路整体不可用（接口拿不到、方法调用失败、结果异常）时回落原生 PrintToPdf：
+    // CDP 通路整体不可用（接口拿不到、方法调用失败、结果异常、超时）时回落原生 PrintToPdf：
     // 丢掉书签，但 PDF 仍能导出。CDP 通路出来的错误一律带 "[CDP]" 前缀，据此判定。
     if matches!(&result, Err(e) if e.starts_with("[CDP]")) {
         if let Some(window) = app.get_webview_window(&label) {
@@ -184,9 +200,9 @@ pub async fn export_pdf(app: AppHandle, path: String, html_b64: String) -> Resul
                 })
                 .is_ok()
             {
-                result = rx2
-                    .recv_timeout(TIMEOUT)
-                    .unwrap_or_else(|_| Err("PDF generation timed out (60 seconds)".to_string()));
+                // 回落只此一次，超时不再递归回落（错误串不带前缀，正合此意）；
+                // 万一 CDP 的 COM 回调稍后才完成，它写的是同一份 PDF，留着无害
+                result = recv_print_result(rx2, "PDF generation timed out (60 seconds)").await;
             }
         }
     }

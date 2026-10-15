@@ -195,10 +195,15 @@ fn friendly_name(ext: &str) -> String {
     .to_string()
 }
 
-/// 程序（exe）绝对路径字符串
+/// 程序（exe）绝对路径字符串。
+///
+/// 必须过一遍 `strip_verbatim`：`current_exe()` 在长路径 / 以 verbatim 形式启动时会返回
+/// `\\?\C:\…` 形式。把带前缀的路径写进注册表的 `shell\open\command`，资源管理器拉起时
+/// 不一定能解析该命令行，表现为「关联显示已设置、双击却打不开」——而 `get_context_menu`、
+/// `DefaultIcon` 也都基于同一字符串，故统一在源头剥掉。
 fn exe_string() -> Result<String, String> {
-    Ok(std::env::current_exe()
-        .map_err(|e| format!("Failed to get program path: {e}"))?
+    let exe = std::env::current_exe().map_err(|e| format!("Failed to get program path: {e}"))?;
+    Ok(crate::commands::config::strip_verbatim(&exe)
         .to_string_lossy()
         .into_owned())
 }
@@ -373,6 +378,8 @@ pub fn set_file_association(ext: String, enable: bool) -> Result<(), String> {
 /// 查询是否已注册「用 Sticho 打开」右键菜单项
 #[tauri::command]
 pub fn get_context_menu() -> Result<bool, String> {
+    // 只认「当前这个 exe 路径」：程序换到别处后，旧位置留下的登记仍在注册表里，
+    // 但这里的判定会返回 false（面板显示「未开启」），用户重新勾选即可覆盖旧登记。
     let key = match RegKey::predef(HKEY_CURRENT_USER).open_subkey(format!("{CTX_KEY}\\command")) {
         Ok(k) => k,
         Err(_) => return Ok(false),

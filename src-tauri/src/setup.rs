@@ -293,8 +293,15 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
     let mut reader = resp.into_reader().take(MAX_DOWNLOAD_BYTES + 1);
     let mut file =
         std::fs::File::create(dest).map_err(|e| format!("Failed to create temporary file: {e}"))?;
-    let written = std::io::copy(&mut reader, &mut file)
-        .map_err(|e| format!("Failed to write temporary file: {e}"))?;
+    let written = match std::io::copy(&mut reader, &mut file) {
+        Ok(n) => n,
+        Err(e) => {
+            // 写坏的半截文件不能留在临时目录（Windows 上必须先关句柄再删）
+            drop(file);
+            let _ = std::fs::remove_file(dest);
+            return Err(format!("Failed to write temporary file: {e}"));
+        }
+    };
     drop(file);
     if written > MAX_DOWNLOAD_BYTES {
         let _ = std::fs::remove_file(dest);
