@@ -1026,6 +1026,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     // 新标签默认不绑定云端：打开逻辑若需要（openCloudContent）会自行重建绑定。
     // 必须放在 captureActiveTab 之后——上一个标签要把它的远端绑定先搬回快照。
     currentRemote = null;
+    // 本函数直接改 activeIndex、不走 activateTab（因此不经过 activateTabInner 的复位），
+    // 而来源可能是「刚从一个超大代码标签切过来」——不在这里清掉超大规模标记，
+    // 新文档会被下面的 resetToBrowseMode 当成大文档强制只读、Ctrl+E 也会被挡下。
+    // 目标本身若是代码文件，稍后的 showCodeDoc 会按新正文重新赋值。
+    codeLargeText = null;
     await run();
     // 刚打开的文档也要把磁盘上的书签装回来：本函数是「直填全局状态」的落点，
     // 不走 activateTab，不在这里补一次，重开后书签就会像「没保存」一样消失。
@@ -1336,8 +1341,14 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (!tabsReady) return;
     const json = JSON.stringify(sessionOf(tabs, activeIndex));
     if (json === lastSessionJson) return;
-    lastSessionJson = json;
-    await saveSetting("session", JSON.parse(json)).catch(() => {});
+    try {
+      await saveSetting("session", JSON.parse(json));
+      // 只在写成功后才记下：先记再写的话，一次失败会让此后内容相同的会话
+      // 永远走不进这个函数（早退），会话文件就停在更早的状态上，下次启动恢复不全
+      lastSessionJson = json;
+    } catch {
+      // 会话是兜底机制，失败不打扰用户；内容下次变化时会重新尝试写入
+    }
   }
 
   // ---- 小工具 ----
@@ -6063,6 +6074,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     searchRegex = regex;
 
     const clear = (message: string): void => {
+      // 提前收场也要推进请求代次：在途请求返回时按代次比对，不推进的话它的旧结果
+      // 会把这里的「已清空 / 正则无效」状态覆盖回去（用户会看到结果又冒出来）。
+      // 同时把 busy 落下——在途请求的 finally 因代次不符不会再管它，只能在这里收尾。
+      searchSeq += 1;
+      searchBusy = false;
       searchGroups = [];
       searchFileCount = 0;
       searchTruncated = false;
@@ -6148,6 +6164,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     const occurrence = group ? group.hits.indexOf(hit) : 0;
     const prevText = findText;
     const prevCase = findCase;
+    const prevWord = findWord;
+    const prevRegex = findRegex;
     const prevIdx = findIdx;
 
     findText = searchQuery;
@@ -6169,6 +6187,10 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     clearCodeFind();
     findText = prevText;
     findCase = prevCase;
+    // 全词 / 正则是被上面临时改写成「搜索时的语义」的，必须一起还原，
+    // 否则用户下次打开查找栏会发现开关被静默改掉了
+    findWord = prevWord;
+    findRegex = prevRegex;
     findIdx = prevIdx;
   }
 
