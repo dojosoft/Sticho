@@ -7463,7 +7463,6 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
             {#key previewKey}
               <iframe
                 bind:this={previewFrame}
-                class:editing={previewEditable}
                 title={t("HTML Preview")}
                 sandbox={htmlScripts ? "allow-scripts" : "allow-same-origin"}
                 srcdoc={previewDoc}
@@ -8789,12 +8788,6 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
 
   /* 状态栏的 .code-info / .html-switch / .html-edit 与整套状态栏样式，
      随组件搬到 components/StatusBar.svelte（Svelte 样式按组件作用域隔离） */
-
-  /* 编辑态给预览区一圈内描边，明确「现在改的是文档本身」 */
-  .html-view iframe.editing {
-    outline: 2px solid var(--accent, #2563eb);
-    outline-offset: -2px;
-  }
 
   /* ---- 拖拽悬停遮罩 ---- */
   .drop-overlay {
