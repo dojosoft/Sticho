@@ -96,18 +96,30 @@ const REGEX_META = new Set(["\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "
  *
  * Rust 侧的跨文件搜索只认字面量（不引 regex crate），正则模式于是先抽一段「必然出现」
  * 的字面量交给它缩小范围，再由前端用完整正则对候选行二次匹配。
- * 任何匹配该正则的文本都必然包含这段字面量，所以粗筛不会漏掉真命中。
  *
- * 抽不出字面量（如 `\d{4}`、`^\s*$`）时返回空串，由调用方提示用户补一段确定的文字。
+ * 这个返回值是**硬性粗筛**（Rust 侧按 `line.find(needle)` 过滤），所以一旦它不是真命中的
+ * 子串，那些行根本回不来——「搜不到明明存在的内容」比放宽范围严重得多。故下列情形一律
+ * 放弃（返回空串，由调用方提示用户补一段确定的文字）：交替 `a|b`、环视
+ * `(?=` `(?!` `(?<=` `(?<!`、以及量词直接作用于字面量（`colou?r` 的 u、`\d{4}` 的计数 4）。
  */
 export function literalAnchor(source: string): string {
   let best = "";
   let run = "";
   let inClass = false;
+  /** 上一个结构是不是「分组收尾」：用于识别 `(abc)?` 这类作用于分组的量词 */
+  let afterGroup = false;
 
   const flush = (): void => {
     if (run.length > best.length) best = run;
     run = "";
+  };
+
+  /** 量词作用于刚读完的字面量：退掉被量化的那个字符再结算；返回本次是否退掉了字符 */
+  const dropQuantified = (): boolean => {
+    if (run === "") return false;
+    run = run.slice(0, -1);
+    flush();
+    return true;
   };
 
   for (let i = 0; i < source.length; i++) {
@@ -121,6 +133,7 @@ export function literalAnchor(source: string): string {
       } else {
         flush();
       }
+      afterGroup = false;
       i++; // 跳过被转义的字符
       continue;
     }
@@ -132,13 +145,65 @@ export function literalAnchor(source: string): string {
     if (ch === "[") {
       flush();
       inClass = true;
+      afterGroup = false;
+      continue;
+    }
+    if (ch === "|") {
+      // 交替：命中可能落在任一分支，各分支共有的字面量求不出来，一律放弃
+      return "";
+    }
+    if (ch === "?") {
+      if (source[i - 1] === "(") {
+        const next = source[i + 1];
+        const after = source[i + 2];
+        // 环视的内容不属于命中本身，整条正则都不能拿它做粗筛
+        if (next === "=" || next === "!" || (next === "<" && (after === "=" || after === "!"))) {
+          return "";
+        }
+        // `(?:` 与 `(?<name>` 只是分组标记，标记字符不是字面量，跳到标记之后继续读
+        if (next === ":") {
+          i += 1;
+          afterGroup = false;
+          continue;
+        }
+        if (next === "<") {
+          const end = source.indexOf(">", i + 2);
+          i = end === -1 ? source.length : end;
+          afterGroup = false;
+          continue;
+        }
+      }
+      // 普通量词：`colou?r` 的 u 不保证出现，必须退掉；`(abc)?` 整体不可证，放弃
+      if (!dropQuantified() && afterGroup) return "";
+      afterGroup = false;
+      continue;
+    }
+    if (ch === "*") {
+      if (!dropQuantified() && afterGroup) return "";
+      afterGroup = false;
+      continue;
+    }
+    if (ch === "{") {
+      if (!dropQuantified() && afterGroup) return "";
+      // 量词体（4 / 2,5 / 3,）里是计数而不是字面量，整段跳过
+      const end = source.indexOf("}", i + 1);
+      i = end === -1 ? source.length : end;
+      afterGroup = false;
+      continue;
+    }
+    if (ch === "+") {
+      // `x+` 至少要出现一次，字面量仍然成立；`(abc)+` 同理（分组内容已计入 best）
+      flush();
+      afterGroup = false;
       continue;
     }
     if (REGEX_META.has(ch)) {
+      afterGroup = ch === ")";
       flush(); // 元字符切断当前片段
       continue;
     }
     run += ch; // 普通字符即字面量
+    afterGroup = false;
   }
   flush();
 

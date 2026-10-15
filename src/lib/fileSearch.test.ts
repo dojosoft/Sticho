@@ -73,7 +73,7 @@ describe("highlightSegments", () => {
 describe("literalAnchor", () => {
   it("取最长的一段字面量", () => {
     expect(literalAnchor("foo\\d+")).toBe("foo");
-    expect(literalAnchor("https?://")).toBe("https");
+    expect(literalAnchor("https?://")).toBe("http"); // s 被 `?` 量化，不能拿 "https" 当锚点
     expect(literalAnchor("[a-z]+@example\\.com")).toBe("@example.com");
   });
 
@@ -87,9 +87,19 @@ describe("literalAnchor", () => {
     expect(literalAnchor("x[0-9]y")).toBe("x");
   });
 
-  it("抽不出字面量时返回空串", () => {
+  it("被量词修饰的字面量不作锚点（不保证出现在命中里）", () => {
     expect(literalAnchor("^\\s*$")).toBe("");
-    expect(literalAnchor("\\d{4}")).toBe("4");
+    // `\d{4}` 里的 4 只是量词计数：把它当锚点会让不含字符 4 的命中行（如 2026）被粗筛漏掉
+    expect(literalAnchor("\\d{4}")).toBe("");
+    // 被 `?` 量化的那个字符必须退掉，其余部分仍是共有字面量
+    expect(literalAnchor("colou?r")).toBe("colo");
+    expect(literalAnchor("\\d{4}-")).toBe("-");
+  });
+
+  it("交替与环视一律放弃（分支共有的字面量求不出来，环视内容不属于命中）", () => {
+    expect(literalAnchor("hello|world")).toBe("");
+    expect(literalAnchor("\\.(jpg|png)$")).toBe("");
+    expect(literalAnchor("(?=abc)def")).toBe("");
   });
 });
 

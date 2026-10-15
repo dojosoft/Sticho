@@ -848,6 +848,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (tab.path) treeRoot = parentDir(tab.path);
     setDocumentPath(tab.path); // 图片落盘目录 / 相对路径换算都跟随各自文档
 
+    // 离开超大代码文件标签时必须清掉 codeLargeText：它只在代码文档通路上被赋值
+    // （showCodeEditor 置 null、showCodePlain 置值），markdown 与 html 分支若不清理，
+    // 这台 markdown 文档会继续被当成超大代码文件——Ctrl+E 被挡下、新开文档强制阅读模式、
+    // 文本工具与三种模式切换的菜单整组置灰。
+    if (tab.kind !== "code") codeLargeText = null;
+
     if (tab.kind === "html") {
       htmlSource = tab.content;
       previewDoc = tab.content;
@@ -969,7 +975,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (busy || docKind === mode) return;
     busy = true;
     try {
+      // 取值必须在清标记之前：它是当前（代码）模式的正文
       const text = currentText();
+      // 离开代码模式时清掉超大规模标记（同 activateTabInner），
+      // 否则 markdown / html 模式会继承超大代码文件的那套守卫
+      if (mode !== "code") codeLargeText = null;
       if (mode === "code") {
         if (docKind === "html") syncHtmlFromPreview();
         await showCodeDoc(text, currentPath);
@@ -1034,40 +1044,49 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (busy) return;
     const tab = tabs[index];
     if (!tab) return;
-    if (index === activeIndex) captureActiveTab();
+    // 与 closeOtherTabs / closeTabsAt 同口径：整个流程置 busy。
+    // 否则确认框挂着时再按一次 Ctrl+W，第二个 askChoice 会覆盖 choiceResolve，
+    // 第一个 Promise 永不结算，那次关闭静默作废。
+    busy = true;
+    try {
+      if (index === activeIndex) captureActiveTab();
 
-    if (tabDirty(index)) {
-      const choice = await askChoice(
-        t("“{name}” has unsaved changes.", { name: tabTitle(index) }),
-        [
-          { label: t("Save"), value: "save", primary: true },
-          { label: t("Don't Save"), value: "discard" },
-          { label: t("Cancel"), value: "cancel" },
-        ],
-        t("Close Tab"),
-      );
-      if (choice === null || choice === "cancel") return;
-      if (choice === "save") {
-        if (index !== activeIndex) await activateTab(index);
-        await saveFile();
-        if (dirty) return; // 没保存成功：不关
+      if (tabDirty(index)) {
+        const choice = await askChoice(
+          t("“{name}” has unsaved changes.", { name: tabTitle(index) }),
+          [
+            { label: t("Save"), value: "save", primary: true },
+            { label: t("Don't Save"), value: "discard" },
+            { label: t("Cancel"), value: "cancel" },
+          ],
+          t("Close Tab"),
+        );
+        if (choice === null || choice === "cancel") return;
+        if (choice === "save") {
+          if (index !== activeIndex) await activateTab(index);
+          await saveFile(true); // 外层已置 busy：强制保存，否则会被守卫拦下
+          if (dirty) return; // 没保存成功：不关
+        }
       }
-    }
 
-    void deleteRecovery(tab.draftId).catch(() => {}); // 标签没了，它的草稿也该清掉
-    const wasActive = index === activeIndex;
-    const nextIndex = Math.min(index, tabs.length - 2);
-    tabs.splice(index, 1);
+      void deleteRecovery(tab.draftId).catch(() => {}); // 标签没了，它的草稿也该清掉
+      delete htmlScriptsByTab[tab.id]; // 「执行文档脚本」的开关也按标签存的，一并回收
+      const wasActive = index === activeIndex;
+      const nextIndex = Math.min(index, tabs.length - 2);
+      tabs.splice(index, 1);
 
-    if (tabs.length === 0) {
-      tabs.push(createTab());
-      await activateTab(0);
-    } else if (wasActive) {
-      await activateTab(Math.max(0, nextIndex));
-    } else if (index < activeIndex) {
-      activeIndex -= 1;
+      if (tabs.length === 0) {
+        tabs.push(createTab());
+        await activateTab(0);
+      } else if (wasActive) {
+        await activateTab(Math.max(0, nextIndex));
+      } else if (index < activeIndex) {
+        activeIndex -= 1;
+      }
+      void saveSession();
+    } finally {
+      busy = false;
     }
-    void saveSession();
   }
 
   /**
@@ -1118,6 +1137,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         if (i === keepIndex) continue;
         const tab = tabs[i]!;
         void deleteRecovery(tab.draftId).catch(() => {}); // 标签没了，它的草稿也该清掉
+        delete htmlScriptsByTab[tab.id]; // 「执行文档脚本」的开关随标签一起回收
         tabs.splice(i, 1);
       }
       // 保留下来的标签此时一定在下标 0 上
@@ -1176,6 +1196,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         if (!remove.has(i)) continue;
         const tab = tabs[i]!;
         void deleteRecovery(tab.draftId).catch(() => {}); // 标签没了，它的草稿也该清掉
+        delete htmlScriptsByTab[tab.id]; // 「执行文档脚本」的开关随标签一起回收
         tabs.splice(i, 1);
       }
 
@@ -6170,6 +6191,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       } else if (recoveryOpen) {
         recoveryOpen = false;
         e.preventDefault();
+      } else if (cloudOpen) {
+        // 云文件模态是从设置面板里打开的独立覆盖层：它必须比设置面板先关，
+        // 否则 Esc 会把下层的设置面板关掉，而这个模态还留在屏幕上（✕ 的提示写着 Esc）
+        cloudOpen = false;
+        e.preventDefault();
       } else if (settingsOpen) {
         settingsOpen = false;
         e.preventDefault();
@@ -6471,6 +6497,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       void setEditorLocale(vditorLang(locale));
       document.documentElement.lang = locale;
       recentFiles = (s["recentFiles"] as string[] | undefined) ?? [];
+      // 代码文件「手动指定语法高亮语言」的覆盖表（键为路径指纹）：setCodeLang 负责写盘，
+      // 这里必须读回，否则重启后回退成按扩展名判定，用户设过的语言白设。
+      codeLangOverrides = (s["codeLangOverrides"] as Record<string, string | null> | undefined) ?? {};
       sidebarVisible = (s["sidebarVisible"] as boolean | undefined) ?? true;
       sidebarView = (s["sidebarView"] as SidebarView | undefined) ?? "outline";
       // 面板开关：与默认值合并，兼容旧配置（没有该键时只开文件树/大纲/书签，属性/搜索/云端默认关）

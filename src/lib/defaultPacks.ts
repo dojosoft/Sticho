@@ -36,26 +36,20 @@ const LOCALES_README = `Sticho 语言包文件夹
 `;
 
 /**
- * 词表内容指纹（FNV-1a 32 位，输出十进制）：自带语言包的释放版本 = 软件版本号 + 本指纹。
+ * 自带语言包的释放版本末段：**必须单调递增**，每次修改内置词表（zh-CN 等）就 +1。
  *
- * 只用软件版本号是不够的：开发期版本号长期停在 0.1.0，只要词表改了而版本号没变，目录里
- * 那份旧包就不会被覆盖刷新，它里面的旧译文还会逐条盖过内置词表——表现为「文案改了、重启
- * 后界面却没变」。把词表指纹并进版本，词表任何增删改都会让内置版本高于目录里的旧包，启动
- * 时即自动覆盖。指纹输出十进制（而非十六进制）以便沿用 Rust 侧的点分数字版本比较。
+ * 为什么不用「词表指纹」当版本段：指纹是 32 位哈希，改一次词表有约一半概率让新指纹**变小**，
+ * 而软件版本号开发期长期停在 0.1.0；Rust 侧只在内置版本**高于**目录里的 `_version` 时才覆盖
+ * （见 commands/packs.rs 的 compare_version）。那样改完新词表，目录里那份旧包反被判成
+ * 「不比内置旧」而拒绝覆盖，旧译文继续逐条盖过内置词表——正是这套机制要避免的
+ * 「文案改了、重启后界面却没变」。
+ *
+ * 起始值取 2^32：旧方案的指纹段最大就是 2^32-1，用它保证换方案后的首次释放一定覆盖掉旧包。
  */
-function packFingerprint(entries: Record<string, string>): string {
-  let hash = 2166136261;
-  for (const [key, value] of Object.entries(entries)) {
-    for (const ch of `${key}\u0000${value}`) {
-      hash ^= ch.codePointAt(0) ?? 0;
-      hash = Math.imul(hash, 16777619);
-    }
-  }
-  return String(hash >>> 0);
-}
+const PACK_RELEASE = 4294967296;
 
 /** 自带语言包内嵌的释放版本：目录里的同包版本更低时会被覆盖更新 */
-const PACK_VERSION = `${__APP_VERSION__}.${packFingerprint(ZH)}`;
+const PACK_VERSION = `${__APP_VERSION__}.${PACK_RELEASE}`;
 
 /** themes/ 目录的说明文件 */
 const THEMES_README = `Sticho 主题包文件夹

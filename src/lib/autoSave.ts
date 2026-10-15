@@ -172,6 +172,10 @@ export async function runExternalChangeCheck(ctx: ExternalChangeContext): Promis
       ],
       ctx.labels.title,
     );
+    // 询问期间用户可能已经切走标签（切换只校验 busy，而这里不能让整个应用变 busy）。
+    // 此刻动作必须落到「当初报变更的那份文档」上：否则 reloadFromDisk 会按新标签的 docKind
+    // 去打开旧路径（例如用代码通路打开一个 .md），把当前标签的正文与路径一起换掉。
+    if (ctx.getCurrentPath() !== path) return;
     if (choice === "reload") await ctx.reloadFromDisk(path);
     else if (choice === "saveas") await ctx.saveFileAs();
     // "keep"：什么都不做。本次改动仍留在编辑器里，等用户自己决定何时保存
