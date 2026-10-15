@@ -1,9 +1,11 @@
 pub mod asset;
+pub mod bookmarks;
 pub mod config;
 pub mod diagnostics;
 pub mod file_assoc;
 pub mod file_io;
 pub mod history;
+pub mod packs;
 pub mod pandoc;
 pub mod pdf_export;
 pub mod recovery;

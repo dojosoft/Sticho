@@ -13,21 +13,35 @@
 
   interface Props {
     locale: Locale;
+    /** 语言包合并词表（内置 + locales/ 下的语言包）：由 App 注入，缺省时回落内置词表 */
+    i18nEntries?: Record<string, string>;
     appVersion: string;
     onClose: () => void;
   }
 
-  let { locale, appVersion, onClose }: Props = $props();
+  let { locale, i18nEntries, appVersion, onClose }: Props = $props();
 
-  const t = $derived(makeT(locale));
+  const t = $derived(makeT(locale, i18nEntries));
 
   /** 要点清单（纯展示数据，随组件自带）：短标题 + 说明各占一行 */
   const HIGHLIGHTS: { title: string; desc: string }[] = [
-    { title: "新建或打开文档", desc: "工具栏或「文件」菜单；也支持把文件直接拖进窗口。" },
-    { title: "快捷排版", desc: "Ctrl+B 加粗、Ctrl+I 斜体、Ctrl+K 链接、Ctrl+Shift+K 代码块、Ctrl+1~6 标题。" },
-    { title: "命令面板", desc: "按 Ctrl+P 搜索并执行菜单里的任意命令。" },
-    { title: "跨文件搜索", desc: "侧边栏「搜索」标签可在当前文件夹内全文查找。" },
-    { title: "导出与云同步", desc: "可导出 Word / PDF / HTML，也支持 WebDAV 云端多版本。" },
+    {
+      title: "Create or open a document",
+      desc: "Use the toolbar or the File menu; you can also drag a file into the window.",
+    },
+    {
+      title: "Quick formatting",
+      desc: "Ctrl+B bold, Ctrl+I italic, Ctrl+K link, Ctrl+Shift+K code block, Ctrl+1~6 headings.",
+    },
+    { title: "Command Palette", desc: "Press Ctrl+P to search for and run any command in the menus." },
+    {
+      title: "Search in Files",
+      desc: "The sidebar's “Search” tab looks through the full text of the current folder.",
+    },
+    {
+      title: "Export and cloud sync",
+      desc: "Export to Word / PDF / HTML, and sync documents to a WebDAV cloud folder.",
+    },
   ];
 </script>
 
@@ -39,14 +53,14 @@
     if (e.target === e.currentTarget) onClose();
   }}
 >
-  <div class="modal modal--welcome" role="dialog" aria-label={t("欢迎使用 Sticho")}>
+  <div class="modal modal--welcome" role="dialog" aria-label={t("Welcome to Sticho")}>
     <div class="modal-head">
-      <span>{t("欢迎使用 Sticho")}</span>
-      <button class="icon-btn" title={t("关闭（Esc）")} aria-label={t("关闭")} onclick={onClose}>✕</button>
+      <span>{t("Welcome to Sticho")}</span>
+      <button class="icon-btn" title={t("Close (Esc)")} aria-label={t("Close")} onclick={onClose}>✕</button>
     </div>
 
     <div class="modal-body">
-      <p class="welcome-intro">{t("轻量级 Markdown / HTML 文档编辑器，转换全部在本机完成。")}</p>
+      <p class="welcome-intro">{t("A lightweight Markdown / plain text / code / HTML document editor; all conversions happen on your machine.")}</p>
 
       <ul class="welcome-list">
         {#each HIGHLIGHTS as item (item.title)}
@@ -59,7 +73,7 @@
     </div>
 
     <div class="modal-foot welcome-foot">
-      <button class="welcome-primary" onclick={onClose}>{t("开始使用")}</button>
+      <button class="welcome-primary" onclick={onClose}>{t("Get Started")}</button>
       <div class="welcome-version">Sticho {appVersion}</div>
     </div>
   </div>
@@ -73,7 +87,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--overlay, rgba(0, 0, 0, 0.35));
     /* 欢迎页层级高于设置面板，保证首次启动时盖在最上层 */
     z-index: 640;
   }
@@ -192,7 +206,7 @@
     border: 1px solid var(--accent);
     border-radius: 6px;
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast, #fff);
     cursor: pointer;
     transition: opacity 0.15s ease;
   }
@@ -203,7 +217,7 @@
 
   .welcome-primary:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.35);
+    box-shadow: 0 0 0 2px var(--focus-ring, rgba(37, 99, 235, 0.35));
   }
 
   .welcome-version {

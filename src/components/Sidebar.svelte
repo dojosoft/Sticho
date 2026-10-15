@@ -2,14 +2,16 @@
   /**
    * 左侧侧边栏（任务书阶段 11）
    *
-   * 四个视图互相切换：文件目录树 / 文档大纲 / 文件属性 / 跨文件搜索。
+   * 多个视图互相切换：文件目录树 / 文档大纲 / 文件属性 / 跨文件搜索 / 文档内书签。
    * 目录树按需加载（展开时才读目录），大纲、文件属性与搜索结果的数据由 App 侧提供，
    * 本组件只负责渲染与交互，避免把文件状态逻辑散落到两个文件里。
    */
   import { untrack } from "svelte";
-  import { listDir, type DirEntry } from "../lib/tauri-api";
+  import { listDir, type DavConfig, type DirEntry } from "../lib/tauri-api";
   import type { OutlineItem, SidebarView } from "../lib/sidebar";
   import { highlightSegments, highlightRegexSegments, type SearchGroup, type SearchHit, type TextSegment } from "../lib/fileSearch";
+  import CloudTree from "./CloudTree.svelte";
+  import BookmarksPanel from "./BookmarksPanel.svelte";
 
   type Props = {
     view: SidebarView;
@@ -39,8 +41,18 @@
     onSearch?: (query: string, caseSensitive: boolean, regex: boolean) => void;
     /** 点击某条命中：打开对应文件并定位 */
     onOpenHit?: (hit: SearchHit) => void;
-    /** 界面翻译函数（以中文原文为键）；未传入时原样返回，便于单独渲染 / 测试 */
+    /** 界面翻译函数（以英文原文为键）；未传入时原样返回，便于单独渲染 / 测试 */
     t?: (key: string, vars?: Record<string, string | number>) => string;
+    /** 云端视图：WebDAV 连接参数（null = 尚未配置） */
+    dav?: DavConfig | null;
+    /** 文档内书签清单（label = 序号/行号，detail = 片段文本），点击跳转、可单条删除；由应用层持有 */
+    bookmarks?: { label: string; detail?: string; onClick: () => void; onRemove?: () => void }[];
+    /** 在光标处（无光标则本页最上方起始位置）添加一条书签 */
+    onAddBookmark?: () => void;
+    /** 当前文档是否支持书签（HTML / 大文档阅读通路为 false） */
+    bookmarksAllowed?: boolean;
+    /** 打开云端文件（远端路径 + 正文），由应用层落成标签页并绑定远端路径 */
+    onOpenCloud?: (remote: string, content: string) => void;
   };
 
   let {
@@ -64,6 +76,11 @@
     onSearch = () => {},
     onOpenHit = () => {},
     t = (s: string) => s,
+    dav = null,
+    bookmarks = [],
+    onAddBookmark,
+    bookmarksAllowed = false,
+    onOpenCloud = () => {},
   }: Props = $props();
 
   // ---- 跨文件搜索的本地输入状态（结果本身由应用层持有） ----
@@ -111,14 +128,20 @@
   let loading = $state<string[]>([]);
   let treeError = $state("");
 
+  // 根切换的世代号：根一变就自增，旧根在途的请求返回时据此作废，避免竞态写入新根缓存
+  let generation = 0;
+
   async function load(dir: string): Promise<void> {
     if (cache[dir] || loading.includes(dir)) return;
+    const myGen = generation;
     loading = [...loading, dir];
     try {
       const entries = await listDir(dir);
+      if (myGen !== generation) return; // 根已切换，本次结果作废
       cache = { ...cache, [dir]: entries };
       treeError = "";
     } catch (e) {
+      if (myGen !== generation) return;
       treeError = e instanceof Error ? e.message : String(e);
     } finally {
       loading = loading.filter((d) => d !== dir);
@@ -145,6 +168,7 @@
   $effect(() => {
     const current = root;
     untrack(() => {
+      generation += 1; // 旧根在途请求作废
       cache = {};
       expanded = [];
       treeError = "";
@@ -167,7 +191,7 @@
       class:current={entry.path === currentPath}
       class:dir={entry.isDir}
       style="padding-left: {0.5 + depth * 0.7}rem"
-      title={`${entry.path}\n${entry.isDir ? t("点击展开 / 收起") : t("点击在编辑器中打开")}`}
+      title={`${entry.path}\n${entry.isDir ? t("Click to expand / collapse") : t("Click to open in editor")}`}
       role="button"
       tabindex="0"
       onclick={() => activate(entry)}
@@ -185,7 +209,7 @@
       {#if cache[entry.path]}
         {@render nodes(cache[entry.path]!, depth + 1)}
       {:else}
-        <div class="hint" style="padding-left: {0.5 + (depth + 1) * 0.7}rem">{t("加载中…")}</div>
+        <div class="hint" style="padding-left: {0.5 + (depth + 1) * 0.7}rem">{t("Loading…")}</div>
       {/if}
     {/if}
   {/each}
@@ -195,26 +219,33 @@
   <div class="side-head">
     <div class="tabs">
       {#if panels.tree}
-        <button class:active={view === "tree"} onclick={() => onView("tree")} title={t("按文件夹浏览文件")}>{t("文件")}</button>
+        <button class:active={view === "tree"} onclick={() => onView("tree")} title={t("Browse files by folder")}>{t("File")}</button>
       {/if}
-      {#if panels.outline}
-        <button class:active={view === "outline"} onclick={() => onView("outline")} title={t("按标题层级跳转")}>{t("大纲")}</button>
+      <!-- 大纲：纯文本 / 代码文件没有标题大纲，与「视图 → 侧边栏」的置灰一致，此处不出现 -->
+      {#if panels.outline && !codeFile}
+        <button class:active={view === "outline"} onclick={() => onView("outline")} title={t("Jump by heading level")}>{t("Outline")}</button>
+      {/if}
+      {#if panels.bookmarks}
+        <button class:active={view === "bookmarks"} onclick={() => onView("bookmarks")} title={t("Jump to bookmarks in the current document")}>{t("Bookmarks")}</button>
       {/if}
       {#if panels.props}
-        <button class:active={view === "props"} onclick={() => onView("props")} title={t("当前文件属性")}>{t("属性")}</button>
+        <button class:active={view === "props"} onclick={() => onView("props")} title={t("Current file properties")}>{t("Properties")}</button>
       {/if}
       {#if panels.search}
-        <button class:active={view === "search"} onclick={() => onView("search")} title={t("在当前文件夹中全文搜索")}>{t("搜索")}</button>
+        <button class:active={view === "search"} onclick={() => onView("search")} title={t("Full-text search in the current folder")}>{t("Search")}</button>
+      {/if}
+      {#if panels.cloud}
+        <button class:active={view === "cloud"} onclick={() => onView("cloud")} title={t("Browse and edit cloud (WebDAV) files")}>{t("Cloud")}</button>
       {/if}
     </div>
-    <button class="close" onclick={onClose} title={t("关闭侧边栏（Ctrl+Shift+L）")}>✕</button>
+    <button class="close" onclick={onClose} title={t("Close sidebar (Ctrl+Shift+L)")}>✕</button>
   </div>
 
   <div class="side-body">
     {#if view === "tree" && panels.tree}
       <div class="tree-head">
-        <span class="tree-root" title={root ?? t("尚未选择文件夹")}>{root ? rootName() : t("未选择文件夹")}</span>
-        <button onclick={onPickRoot} title={t("选择文件夹")}>{t("选择…")}</button>
+        <span class="tree-root" title={root ?? t("No folder selected yet")}>{root ? rootName() : t("No folder selected")}</span>
+        <button onclick={onPickRoot} title={t("Choose Folder")}>{t("Choose…")}</button>
       </div>
 
       {#if treeError}
@@ -222,11 +253,11 @@
       {/if}
 
       {#if root === null}
-        <div class="hint">{t("未打开文档时，可点「选择…」指定一个文件夹作为目录树根。")}</div>
+        <div class="hint">{t("With no document open, click “Choose…” to pick a folder as the tree root.")}</div>
       {:else if !cache[root]}
-        <div class="hint">{t("加载中…")}</div>
+        <div class="hint">{t("Loading…")}</div>
       {:else if cache[root]!.length === 0}
-        <div class="hint">{t("该文件夹为空")}</div>
+        <div class="hint">{t("This folder is empty")}</div>
       {:else}
         {@render nodes(cache[root]!, 0)}
       {/if}
@@ -234,8 +265,8 @@
       {#if outline.length === 0}
         <div class="hint">
           {codeFile
-            ? t("代码文件没有标题大纲（正文高亮与折叠请直接用编辑区）")
-            : t("当前文档没有标题（用 # 或下划线式写法设置标题后会显示在这里）")}
+            ? t("Code files have no heading outline (use the editor for highlighting and folding)")
+            : t("This document has no headings (headings set with # or the underline style will appear here)")}
         </div>
       {:else}
         {#each outline as item, i (i)}
@@ -260,13 +291,13 @@
     {:else if view === "search" && panels.search}
       <!-- 跨文件搜索：输入 + 结果（按文件分组，点击命中打开并定位） -->
       {#if root === null}
-        <div class="hint">{t("未选择文件夹。请先切到「文件」标签，点「选择…」指定一个目录，再回到这里搜索。")}</div>
+        <div class="hint">{t("No folder selected. Switch to the “Files” tab, click “Choose…” to pick a folder, then come back here to search.")}</div>
       {:else}
         <div class="search-head">
           <input
             class="search-input"
             type="search"
-            placeholder={t("在当前文件夹中搜索…")}
+            placeholder={t("Search in the current folder…")}
             value={query}
             oninput={(e) => {
               query = e.currentTarget.value;
@@ -279,7 +310,7 @@
               }
             }}
           />
-          <label class="search-case" title={t("区分大小写")}>
+          <label class="search-case" title={t("Match Case")}>
             <input
               type="checkbox"
               checked={caseSensitive}
@@ -290,7 +321,7 @@
             />
             Aa
           </label>
-          <label class="search-case" title={t("正则表达式")}>
+          <label class="search-case" title={t("Regular Expression")}>
             <input
               type="checkbox"
               checked={regexMode}
@@ -306,14 +337,14 @@
         {#if searchError}
           <div class="hint error">{searchError}</div>
         {:else if searchBusy}
-          <div class="hint">{t("搜索中…")}</div>
+          <div class="hint">{t("Searching…")}</div>
         {:else if query.trim() === ""}
-          <div class="hint">{t("输入关键词开始搜索（可切换区分大小写 / 正则表达式）。")}</div>
+          <div class="hint">{t("Type a keyword to start searching (case sensitivity and regex can be toggled).")}</div>
         {:else if totalHits === 0}
-          <div class="hint">{t("没有找到匹配内容")}</div>
+          <div class="hint">{t("No matches found")}</div>
         {:else}
           <div class="hint">
-            {t("在 {files} 个文件中找到 {n} 处", { files: searchFiles, n: totalHits })}{#if searchTruncated}{t("（结果已截断，请缩小范围）")}{/if}
+            {t("Found {n} match(es) in {files} file(s)", { files: searchFiles, n: totalHits })}{#if searchTruncated}{t("(Results truncated — narrow the scope)")}{/if}
           </div>
           {#each searchGroups as group (group.path)}
             <div class="sgroup">
@@ -332,12 +363,16 @@
                 </button>
               {/each}
               {#if group.truncated}
-                <div class="hint">{t("（该文件命中过多，仅显示前若干条）")}</div>
+                <div class="hint">{t("(Too many matches in this file; only the first few are shown)")}</div>
               {/if}
             </div>
           {/each}
         {/if}
       {/if}
+    {:else if view === "cloud" && panels.cloud}
+      <CloudTree dav={dav} onOpen={onOpenCloud} {t} />
+    {:else if view === "bookmarks" && panels.bookmarks}
+      <BookmarksPanel items={bookmarks} onAdd={onAddBookmark} canAdd={bookmarksAllowed} {t} />
     {/if}
   </div>
 </aside>

@@ -60,19 +60,25 @@ pub fn run() {
             commands::file_io::list_dir,
             commands::file_io::search_files,
             commands::file_io::get_startup_file,
+            commands::file_io::reveal_in_explorer,
             commands::asset::save_image_asset,
+            commands::asset::allow_asset_dir,
             commands::config::get_settings_path,
             commands::config::get_data_location,
             commands::config::get_data_root,
+            commands::config::get_config_state,
+            commands::config::setup_config_location,
             commands::config::check_data_location,
             commands::config::set_data_location,
             commands::config::restart_app,
+            commands::config::clear_all_data,
             commands::file_assoc::get_file_association,
             commands::file_assoc::set_file_association,
             commands::file_assoc::file_assoc_info,
             commands::file_assoc::get_context_menu,
             commands::file_assoc::set_context_menu,
             commands::file_assoc::open_default_apps_settings,
+            commands::file_assoc::clear_system_integration,
             commands::pdf_export::export_pdf,
             commands::recovery::write_recovery,
             commands::recovery::list_recovery,
@@ -84,13 +90,16 @@ pub fn run() {
             commands::pandoc::export_pandoc,
             commands::theme::load_themes,
             commands::theme::open_theme_dir,
+            commands::packs::ensure_packs,
+            commands::packs::load_locales,
+            commands::packs::load_fonts,
+            commands::packs::open_pack_dir,
             commands::webdav::webdav_test,
             commands::webdav::webdav_upload,
+            commands::webdav::webdav_put,
             commands::webdav::webdav_list,
             commands::webdav::webdav_download,
-            commands::webdav::webdav_versions,
-            commands::webdav::webdav_fetch_version,
-            commands::webdav::webdav_delete_version,
+            commands::webdav::webdav_stat,
             commands::secrets::save_dav_password,
             commands::secrets::load_dav_password,
             commands::system::open_url,
@@ -101,12 +110,16 @@ pub fn run() {
             commands::history::restore_history,
             commands::history::list_all_history,
             commands::history::delete_history,
+            commands::history::prune_history,
+            commands::bookmarks::bookmarks_save,
+            commands::bookmarks::bookmarks_load,
+            commands::bookmarks::bookmarks_delete,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {
             setup::report_startup_failure(&format!(
-                "无法启动程序界面：\n{e}\n\n\
-                 若系统缺少 WebView2 运行时，请安装后重试：\n\
+                "Failed to start the app UI:\n{e}\n\n\
+                 If the WebView2 runtime is missing, install it and try again:\n\
                  https://developer.microsoft.com/microsoft-edge/webview2/"
             ));
             std::process::exit(1);
