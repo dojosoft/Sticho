@@ -30,13 +30,27 @@
 
   const t = $derived(makeT(locale, i18nEntries));
 
-  /** 远端根目录（去掉尾斜杠，供面包屑与返回上级计算） */
-  const rootPath = $derived(dav.root.trim().replace(/\/+$/, "") || "/Sticho");
+  /**
+   * 远端根目录（去掉尾斜杠，供面包屑与返回上级计算）。
+   *
+   * 只在「没填」时回落到默认目录；用户显式填 "/"（服务器根）必须原样保留——否则
+   * 「测试连接」通过、上传写到服务器根，而浏览界面却固定列 /Sticho，两边对不上。
+   */
+  const rootPath = $derived.by(() => {
+    const raw = dav.root.trim();
+    return raw === "" ? "/Sticho" : raw.replace(/\/+$/, "") || "/";
+  });
 
   let path = $state(""); // 当前目录（相对 base 的远端路径）
   let entries = $state<WebdavEntry[]>([]);
   let loading = $state(false);
   let error = $state("");
+
+  /**
+   * 请求代次：快速连续切目录时，先发出的响应可能后到。
+   * 没有这道保护，过期响应会同时改写 entries 与 path，把用户拽回上一个目录。
+   */
+  let loadSeq = 0;
 
   let busyPath = $state(""); // 正在下载的条目，用于禁用重复点击
 
@@ -55,18 +69,23 @@
   });
 
   async function load(target: string): Promise<void> {
+    const seq = ++loadSeq;
     loading = true;
     error = "";
+    // 首次加载失败时 path 还是空串：此时按 rootPath 回退，别去列 base 根目录
+    const next = target || rootPath;
     try {
-      const list = await webdavList(conn, target);
+      const list = await webdavList(conn, next);
+      if (seq !== loadSeq) return; // 已有更新的请求在途，丢弃这份过期响应
       // 以「.」开头的内部目录不在这里展示，避免用户误操作
       entries = list.filter((e) => !e.name.startsWith(".") && e.name !== "");
-      path = target;
+      path = next;
     } catch (e) {
+      if (seq !== loadSeq) return; // 过期请求的失败也不该改写界面状态
       entries = [];
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false; // 只有最新请求有权结束 loading
     }
   }
 
@@ -135,7 +154,7 @@
 
     <div class="cb-bar">
       <button disabled={loading || crumbs.length === 0} onclick={goUp}>{t("Up")}</button>
-      <button disabled={loading} onclick={() => void load(path)}>{t("Refresh")}</button>
+      <button disabled={loading} onclick={() => void load(path || rootPath)}>{t("Refresh")}</button>
       <nav class="cb-crumbs">
         <button class="cb-crumb" disabled={loading} onclick={() => goTo(-1)}>{rootPath || "/"}</button>
         {#each crumbs as c, i (c + i)}

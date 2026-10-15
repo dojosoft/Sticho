@@ -11,7 +11,7 @@
  * 3. `^` 续行不跟踪，跨行的字符串/参数修饰可能着色不完整。
  */
 
-import { StreamLanguage, type StreamParser } from "@codemirror/language";
+import { StreamLanguage, type StreamParser, type StringStream } from "@codemirror/language";
 
 /** cmd 内建命令与 if/for 保留字（大小写不敏感） */
 const KEYWORDS = new Set([
@@ -82,6 +82,17 @@ const KEYWORDS = new Set([
   "xcopy",
 ]);
 
+/**
+ * 是否处在「行首」。
+ *
+ * 不能用 `stream.sol()`：它只认 `pos === 0`，而 `eatSpace()` 一旦吃掉行首缩进，本行之后的
+ * token 里 sol() 就恒为假——缩进写法 `  rem …` / `  :: …` 会被当成普通文本着色。
+ * 这里直接看「当前位置之前是否只有空白」，语义等价且不受 eatSpace 影响。
+ */
+function atLineStart(stream: StringStream): boolean {
+  return /^\s*$/.test(stream.string.slice(0, stream.pos));
+}
+
 const parser: StreamParser<null> = {
   name: "batch",
   startState: () => null,
@@ -89,12 +100,12 @@ const parser: StreamParser<null> = {
     if (stream.eatSpace()) return null;
 
     // 行首的 :: 注释（块内会被真 cmd 当标签，见文件头偏差 1）
-    if (stream.sol() && stream.match("::")) {
+    if (atLineStart(stream) && stream.match("::")) {
       stream.skipToEnd();
       return "comment";
     }
     // rem 注释：整行都是注释
-    if (stream.sol() && stream.match(/^rem\b/i)) {
+    if (atLineStart(stream) && stream.match(/^rem\b/i)) {
       stream.skipToEnd();
       return "comment";
     }

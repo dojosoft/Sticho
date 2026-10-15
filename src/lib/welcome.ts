@@ -174,7 +174,9 @@ export async function loadWelcomeDocs(): Promise<void> {
   );
 }
 
-/** 取某界面语言的欢迎正文：中文用中文版，其余语言（含英文）一律用英文版；未读到返回 null（由调用方回落内置文案） */
+/** 取某界面语言的欢迎正文：中文（含 zh-TW 等变体）用中文版，其余语言一律用英文版；未读到返回 null（由调用方回落内置文案） */
 export function welcomeFor(locale: string): string | null {
-  return welcomeCache.get(locale === "zh-CN" ? "zh-CN" : "en-US") ?? null;
+  // 与 i18n / Vditor 的语言判定同一口径（按 zh 前缀），否则用户在 locales/ 里
+  // 自建 zh-TW 语言包时，界面是中文而欢迎页却回落成英文版
+  return welcomeCache.get(locale.toLowerCase().startsWith("zh") ? "zh-CN" : "en-US") ?? null;
 }
