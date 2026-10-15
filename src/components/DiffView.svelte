@@ -11,6 +11,8 @@
 
   interface Props {
     locale: Locale;
+    /** 语言包合并词表（内置 + locales/ 下的语言包）：由 App 注入，缺省时回落内置词表 */
+    i18nEntries?: Record<string, string>;
     title: string;
     /** 左侧（旧）标题，如「历史版本」 */
     leftLabel: string;
@@ -19,9 +21,9 @@
     lines: DiffLine[];
     onClose: () => void;
   }
-  let { locale, title, leftLabel, rightLabel, lines, onClose }: Props = $props();
+  let { locale, i18nEntries, title, leftLabel, rightLabel, lines, onClose }: Props = $props();
 
-  const t = $derived(makeT(locale));
+  const t = $derived(makeT(locale, i18nEntries));
 
   // 一次遍历求出增删统计，避免在模板里重复过滤整表
   const stats = $derived.by(() => {
@@ -47,7 +49,7 @@
   <div class="dv-modal" role="dialog" aria-label={title}>
     <div class="dv-head">
       <span>{title}</span>
-      <button class="dv-x" title={t("关闭（Esc）")} aria-label={t("关闭")} onclick={onClose}>✕</button>
+      <button class="dv-x" title={t("Close (Esc)")} aria-label={t("Close")} onclick={onClose}>✕</button>
     </div>
 
     <div class="dv-bar">
@@ -55,13 +57,13 @@
       <span class="dv-stats">
         <span class="dv-add">+{stats.added}</span>
         <span class="dv-del">−{stats.removed}</span>
-        <span class="dv-same">{t("未变 {n} 行", { n: stats.same })}</span>
+        <span class="dv-same">{t("{n} unchanged line(s)", { n: stats.same })}</span>
       </span>
     </div>
 
     <div class="dv-body">
       {#if stats.added === 0 && stats.removed === 0}
-        <p class="dv-empty">{t("两个版本内容完全相同")}</p>
+        <p class="dv-empty">{t("The two versions are identical")}</p>
       {:else}
         {#each lines as line, i (i)}
           <div class="dv-line dv-line--{line.type}">
@@ -83,7 +85,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--overlay, rgba(0, 0, 0, 0.35));
     z-index: 700;
   }
 
@@ -205,7 +207,7 @@
   }
 
   .dv-line--add {
-    background: rgba(37, 99, 235, 0.12);
+    background: var(--accent-soft, rgba(37, 99, 235, 0.12));
   }
 
   .dv-line--add .dv-sign {
@@ -213,7 +215,7 @@
   }
 
   .dv-line--del {
-    background: rgba(192, 57, 43, 0.12);
+    background: var(--danger-soft, rgba(192, 57, 43, 0.12));
   }
 
   .dv-line--del .dv-sign {

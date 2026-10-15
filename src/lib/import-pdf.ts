@@ -63,7 +63,8 @@ function joinParts(parts: TextPiece[]): string {
     text += p.str;
     prevEnd = p.x + p.width;
   }
-  return text.replace(/\s+/g, " ").trim();
+  // 只折叠行首尾空白，保留行内空白：代码块 / 缩进里的连续空格不能被压平
+  return text.trim();
 }
 
 /** 按 Y 坐标聚类成行（y 降序 = 页面自上而下），容差随字号缩放以容忍上下标抖动 */

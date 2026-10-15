@@ -20,15 +20,24 @@ pub struct ThemeFile {
 /// 主题目录（不存在时创建）。数据根目录由 `config::data_root` 决定。
 fn themes_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = super::config::data_root(app)?.join("themes");
-    fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败：{e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create themes directory: {e}"))?;
     Ok(dir)
 }
 
 /// 列出主题目录下的全部 .css（按文件名排序，含内容）
+///
+/// 主题目录可能有几十个文件、每个都要读盘，放后台线程避免阻塞主线程。
 #[tauri::command]
-pub fn load_themes(app: AppHandle) -> Result<Vec<ThemeFile>, String> {
-    let dir = themes_dir(&app)?;
-    let entries = fs::read_dir(&dir).map_err(|e| format!("读取主题目录失败：{e}"))?;
+pub async fn load_themes(app: AppHandle) -> Result<Vec<ThemeFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || load_themes_blocking(&app))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn load_themes_blocking(app: &AppHandle) -> Result<Vec<ThemeFile>, String> {
+    let dir = themes_dir(app)?;
+    let entries =
+        fs::read_dir(&dir).map_err(|e| format!("Failed to read themes directory: {e}"))?;
 
     let mut out = Vec::new();
     for entry in entries.flatten() {
@@ -52,12 +61,18 @@ pub fn load_themes(app: AppHandle) -> Result<Vec<ThemeFile>, String> {
         if size > 2 * 1024 * 1024 {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        let Some(name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         // 编码按 UTF-8 宽松解码：主题里偶有非 UTF-8 注释也不该整体失效
-        let css = String::from_utf8_lossy(&fs::read(&path).map_err(|e| format!("读取主题失败：{e}"))?)
-            .into_owned();
+        let css = String::from_utf8_lossy(
+            &fs::read(&path).map_err(|e| format!("Failed to read theme: {e}"))?,
+        )
+        .into_owned();
         out.push(ThemeFile { name, css });
     }
 
@@ -72,6 +87,6 @@ pub fn open_theme_dir(app: AppHandle) -> Result<String, String> {
     Command::new("explorer")
         .arg(&dir)
         .spawn()
-        .map_err(|e| format!("打开主题目录失败：{e}"))?;
+        .map_err(|e| format!("Failed to open themes directory: {e}"))?;
     Ok(dir.to_string_lossy().into_owned())
 }

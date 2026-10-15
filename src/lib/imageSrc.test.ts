@@ -19,6 +19,7 @@ describe("classifyImageSrc", () => {
     expect(classifyImageSrc("C:/docs/a.png")).toBe("absolute");
     expect(classifyImageSrc("\\\\srv\\share\\a.png")).toBe("absolute");
     expect(classifyImageSrc("file:///C:/docs/a.png")).toBe("absolute");
+    expect(classifyImageSrc("file://srv/share/a.png")).toBe("absolute");
   });
 
   it("其余非空值一律当作相对路径", () => {
@@ -51,6 +52,7 @@ describe("resolveLocalImagePath", () => {
   it("绝对路径原样归一化，不依赖文档目录", () => {
     expect(resolveLocalImagePath("C:/docs/a.png", null)).toBe("C:\\docs\\a.png");
     expect(resolveLocalImagePath("file:///C:/docs/a.png", null)).toBe("C:\\docs\\a.png");
+    expect(resolveLocalImagePath("file://srv/share/a.png", null)).toBe("\\\\srv\\share\\a.png");
     expect(resolveLocalImagePath("\\\\srv\\share\\a.png", null)).toBe("\\\\srv\\share\\a.png");
   });
 

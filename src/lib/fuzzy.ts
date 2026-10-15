@@ -63,7 +63,7 @@ export function fuzzyMatch(query: string, target: string): FuzzyMatch | null {
     cursor = found + 1;
   }
 
-  score -= Math.min(6, positions[0]! * 0.5); // 命中位置越靠后越差
+  score -= Math.min(6, (positions[0] ?? 0) * 0.5); // 命中位置越靠后越差；纯空格查询无命中位置，兜底为 0
   return { score, positions };
 }
 

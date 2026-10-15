@@ -33,8 +33,26 @@ const TAIL_BYTES: u64 = 64 * 1024;
 /// 日志文件绝对路径（顺带确保目录存在）。
 pub fn log_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = crate::commands::config::data_root(app)?.join(LOG_DIR);
-    fs::create_dir_all(&dir).map_err(|e| format!("无法创建日志目录：{e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create log directory: {e}"))?;
     Ok(dir.join(LOG_FILE))
+}
+
+/// 日志写入的进程内串行锁。
+///
+/// 轮转是「读大小 → 改名 → 再打开追加」三步，多线程（业务线程 + panic 钩子 + 诊断导出）
+/// 并发时会出现：A 判定需轮转、B 也判定需轮转，两者都去 rename / 打开同一个文件，
+/// 造成 `.1` 备份互相覆盖、或往已改名的句柄继续写。加锁把整段「轮转 + 追加」串起来。
+static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 把消息单行化：日志按「一行一条」组织，消息里的换行必须转义。
+///
+/// panic 钩子里的 `info.to_string()` 常是多行（含回溯位置），直接写入会让一条记录
+/// 裂成多行，导出诊断时行序与字段全部错位。这里把换行显式转义为 `\n` / `\r`。
+fn one_line(message: &str) -> String {
+    if !message.contains('\n') && !message.contains('\r') {
+        return message.to_string();
+    }
+    message.replace('\r', "\\r").replace('\n', "\\n")
 }
 
 /// 写一条日志。失败一律吞掉——日志系统自身不能拖垮应用。
@@ -72,6 +90,9 @@ pub fn compact_stamp(secs: u64) -> String {
 }
 
 /// 把一条记录追加到指定日志文件（供单测直接调用，隔离 AppHandle）。
+///
+/// 「轮转 + 追加」整体持 `LOG_LOCK`，避免并发下轮转互相踩踏；消息经 `one_line`
+/// 转义换行，保证一条记录始终占一行。
 fn append_to(
     path: &Path,
     level: &str,
@@ -79,9 +100,18 @@ fn append_to(
     secs: u64,
     max_bytes: u64,
 ) -> std::io::Result<()> {
+    let _guard = LOG_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     rotate_if_needed(path, max_bytes)?;
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(f, "[{}] [{}] {}", format_timestamp(secs), level, message)
+    writeln!(
+        f,
+        "[{}] [{}] {}",
+        format_timestamp(secs),
+        level,
+        one_line(message)
+    )
 }
 
 /// 超过上限时把当前日志改名为 `<name>.1`（覆盖旧的 `.1`），保证最多两份文件。
@@ -160,7 +190,7 @@ fn format_timestamp(secs: u64) -> String {
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as i64; // [0, 146096]
+    let doe = z - era * 146_097; // [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
@@ -187,6 +217,25 @@ mod tests {
         assert_eq!(format_timestamp(1_709_164_800), "2024-02-29 00:00:00Z");
         // 2024-03-01 00:00:00Z
         assert_eq!(format_timestamp(1_709_251_200), "2024-03-01 00:00:00Z");
+    }
+
+    #[test]
+    fn 多行消息写为单行() {
+        assert_eq!(one_line("a\nb"), "a\\nb");
+        assert_eq!(one_line("a\r\nb"), "a\\r\\nb");
+        assert_eq!(one_line("plain"), "plain");
+
+        let dir = std::env::temp_dir().join(format!("sticho-log-line-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sticho.log");
+
+        append_to(&path, "PANIC", "第一行\n第二行", 0, 1024).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 1, "一条记录只能占一行");
+        assert!(text.contains("第一行\\n第二行"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

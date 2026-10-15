@@ -25,7 +25,7 @@ const CONTENT_EXT: &str = "txt";
 /// 数据根目录由 `config::data_root` 决定（用户目录或程序目录）。
 fn recovery_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = super::config::data_root(app)?.join("recovery");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建草稿目录：{e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create drafts directory: {e}"))?;
     Ok(dir)
 }
 
@@ -34,13 +34,13 @@ fn recovery_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// id 会拼进文件名，不校验就等于把路径穿越的钥匙交给前端（`../../x`）。
 fn check_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > MAX_ID_LEN {
-        return Err(format!("非法草稿标识：{id}"));
+        return Err(format!("Invalid draft id: {id}"));
     }
     if !id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
-        return Err(format!("非法草稿标识：{id}"));
+        return Err(format!("Invalid draft id: {id}"));
     }
     Ok(())
 }
@@ -87,7 +87,7 @@ pub async fn write_recovery(
         write_recovery_blocking(&app, &id, path, title, kind, encoding, content)
     })
     .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
+    .map_err(|e| format!("Task spawn failed: {e}"))?
 }
 
 fn write_recovery_blocking(
@@ -122,7 +122,8 @@ fn write_recovery_blocking(
     let content_path = dir.join(format!("{id}.{CONTENT_EXT}"));
     atomic_write(&content_path.to_string_lossy(), content.as_bytes())?;
 
-    let json = serde_json::to_string(&meta).map_err(|e| format!("草稿序列化失败：{e}"))?;
+    let json =
+        serde_json::to_string(&meta).map_err(|e| format!("Failed to serialize draft: {e}"))?;
     let target = dir.join(format!("{id}.json"));
     atomic_write(&target.to_string_lossy(), json.as_bytes())
 }
@@ -131,10 +132,17 @@ fn write_recovery_blocking(
 ///
 /// 解析失败的文件直接跳过：一份坏草稿不应该让恢复提示整体消失。
 #[tauri::command]
-pub fn list_recovery(app: tauri::AppHandle) -> Result<Vec<RecoveryMeta>, String> {
-    let dir = recovery_dir(&app)?;
+pub async fn list_recovery(app: tauri::AppHandle) -> Result<Vec<RecoveryMeta>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_recovery_blocking(&app))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
 
-    let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取草稿目录失败：{e}"))?;
+fn list_recovery_blocking(app: &tauri::AppHandle) -> Result<Vec<RecoveryMeta>, String> {
+    let dir = recovery_dir(app)?;
+
+    let entries =
+        std::fs::read_dir(&dir).map_err(|e| format!("Failed to read drafts directory: {e}"))?;
 
     let mut list: Vec<RecoveryMeta> = Vec::new();
     for entry in entries.flatten() {
@@ -142,29 +150,39 @@ pub fn list_recovery(app: tauri::AppHandle) -> Result<Vec<RecoveryMeta>, String>
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         // 直接按元信息反序列化：新版元信息 JSON 本就只有这些字段；
         // 旧版草稿多出的 content 字段会被 serde 忽略，因此同样能读出。
-        let Ok(meta) = serde_json::from_str::<RecoveryMeta>(&text) else { continue };
+        let Ok(meta) = serde_json::from_str::<RecoveryMeta>(&text) else {
+            continue;
+        };
         list.push(meta);
     }
 
-    list.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+    list.sort_by_key(|a| std::cmp::Reverse(a.saved_at));
     Ok(list)
 }
 
 /// 读取一份草稿的正文；文件不存在返回 `Ok(None)`（不算错误）。
 #[tauri::command]
-pub fn read_recovery(app: tauri::AppHandle, id: String) -> Result<Option<String>, String> {
-    check_id(&id)?;
-    let dir = recovery_dir(&app)?;
+pub async fn read_recovery(app: tauri::AppHandle, id: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_recovery_blocking(&app, &id))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn read_recovery_blocking(app: &tauri::AppHandle, id: &str) -> Result<Option<String>, String> {
+    check_id(id)?;
+    let dir = recovery_dir(app)?;
 
     // 新版：正文单独存在 .txt 里
     let content_path = dir.join(format!("{id}.{CONTENT_EXT}"));
     match std::fs::read_to_string(&content_path) {
         Ok(t) => return Ok(Some(t)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("读取草稿失败：{e}")),
+        Err(e) => return Err(format!("Failed to read draft: {e}")),
     }
 
     // 兼容旧版：正文内嵌在 .json 里
@@ -172,18 +190,24 @@ pub fn read_recovery(app: tauri::AppHandle, id: String) -> Result<Option<String>
     let text = match std::fs::read_to_string(&legacy) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("读取草稿失败：{e}")),
+        Err(e) => return Err(format!("Failed to read draft: {e}")),
     };
     let file: LegacyRecoveryFile =
-        serde_json::from_str(&text).map_err(|e| format!("草稿内容已损坏：{e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("Draft content is corrupted: {e}"))?;
     Ok(Some(file.content))
 }
 
 /// 删除一份草稿（元信息 + 正文两个文件）。文件本就不存在时返回 `Ok(())`（幂等）。
 #[tauri::command]
-pub fn delete_recovery(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    check_id(&id)?;
-    let dir = recovery_dir(&app)?;
+pub async fn delete_recovery(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_recovery_blocking(&app, &id))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn delete_recovery_blocking(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    check_id(id)?;
+    let dir = recovery_dir(app)?;
 
     let mut first_err: Option<String> = None;
     for ext in ["json", CONTENT_EXT] {
@@ -192,7 +216,7 @@ pub fn delete_recovery(app: tauri::AppHandle, id: String) -> Result<(), String> 
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
                 if first_err.is_none() {
-                    first_err = Some(format!("删除草稿失败：{e}"));
+                    first_err = Some(format!("Failed to delete draft: {e}"));
                 }
             }
         };

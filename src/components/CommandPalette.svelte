@@ -24,12 +24,14 @@
 
   interface Props {
     locale: Locale;
+    /** 语言包合并词表（内置 + locales/ 下的语言包）：由 App 注入，缺省时回落内置词表 */
+    i18nEntries?: Record<string, string>;
     commands: PaletteCommand[];
     onClose: () => void;
   }
-  let { locale, commands, onClose }: Props = $props();
+  let { locale, i18nEntries, commands, onClose }: Props = $props();
 
-  const t = $derived(makeT(locale));
+  const t = $derived(makeT(locale, i18nEntries));
 
   /** 最多渲染条数：面板要轻量，超出部分不渲染 */
   const MAX_RESULTS = 50;
@@ -91,10 +93,10 @@
     if (e.target === e.currentTarget) onClose();
   }}
 >
-  <div class="modal modal--palette" role="dialog" aria-label={t("命令面板")}>
+  <div class="modal modal--palette" role="dialog" aria-label={t("Command Palette")}>
     <div class="modal-head">
-      <span>{t("命令面板")}</span>
-      <button class="icon-btn" title={t("关闭（Esc）")} aria-label={t("关闭")} onclick={onClose}>✕</button>
+      <span>{t("Command Palette")}</span>
+      <button class="icon-btn" title={t("Close (Esc)")} aria-label={t("Close")} onclick={onClose}>✕</button>
     </div>
 
     <div class="palette-search">
@@ -102,7 +104,7 @@
         bind:this={inputEl}
         class="palette-input"
         type="text"
-        placeholder={t("输入命令名称…")}
+        placeholder={t("Type a command name…")}
         bind:value={query}
         oninput={() => (activeIndex = 0)}
         onkeydown={onKeydown}
@@ -111,7 +113,7 @@
 
     <div class="modal-body palette-list">
       {#if visible.length === 0}
-        <p class="palette-empty">{t("没有匹配的命令")}</p>
+        <p class="palette-empty">{t("No matching commands")}</p>
       {:else}
         {#each visible as cmd, i (cmd.id)}
           <button
@@ -138,7 +140,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--overlay, rgba(0, 0, 0, 0.35));
     /* 高于设置面板（600），命令面板应压在其它对话框之上 */
     z-index: 650;
   }
@@ -217,7 +219,7 @@
 
   .palette-input:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+    box-shadow: 0 0 0 2px var(--focus-ring, rgba(37, 99, 235, 0.18));
   }
 
   /* 结果列表：占满剩余高度并可滚动（min-height 让 flex 子项正确收缩） */

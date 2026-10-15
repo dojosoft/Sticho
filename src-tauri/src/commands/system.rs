@@ -11,7 +11,7 @@
 pub fn open_url(url: String) -> Result<(), String> {
     let url = url.trim();
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("只允许打开 http / https 链接".to_string());
+        return Err("Only http / https links can be opened".to_string());
     }
     crate::setup::open_url(url);
     Ok(())

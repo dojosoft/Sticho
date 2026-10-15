@@ -10,26 +10,46 @@
    * 选择器不会落到本组件的元素上，因此这里把用到的通用控件样式（`.modal-*` /
    * `.set-*` / `.assoc-*`）连同 markup 一起搬来。颜色仍走全局 CSS 变量，主题自动跟随。
    */
-  import { makeT, LOCALES, type Locale } from "../lib/i18n";
+  import { makeT, type Locale } from "../lib/i18n";
   import type { AssocExt, DataLocationMode } from "../lib/tauri-api";
 
-  type SettingsTabId = "general" | "assoc" | "cloud" | "storage";
+  type SettingsTabId = "general" | "save" | "assoc" | "cloud";
   type AssocStat = { on: number; total: number; all: boolean; some: boolean };
 
   interface Props {
     locale: Locale;
+    /** 语言包合并词表（内置 + locales/ 下的语言包）：由 App 注入，缺省时回落内置词表 */
+    i18nEntries?: Record<string, string>;
     appVersion: string;
     settingsTab?: SettingsTabId;
     onClose: () => void;
 
     /* 通用 */
     selectLocale: (id: Locale) => void;
+    /** 可选语言清单（内置 + locales/ 下的语言包） */
+    localeOptions: { id: string; label: string }[];
+    /** 在资源管理器中打开语言包文件夹 */
+    onOpenLocalesDir: () => void;
     autoSaveEnabled: boolean;
     onToggleAutoSave: () => void;
+    /** 自动保存间隔（分钟）；0.5 表示 30 秒 */
+    autoSaveIntervalMin: number;
+    onSetAutoSaveInterval: (min: number) => void;
     defaultOpenMode: "read" | "edit";
     onSetDefaultOpenMode: (mode: "read" | "edit") => void;
+    /* 本地多版本控制：三类上限 */
     historyKeep: number;
     onSetHistoryKeep: (n: number) => void;
+    historyCountLimitOn: boolean;
+    onSetHistoryCountLimitOn: (on: boolean) => void;
+    historySizeLimitOn: boolean;
+    onSetHistorySizeLimitOn: (on: boolean) => void;
+    historyMaxSizeMb: number;
+    onSetHistoryMaxSizeMb: (n: number) => void;
+    historyAgeLimitOn: boolean;
+    onSetHistoryAgeLimitOn: (on: boolean) => void;
+    historyMaxAgeDays: number;
+    onSetHistoryMaxAgeDays: (n: number) => void;
     notepadAll: boolean;
     assocBusy: boolean;
     onToggleNotepad: () => void;
@@ -38,6 +58,10 @@
     onToggleContextMenu: () => void;
     recentFiles: string[];
     onClearRecentFiles: () => void;
+    /** 清理对系统的全部写入（文件关联 + 右键菜单），恢复便携状态 */
+    onClearSystemWrites: () => void;
+    /** 一键清理全部配置文件（两次确认后执行，完成后提示重启） */
+    onClearConfigFiles: () => void;
 
     /* 文件关联 */
     assoc: Record<string, boolean>;
@@ -48,11 +72,13 @@
     onSetAssocBatch: (exts: string[], value: boolean) => void;
     onToggleAssoc: (ext: string) => void;
 
-    /* WebDAV 同步 */
+    /* WebDAV */
     davUrl?: string;
     davUser?: string;
     davPass?: string;
     davRoot?: string;
+    /** 使用 HTTPS；关闭后允许明文 http 连接 */
+    davUseHttps?: boolean;
     onDavInput: () => void;
     onPersistDavConfig: () => void;
     davTesting: boolean;
@@ -63,10 +89,6 @@
     onTestDav: () => void;
     onToggleDavEnabled: () => void;
     onOpenCloud: () => void;
-    davVersioning: boolean;
-    onToggleDavVersioning: () => void;
-    davKeep: number;
-    onSetDavKeep: (n: number) => void;
     davConflictPolicy: "copy" | "overwrite";
     onSetDavConflictPolicy: (p: "copy" | "overwrite") => void;
 
@@ -74,25 +96,38 @@
     dataLocation: DataLocationMode;
     locationBusy: boolean;
     onChangeDataLocation: (mode: DataLocationMode) => void;
-    onPickCustomLocation: () => void;
     dataRootPath: string;
     locationTip: string;
     locationTipOk: boolean;
-    onRestart: () => void;
   }
 
   let {
     locale,
+    i18nEntries,
     appVersion,
     settingsTab = $bindable("general"),
     onClose,
     selectLocale,
+    localeOptions,
+    onOpenLocalesDir,
     autoSaveEnabled,
     onToggleAutoSave,
+    autoSaveIntervalMin,
+    onSetAutoSaveInterval,
     defaultOpenMode,
     onSetDefaultOpenMode,
     historyKeep,
     onSetHistoryKeep,
+    historyCountLimitOn,
+    onSetHistoryCountLimitOn,
+    historySizeLimitOn,
+    onSetHistorySizeLimitOn,
+    historyMaxSizeMb,
+    onSetHistoryMaxSizeMb,
+    historyAgeLimitOn,
+    onSetHistoryAgeLimitOn,
+    historyMaxAgeDays,
+    onSetHistoryMaxAgeDays,
     notepadAll,
     assocBusy,
     onToggleNotepad,
@@ -101,6 +136,8 @@
     onToggleContextMenu,
     recentFiles,
     onClearRecentFiles,
+    onClearSystemWrites,
+    onClearConfigFiles,
     assoc,
     assocExts,
     allAssoc,
@@ -112,6 +149,7 @@
     davUser = $bindable(""),
     davPass = $bindable(""),
     davRoot = $bindable(""),
+    davUseHttps = $bindable(true),
     onDavInput,
     onPersistDavConfig,
     davTesting,
@@ -122,40 +160,120 @@
     onTestDav,
     onToggleDavEnabled,
     onOpenCloud,
-    davVersioning,
-    onToggleDavVersioning,
-    davKeep,
-    onSetDavKeep,
     davConflictPolicy,
     onSetDavConflictPolicy,
     dataLocation,
     locationBusy,
     onChangeDataLocation,
-    onPickCustomLocation,
     dataRootPath,
     locationTip,
     locationTipOk,
-    onRestart,
   }: Props = $props();
 
-  const t = $derived(makeT(locale));
+  const t = $derived(makeT(locale, i18nEntries));
+
+  /** 服务器地址是否为明文 http：明文下 Basic Auth 的用户名/密码未加密，可能被网络截获 */
+  const davInsecure = $derived(davUrl.trim().toLowerCase().startsWith("http://"));
+
+  /**
+   * 常见 WebDAV 服务商的服务器地址预设（key 走 i18n，便于中英文切换）。
+   * host 非空者用于「按已填地址回显对应服务商」；含占位符的模板项留空 host，
+   * 一律按「自定义服务器」处理（用户改完地址后自行配置）。
+   */
+  const DAV_PROVIDERS: { id: string; key: string; url: string; host: string; tlsOnly: boolean }[] = [
+    { id: "custom", key: "Custom Server", url: "", host: "", tlsOnly: false },
+    { id: "jianguoyun", key: "Jianguoyun", url: "https://dav.jianguoyun.com/dav/", host: "dav.jianguoyun.com", tlsOnly: true },
+    { id: "infinicloud", key: "InfiniCLOUD", url: "https://your-id.teracloud.jp/dav/", host: "", tlsOnly: true },
+    { id: "nextcloud", key: "Nextcloud", url: "https://your-server/remote.php/dav/files/your-username/", host: "", tlsOnly: false },
+    { id: "owncloud", key: "ownCloud", url: "https://your-server/remote.php/dav/files/your-username/", host: "", tlsOnly: false },
+    { id: "synology", key: "Synology NAS", url: "https://your-nas:5006/", host: "", tlsOnly: false },
+    { id: "yandex", key: "Yandex Disk", url: "https://webdav.yandex.ru/", host: "webdav.yandex.ru", tlsOnly: true },
+    { id: "pcloud", key: "pCloud", url: "https://webdav.pcloud.com/", host: "webdav.pcloud.com", tlsOnly: true },
+    { id: "box", key: "Box", url: "https://dav.box.com/dav", host: "dav.box.com", tlsOnly: true },
+    { id: "koofr", key: "Koofr", url: "https://app.koofr.net/dav/Koofr/", host: "app.koofr.net", tlsOnly: true },
+  ];
+
+  /** 取地址的主机名（非法地址返回空串） */
+  function hostOf(url: string): string {
+    try {
+      return new URL(url.trim()).host;
+    } catch {
+      return "";
+    }
+  }
+
+  /** 当前地址对应的服务商（按主机名匹配；认不出则视为「自定义服务器」） */
+  const davProvider = $derived.by(() => {
+    const host = hostOf(davUrl);
+    if (host === "") return "custom";
+    return DAV_PROVIDERS.find((p) => p.host !== "" && p.host === host)?.id ?? "custom";
+  });
+
+  /** 按 HTTPS 开关改写地址的协议前缀（关 = 允许明文 http） */
+  function applyScheme(url: string): string {
+    return davUseHttps ? url.replace(/^http:\/\//i, "https://") : url.replace(/^https:\/\//i, "http://");
+  }
+
+  /**
+   * 选择服务商：预设项按其自带推荐协议填入地址。
+   * 仅支持 TLS 的服务商（如坚果云、Yandex 等公共网盘）恒用 https，不随 HTTPS 开关降级；
+   * 「自定义」保留当前地址交给用户自行编辑。
+   */
+  function chooseDavProvider(id: string): void {
+    const p = DAV_PROVIDERS.find((x) => x.id === id);
+    if (p && p.url !== "") davUrl = p.tlsOnly ? p.url : applyScheme(p.url);
+    onDavInput();
+    onPersistDavConfig();
+  }
+
+  /** 切换 HTTPS：同步改写当前地址的协议前缀并落盘；仅支持 TLS 的服务商不降级为明文 http */
+  function setDavHttps(on: boolean): void {
+    davUseHttps = on;
+    const u = davUrl.trim();
+    if (u !== "") {
+      const host = hostOf(u);
+      const tlsOnly = DAV_PROVIDERS.some((p) => p.tlsOnly && p.host !== "" && p.host === host);
+      if (on || !tlsOnly) davUrl = applyScheme(u);
+    }
+    onDavInput();
+    onPersistDavConfig();
+  }
+
+  /** 自动保存间隔档位（分钟）；0.5 表示 30 秒 */
+  const AUTO_SAVE_INTERVALS: number[] = [0.5, 1, 2, 5, 10, 15, 30];
+
+  /** 间隔档位的显示文案：半小时档显示为「30 秒」，1 分钟用单数，其余显示为「n 分钟」 */
+  function intervalLabel(min: number): string {
+    if (min === 0.5) return t("30 seconds");
+    return min === 1 ? t("1 minute") : t("{n} minutes", { n: min });
+  }
+
+  /**
+   * 数字输入的钳制：把值收进 [min, max] 的整数；空值或非法值回退 `fallback`。
+   * 输入框的 min/max 只是提示，用户仍可手输越界值或清空，必须在 change 时兜住。
+   */
+  function clampNumber(raw: string, min: number, max: number, fallback: number): number {
+    const n = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(n)));
+  }
 
   /** 设置面板的标签（顺序即左侧导航顺序） */
   const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
-    { id: "general", label: "通用" },
-    { id: "assoc", label: "文件关联" },
-    { id: "cloud", label: "WebDAV 同步" },
-    { id: "storage", label: "配置文件位置" },
+    { id: "general", label: "General" },
+    { id: "save", label: "Recovery Center" },
+    { id: "assoc", label: "File Associations" },
+    { id: "cloud", label: "WebDAV" },
   ];
 
   /** 文件关联的分块顺序与标题（纯展示数据，随组件自带） */
   const ASSOC_GROUPS: { id: string; label: string }[] = [
-    { id: "doc", label: "文档" },
-    { id: "web", label: "网页" },
-    { id: "text", label: "纯文本" },
-    { id: "config", label: "配置" },
-    { id: "code", label: "代码" },
-    { id: "script", label: "脚本" },
+    { id: "doc", label: "Documents" },
+    { id: "web", label: "Web" },
+    { id: "text", label: "Plain Text" },
+    { id: "config", label: "Config" },
+    { id: "code", label: "Code" },
+    { id: "script", label: "Script" },
   ];
 </script>
 
@@ -167,10 +285,10 @@
     if (e.target === e.currentTarget) onClose();
   }}
 >
-  <div class="modal modal--settings" role="dialog" aria-label={t("软件设置")}>
+  <div class="modal modal--settings" role="dialog" aria-label={t("Settings")}>
     <div class="modal-head">
-      <span>{t("软件设置")}</span>
-      <button class="icon-btn" title={t("关闭（Esc）")} aria-label={t("关闭")} onclick={onClose}>✕</button>
+      <span>{t("Settings")}</span>
+      <button class="icon-btn" title={t("Close (Esc)")} aria-label={t("Close")} onclick={onClose}>✕</button>
     </div>
 
     <div class="settings-shell">
@@ -185,59 +303,62 @@
       <div class="modal-body settings-panes">
         {#if settingsTab === "general"}
           <section class="set-group">
-            <h3>{t("语言")}</h3>
-            <div class="set-choices">
-              {#each LOCALES as item (item.id)}
-                <button class:active={locale === item.id} onclick={() => selectLocale(item.id)}>
-                  {item.label}
-                </button>
-              {/each}
+            <!-- 标题与「打开语言包文件夹」同排，按钮靠右对齐 -->
+            <div class="set-head">
+              <h3
+                data-tip={`${t("Language packs: put a .json file into the locales folder to select it here (keys are the original English text, values are the translation).")} ${t("Takes effect immediately, including the editor toolbar tooltips — no restart needed.")}`}
+              >{t("Language")}</h3>
+              <button class="set-action" onclick={onOpenLocalesDir}>{t("Open Locales Folder")}</button>
             </div>
-            <p class="set-tip">{t("切换后立即生效；编辑器工具栏的气泡提示需重启程序才会更新。")}</p>
-          </section>
-
-          <section class="set-group">
-            <h3>{t("打开")}</h3>
             <label class="set-row set-row--field">
-              <span class="set-label">{t("默认打开模式")}</span>
+              <span class="set-label">{t("Interface Language")}</span>
               <select
                 class="set-select"
-                value={defaultOpenMode}
-                onchange={(e) => onSetDefaultOpenMode(e.currentTarget.value as "read" | "edit")}
+                value={locale}
+                onchange={(e) => selectLocale(e.currentTarget.value)}
               >
-                <option value="read">{t("阅读模式")}</option>
-                <option value="edit">{t("编辑模式")}</option>
-              </select>
-            </label>
-            <p class="set-tip">{t("打开或新建文档后的初始模式，只影响之后打开的文档；大文档与超大代码文件始终以只读方式打开。")}</p>
-          </section>
-
-          <section class="set-group">
-            <h3>{t("保存")}</h3>
-            <label class="set-row">
-              <input type="checkbox" checked={autoSaveEnabled} onchange={onToggleAutoSave} />
-              <span>{t("自动保存恢复草稿（每 30 秒，异常退出后可在下次启动恢复）")}</span>
-            </label>
-            <label class="set-row set-row--field">
-              <span class="set-label">{t("本地版本历史保留份数")}</span>
-              <select class="set-select" value={String(historyKeep)} onchange={(e) => onSetHistoryKeep(Number(e.currentTarget.value))}>
-                {#each [5, 10, 20, 30, 50, 100] as n (n)}
-                  <option value={String(n)}>{n}</option>
+                {#each localeOptions as item (item.id)}
+                  <option value={item.id}>{item.label}</option>
                 {/each}
               </select>
             </label>
-            <p class="set-tip">{t("保存覆盖前自动留档，可在「文件 → 文件历史」回滚；份数越多占用磁盘越多。")}</p>
           </section>
 
           <section class="set-group">
-            <h3>{t("更新")}</h3>
-            <p class="set-tip">
-              {t("未配置更新源则不检查更新；如需升级，请到发布页下载新版安装包。")}
-            </p>
+            <h3 data-tip={t("The initial mode for documents you open or create; it only affects documents opened afterwards. Large documents and oversized code files always open in read-only mode.")}>{t("Open")}</h3>
+            <div class="set-row set-row--field">
+              <span class="set-label">{t("Default Open Mode")}</span>
+              <div class="set-radios" role="radiogroup" aria-label={t("Default Open Mode")}>
+                <label class="set-radio">
+                  <input
+                    type="radio"
+                    name="default-open-mode"
+                    value="read"
+                    checked={defaultOpenMode === "read"}
+                    onchange={() => onSetDefaultOpenMode("read")}
+                  />
+                  <span>{t("Reading Mode")}</span>
+                </label>
+                <label class="set-radio">
+                  <input
+                    type="radio"
+                    name="default-open-mode"
+                    value="edit"
+                    checked={defaultOpenMode === "edit"}
+                    onchange={() => onSetDefaultOpenMode("edit")}
+                  />
+                  <span>{t("Edit Mode")}</span>
+                </label>
+              </div>
+            </div>
           </section>
 
           <section class="set-group">
-            <h3>{t("系统集成")}</h3>
+            <!-- 标题与「打开系统默认应用」同排，按钮靠右对齐 -->
+            <div class="set-head">
+              <h3 data-tip={t("Enabling this associates Notepad's usual text formats with this app. If they still open in Notepad, change them in the system's Default Apps.")}>{t("System Integration")}</h3>
+              <button class="set-action" onclick={onOpenDefaultApps}>{t("Open system Default Apps")}</button>
+            </div>
             <label class="set-row">
               <input
                 type="checkbox"
@@ -245,17 +366,8 @@
                 disabled={assocBusy}
                 onchange={onToggleNotepad}
               />
-              <span>{t("替代系统记事本（txt / log / ini 等文本格式）")}</span>
+              <span>{t("Replace Notepad (text formats such as txt / log / ini)")}</span>
             </label>
-            <p class="set-tip">
-              {t("勾选即把记事本常见的文本格式关联到本软件。若双击后仍由记事本打开，请到系统「默认应用」里把对应格式改过来。")}
-            </p>
-            <div class="set-row">
-              <button class="set-action" onclick={onOpenDefaultApps}>
-                {t("打开系统「默认应用」设置")}
-              </button>
-            </div>
-
             <label class="set-row">
               <input
                 type="checkbox"
@@ -263,15 +375,155 @@
                 disabled={assocBusy}
                 onchange={onToggleContextMenu}
               />
-              <span>{t("在文件右键菜单中加入「用 Sticho 打开」（所有文件）")}</span>
+              <span>{t("Add “Open with Sticho” to the file context menu (all files)")}</span>
+            </label>
+          </section>
+
+          <!-- 配置文件位置：移到「其他」之上；位置切换本身会提示重启，故不再单列「立即重启」按钮 -->
+          <section class="set-group">
+            <h3>{t("Config File Location")}</h3>
+            <div
+              class="set-choices"
+              data-tip={`${t("The system folder is recommended; the program folder travels with the app (both must be readable and writable).")} ${t("The target folder is checked for read/write access first; if unavailable the current config is kept. Choosing migrate cleans up the old folder after a complete copy.")}`}
+            >
+              <button
+                class:active={dataLocation === "user"}
+                disabled={locationBusy}
+                onclick={() => onChangeDataLocation("user")}
+              >
+                {t("System folder")}
+              </button>
+              <button
+                class:active={dataLocation === "portable"}
+                data-tip={t("Portable use: copy the program together with the Sticho folder under “Program Folder” to a USB drive or another PC; it is detected automatically on launch and keeps the same config, with no re-setup needed.")}
+                disabled={locationBusy}
+                onclick={() => onChangeDataLocation("portable")}
+              >
+                {t("Program Folder")}
+              </button>
+            </div>
+            {#if dataRootPath}
+              <p class="set-path" title={dataRootPath}>{dataRootPath}</p>
+            {/if}
+            {#if locationTip}
+              <p class="set-tip" class:ok={locationTipOk}>{locationTip}</p>
+            {/if}
+          </section>
+
+          <section class="set-group">
+            <h3>{t("Other")}</h3>
+            <div class="set-actions">
+              <button class="set-action" disabled={recentFiles.length === 0} onclick={onClearRecentFiles}>
+                {t("Clear Recent Files")}
+              </button>
+              <button
+                class="set-action"
+                data-tip={t("Reverts all file associations and removes the “Open with Sticho” context-menu item, restoring Sticho to a portable state.")}
+                onclick={onClearSystemWrites}
+              >
+                {t("Clean Up System Writes")}
+              </button>
+              <button
+                class="set-action set-action--danger"
+                data-tip={t("Clears settings, custom themes and language packs, bookmarks, recovery drafts and version history.")}
+                onclick={onClearConfigFiles}
+              >
+                {t("Clear Configuration Files")}
+              </button>
+            </div>
+          </section>
+        {/if}
+
+        {#if settingsTab === "save"}
+          <section class="set-group">
+            <h3 data-tip={t("While a document has unsaved changes, a recovery draft is written at the chosen interval so your work survives a crash; the draft is cleared once you save.")}>{t("Auto-save")}</h3>
+            <label class="set-row">
+              <input
+                type="checkbox"
+                checked={autoSaveEnabled}
+                onchange={onToggleAutoSave}
+              />
+              <span>{t("Auto-save recovery drafts")}</span>
+            </label>
+            <label class="set-row set-row--field">
+              <span class="set-label">{t("Interval")}</span>
+              <select
+                class="set-select"
+                value={String(autoSaveIntervalMin)}
+                disabled={!autoSaveEnabled}
+                onchange={(e) => onSetAutoSaveInterval(Number(e.currentTarget.value))}
+              >
+                {#each AUTO_SAVE_INTERVALS as min (min)}
+                  <option value={String(min)}>{intervalLabel(min)}</option>
+                {/each}
+              </select>
             </label>
           </section>
 
           <section class="set-group">
-            <h3>{t("其他")}</h3>
-            <button class="set-action" disabled={recentFiles.length === 0} onclick={onClearRecentFiles}>
-              {t("清除最近文件列表")}
-            </button>
+            <h3 data-tip={t("Each time you save a document, its previous content is archived locally so you can roll back later. Auto-saved drafts do not count toward these versions.")}>{t("Multi-version Control")}</h3>
+            <label class="set-row">
+              <input
+                type="checkbox"
+                checked={historyCountLimitOn}
+                onchange={(e) => onSetHistoryCountLimitOn(e.currentTarget.checked)}
+              />
+              <span>{t("Limit the number of versions")}</span>
+            </label>
+            <label class="set-row set-row--field">
+              <span class="set-label">{t("Versions kept per file")}</span>
+              <select
+                class="set-select"
+                value={String(historyKeep)}
+                disabled={!historyCountLimitOn}
+                onchange={(e) => onSetHistoryKeep(Number(e.currentTarget.value))}
+              >
+                {#each [5, 10, 20, 30, 50, 100, 200] as n (n)}
+                  <option value={String(n)}>{n}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="set-row">
+              <input
+                type="checkbox"
+                checked={historySizeLimitOn}
+                onchange={(e) => onSetHistorySizeLimitOn(e.currentTarget.checked)}
+              />
+              <span>{t("Limit total size of versions")}</span>
+            </label>
+            <label class="set-row set-row--field">
+              <span class="set-label">{t("Size limit (MB per file)")}</span>
+              <input
+                class="set-input"
+                type="number"
+                min="1"
+                max="10240"
+                value={historyMaxSizeMb}
+                disabled={!historySizeLimitOn}
+                onchange={(e) => onSetHistoryMaxSizeMb(clampNumber(e.currentTarget.value, 1, 10240, 100))}
+              />
+            </label>
+            <label class="set-row">
+              <input
+                type="checkbox"
+                checked={historyAgeLimitOn}
+                onchange={(e) => onSetHistoryAgeLimitOn(e.currentTarget.checked)}
+              />
+              <span>{t("Limit retention time of versions")}</span>
+            </label>
+            <label class="set-row set-row--field">
+              <span class="set-label">{t("Retention Days")}</span>
+              <input
+                class="set-input"
+                type="number"
+                min="1"
+                max="3650"
+                value={historyMaxAgeDays}
+                disabled={!historyAgeLimitOn}
+                onchange={(e) => onSetHistoryMaxAgeDays(clampNumber(e.currentTarget.value, 1, 3650, 30))}
+              />
+            </label>
+            <p class="set-tip">{t("When a limit is exceeded, the oldest versions are deleted first to free up space.")}</p>
           </section>
         {/if}
 
@@ -286,7 +538,7 @@
                   disabled={assocBusy}
                   onchange={() => onSetAssocBatch(assocExts.map((e) => e.ext), !allAssoc.all)}
                 />
-                <span>{t("全选所有")}</span>
+                <span data-tip={t("Associations apply to the current user only; no admin rights needed.")}>{t("Select All")}</span>
               </label>
               <span class="assoc-count">{allAssoc.on} / {allAssoc.total}</span>
             </div>
@@ -322,15 +574,25 @@
                 </div>
               {/if}
             {/each}
-
-            <p class="set-tip">{t("关联仅对当前用户生效，无需管理员权限。")}</p>
           </section>
         {/if}
 
         {#if settingsTab === "cloud"}
           <section class="set-group">
             <label class="set-row set-row--field">
-              <span class="set-label">{t("服务器地址")}</span>
+              <span class="set-label" data-tip={t("Pick a common WebDAV provider to fill in its server address, or choose “Custom Server” and edit the address yourself.")}>{t("Service Provider")}</span>
+              <select
+                class="set-select"
+                value={davProvider}
+                onchange={(e) => chooseDavProvider(e.currentTarget.value)}
+              >
+                {#each DAV_PROVIDERS as p (p.id)}
+                  <option value={p.id}>{t(p.key)}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="set-row set-row--field">
+              <span class="set-label" data-tip={t("HTTPS servers with self-signed certificates are not supported; use a public CA or a plain http intranet address")}>{t("Server URL")}</span>
               <input
                 class="set-input"
                 type="text"
@@ -343,8 +605,21 @@
                 onchange={onPersistDavConfig}
               />
             </label>
+            <label class="set-row">
+              <input
+                type="checkbox"
+                checked={davUseHttps}
+                onchange={(e) => setDavHttps(e.currentTarget.checked)}
+              />
+              <span data-tip={t("Turn this off to allow a plain http connection (unencrypted). Keep it on to require https.")}>{t("Use HTTPS")}</span>
+            </label>
+            {#if davInsecure}
+              <p class="set-tip warn">
+                {t("The server address uses plain http — your username and password are sent unencrypted and may be intercepted. Use https when possible.")}
+              </p>
+            {/if}
             <label class="set-row set-row--field">
-              <span class="set-label">{t("用户名")}</span>
+              <span class="set-label">{t("Username")}</span>
               <input
                 class="set-input"
                 type="text"
@@ -357,7 +632,7 @@
               />
             </label>
             <label class="set-row set-row--field">
-              <span class="set-label">{t("密码")}</span>
+              <span class="set-label" data-tip={t("The password is encrypted with Windows DPAPI and stored locally, bound to the current Windows user (another user or machine cannot decrypt it)")}>{t("Password")}</span>
               <input
                 class="set-input"
                 type="password"
@@ -370,7 +645,7 @@
               />
             </label>
             <label class="set-row set-row--field">
-              <span class="set-label">{t("远端根目录")}</span>
+              <span class="set-label">{t("Remote Root")}</span>
               <input
                 class="set-input"
                 type="text"
@@ -385,7 +660,7 @@
             </label>
             <div class="set-row">
               <button class="set-action" disabled={davTesting} onclick={onTestDav}>
-                {davTesting ? t("测试中…") : t("测试连接")}
+                {davTesting ? t("Testing…") : t("Test Connection")}
               </button>
               {#if davTip}<span class="set-tip-inline" class:ok={davVerified}>{davTip}</span>{/if}
             </div>
@@ -397,96 +672,29 @@
                 disabled={!davReady}
                 onchange={onToggleDavEnabled}
               />
-              <span>{t("启用云同步")}</span>
+              <span data-tip={t("A sync failure does not affect local saving")}>{t("Enable Cloud Sync")}</span>
             </label>
             {#if !davReady}
-              <p class="set-tip">{t("请先测试连接")}</p>
+              <p class="set-tip">{t("Test the connection first")}</p>
             {/if}
 
             <div class="set-row">
               <button class="set-action" disabled={!davReady} onclick={onOpenCloud}>
-                {t("浏览云端文件")}
+                {t("Browse Cloud Files")}
               </button>
             </div>
 
-            <label class="set-row">
-              <input
-                type="checkbox"
-                checked={davVersioning}
-                onchange={onToggleDavVersioning}
-              />
-              <span>{t("多版本控制")}</span>
-            </label>
-            {#if davVersioning}
-              <label class="set-row set-row--field">
-                <span class="set-label">{t("最多保留版本数")}</span>
-                <select class="set-select" value={String(davKeep)} onchange={(e) => onSetDavKeep(Number(e.currentTarget.value))}>
-                  {#each [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as n (n)}
-                    <option value={String(n)}>{n}</option>
-                  {/each}
-                </select>
-              </label>
-            {/if}
-
             <label class="set-row set-row--field">
-              <span class="set-label">{t("冲突处理方式")}</span>
+              <span class="set-label" data-tip={t("When a cloud file has been changed by another device: “Keep a Conflict Copy” saves a separate copy in the same folder and never overwrites the other side; “Overwrite” makes this copy authoritative.")}>{t("Conflict Handling")}</span>
               <select
                 class="set-select"
                 value={davConflictPolicy}
                 onchange={(e) => onSetDavConflictPolicy(e.currentTarget.value as "copy" | "overwrite")}
               >
-                <option value="copy">{t("保留冲突副本（推荐）")}</option>
-                <option value="overwrite">{t("直接覆盖云端")}</option>
+                <option value="copy">{t("Keep a Conflict Copy")}</option>
+                <option value="overwrite">{t("Overwrite the Cloud Copy")}</option>
               </select>
             </label>
-            <p class="set-tip">
-              {t("云端文件被其他设备改过时：保留副本会在同目录另存一份，绝不覆盖对方内容；直接覆盖则以其为准。")}
-            </p>
-
-            <p class="set-tip">{t("凭据以明文保存在本机设置文件中")}</p>
-            <p class="set-tip">{t("自签名证书的 HTTPS 服务器暂不支持，请使用公网证书或 http 内网地址")}</p>
-            <p class="set-tip">{t("同步失败不影响本地保存")}</p>
-          </section>
-        {/if}
-
-        {#if settingsTab === "storage"}
-          <section class="set-group">
-            <div class="set-choices">
-              <button
-                class:active={dataLocation === "user"}
-                disabled={locationBusy}
-                onclick={() => onChangeDataLocation("user")}
-              >
-                {t("系统目录")}
-              </button>
-              <button
-                class:active={dataLocation === "custom"}
-                disabled={locationBusy}
-                onclick={onPickCustomLocation}
-              >
-                {t("指定目录")}
-              </button>
-              <button
-                class:active={dataLocation === "portable"}
-                disabled={locationBusy}
-                onclick={() => onChangeDataLocation("portable")}
-              >
-                {t("当前程序目录")}
-              </button>
-            </div>
-            {#if dataRootPath}
-              <p class="set-path" title={dataRootPath}>{dataRootPath}</p>
-            {/if}
-            {#if locationTip}
-              <p class="set-tip" class:ok={locationTipOk}>{locationTip}</p>
-            {/if}
-            <div class="set-row">
-              <button class="set-action" disabled={locationBusy} onclick={onRestart}>
-                {t("立即重启")}
-              </button>
-            </div>
-            <p class="set-tip">{t("系统目录为推荐做法；当前程序目录便于随程序一起搬移；指定目录可放到任意位置（均需目录可读写）")}</p>
-            <p class="set-tip">{t("切换前会检测目标目录可读写，不可用则保持原配置；选择迁移会在完整复制后清理旧目录")}</p>
           </section>
         {/if}
       </div>
@@ -598,6 +806,7 @@
     border: none;
     border-radius: 6px;
     cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
   }
 
   .settings-nav button:hover {
@@ -655,8 +864,11 @@
     color: var(--accent);
   }
 
-  .set-group > .set-action {
-    margin-top: 0.5rem;
+  /* 操作按钮组：横向排列，面板变窄时自动换行 */
+  .set-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
 
   .set-row {
@@ -684,6 +896,26 @@
 
   .set-row--field .set-label {
     width: auto;
+  }
+
+  /* 「默认打开方式」改用单选按钮组：两个互斥选项一目了然，不必展开下拉 */
+  .set-radios {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.9rem;
+  }
+
+  .set-radio {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .set-radio input[type="radio"] {
+    margin: 0;
+    accent-color: var(--accent, #2563eb);
   }
 
   .set-input {
@@ -735,6 +967,12 @@
     opacity: 0.95;
   }
 
+  /* 明文 http 警示：用警告色，与成功提示区分 */
+  .modal-body .set-tip.warn {
+    color: var(--warning, #b7791f);
+    opacity: 0.95;
+  }
+
   /* 当前数据根目录（只读展示）：等宽字体 + 可换行，过长时省略 */
   .set-path {
     margin-top: 0.4rem;
@@ -769,13 +1007,26 @@
     cursor: default;
   }
 
+  /* 危险动作（清理配置文件）：用危险色描边与文字，与普通操作区分开 */
+  .set-action--danger {
+    border-color: var(--danger, #c0392b);
+    color: var(--danger, #c0392b);
+  }
+
+  .set-action--danger:hover:not(:disabled) {
+    background: var(--danger-soft, rgba(192, 57, 43, 0.12));
+  }
+
   /* ---- 文件关联：分组标题 + 扩展名勾选网格 ---- */
+  /* 每个子分类标题下方加一条细分割线，并加大分类之间的上间距，便于辨认分组 */
   .assoc-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    margin: 0.7rem 0 0.3rem;
+    margin: 1.1rem 0 0.45rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--border, #ddd);
   }
 
   .assoc-head--all {
@@ -842,6 +1093,31 @@
     padding-bottom: 0.4rem;
     border-bottom: 1px solid var(--border, #ddd);
     opacity: 1;
+  }
+
+  /* 标题与右侧动作按钮同排（如「语言 + 打开语言包文件夹」「系统集成 + 打开系统默认应用」）：
+     下划线改由整行承担，按钮靠右对齐 */
+  .modal-body .set-group .set-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border, #ddd);
+  }
+
+  /* 标题自身的下划线/间距交给 .set-head，避免出现两条线 */
+  .modal-body .set-group .set-head h3 {
+    margin: 0;
+    padding: 0;
+    border-bottom: none;
+  }
+
+  /* 同排按钮不再需要与分组正文的上间距 */
+  .modal-body .set-group .set-head .set-action {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 
   /* 设置面板里的勾选框：统一尺寸与强调色，深浅色下都清晰 */

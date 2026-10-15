@@ -55,6 +55,25 @@ extern "system" {
     fn LocalFree(h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
 }
 
+/// 从 DPAPI 输出的 blob 取出字节并释放系统内存。
+///
+/// `cb_data == 0` 时 `pb_data` 可能为空指针，而 `slice::from_raw_parts(null, 0)` 是
+/// **未定义行为**（即使长度为 0，指针也必须非空且对齐）。故空 blob 直接返回空 `Vec`，
+/// 只在确有数据时才切片拷贝。释放时同样判空，避免对空指针调用 `LocalFree`。
+fn take_blob(out: DataBlob) -> Vec<u8> {
+    let bytes = if out.cb_data == 0 || out.pb_data.is_null() {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(out.pb_data, out.cb_data as usize).to_vec() }
+    };
+    if !out.pb_data.is_null() {
+        unsafe {
+            LocalFree(out.pb_data as *mut core::ffi::c_void);
+        }
+    }
+    bytes
+}
+
 /// DPAPI 加密；失败返回中文原因。
 fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
     unsafe {
@@ -76,11 +95,9 @@ fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
             &mut out,
         );
         if ok == 0 {
-            return Err("加密失败（DPAPI 调用失败）".to_string());
+            return Err("Encryption failed (DPAPI call failed)".to_string());
         }
-        let bytes = std::slice::from_raw_parts(out.pb_data, out.cb_data as usize).to_vec();
-        LocalFree(out.pb_data as *mut core::ffi::c_void);
-        Ok(bytes)
+        Ok(take_blob(out))
     }
 }
 
@@ -105,11 +122,9 @@ fn unprotect(cipher: &[u8]) -> Result<Vec<u8>, String> {
             &mut out,
         );
         if ok == 0 {
-            return Err("解密失败".to_string());
+            return Err("Decryption failed".to_string());
         }
-        let bytes = std::slice::from_raw_parts(out.pb_data, out.cb_data as usize).to_vec();
-        LocalFree(out.pb_data as *mut core::ffi::c_void);
-        Ok(bytes)
+        Ok(take_blob(out))
     }
 }
 
@@ -137,29 +152,40 @@ fn read_secrets(app: &tauri::AppHandle) -> Secrets {
 
 fn write_secrets(app: &tauri::AppHandle, s: &Secrets) -> Result<(), String> {
     let path = secrets_path(app)?;
-    let json = serde_json::to_string(s).map_err(|e| format!("序列化失败：{e}"))?;
+    let json = serde_json::to_string(s).map_err(|e| format!("Serialization failed: {e}"))?;
     super::file_io::atomic_write(&path.to_string_lossy(), json.as_bytes())
 }
 
 /// 保存 WebDAV 密码（加密后落盘）。传空串表示清除已保存的密码。
 #[tauri::command]
-pub fn save_dav_password(app: tauri::AppHandle, password: String) -> Result<(), String> {
-    let mut s = read_secrets(&app);
-    if password.is_empty() {
-        s.dav_password = None;
-    } else {
-        let cipher = protect(password.as_bytes())?;
-        s.dav_password = Some(base64::engine::general_purpose::STANDARD.encode(cipher));
-    }
-    write_secrets(&app, &s)
+pub async fn save_dav_password(app: tauri::AppHandle, password: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = read_secrets(&app);
+        if password.is_empty() {
+            s.dav_password = None;
+        } else {
+            let cipher = protect(password.as_bytes())?;
+            s.dav_password = Some(base64::engine::general_purpose::STANDARD.encode(cipher));
+        }
+        write_secrets(&app, &s)
+    })
+    .await
+    .map_err(|e| format!("Task spawn failed: {e}"))?
 }
 
 /// 读取 WebDAV 密码明文；未配置或解密失败返回 None（前端据此提示用户重新填写）。
 #[tauri::command]
-pub fn load_dav_password(app: tauri::AppHandle) -> Option<String> {
-    let s = read_secrets(&app);
-    let enc = s.dav_password?;
-    let cipher = base64::engine::general_purpose::STANDARD.decode(enc.as_bytes()).ok()?;
-    let bytes = unprotect(&cipher).ok()?;
-    String::from_utf8(bytes).ok()
+pub async fn load_dav_password(app: tauri::AppHandle) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = read_secrets(&app);
+        let enc = s.dav_password?;
+        let cipher = base64::engine::general_purpose::STANDARD
+            .decode(enc.as_bytes())
+            .ok()?;
+        let bytes = unprotect(&cipher).ok()?;
+        String::from_utf8(bytes).ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }

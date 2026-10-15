@@ -39,6 +39,12 @@ describe("fuzzyMatch", () => {
     expect(fuzzyMatch("导出 word", "导出 Word")?.positions).toEqual([0, 1, 3, 4, 5, 6]);
   });
 
+  it("纯空格查询不产生 NaN（无命中位置兜底为 0）", () => {
+    const m = fuzzyMatch("   ", "导出 Word");
+    expect(m).toEqual({ score: 0, positions: [] });
+    expect(Number.isNaN(m!.score)).toBe(false);
+  });
+
   it("中文按字符子序列匹配", () => {
     expect(fuzzyMatch("导出", "导出 Word")?.positions).toEqual([0, 1]);
     expect(fuzzyMatch("出w", "导出 Word")).not.toBeNull();
