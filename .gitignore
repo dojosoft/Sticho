@@ -1,6 +1,8 @@
 # Node
 node_modules/
-dist/
+# vite 的构建产物：只忽略仓库根这一份，必须带前导斜杠——
+# 写成 `dist/` 会连带忽略 public/vditor/dist 这类嵌套目录（曾经因此漏掉 12MB 运行资源）
+/dist/
 *.local
 
 # Rust / Tauri
@@ -42,3 +44,7 @@ Thumbs.db
 .trae/
 demo.docx
 demo.pdf
+
+# Vditor 运行时资源（公式 / 图表 / 代码高亮配色 / 表情图片等，约 12MB）：
+# 由 scripts/sync-vditor-assets.mjs 在 predev / prebuild 时从 node_modules/vditor 同步，不入库
+/public/vditor/
