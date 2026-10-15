@@ -191,6 +191,10 @@ pub struct TextFile {
 ///
 /// `encoding` 为 None 时自动检测；给定时按用户指定的编码解码（「编码」菜单的手动切换）。
 /// 错误全部转为用户可读的中文消息返回给前端，避免裸 panic。
+///
+/// 信任边界：path 直接采用调用方给的值，不做「只允许已打开目录」之类的白名单——
+/// 本程序是文件编辑器，正文的读取路径来自系统文件对话框与已打开文档，均在前端可信区；
+/// 因此这里只做「非空 / 不是目录」这类 sanity 检查，防止把明显用错的输入变成费解的底层报错。
 #[tauri::command]
 pub async fn read_text_file(path: String, encoding: Option<String>) -> Result<TextFile, String> {
     // 最大 10MB 的读取 + 编码嗅探有明显耗时，放后台线程执行，避免阻塞主线程
@@ -202,6 +206,9 @@ pub async fn read_text_file(path: String, encoding: Option<String>) -> Result<Te
 }
 
 fn read_text_file_blocking(path: &str, encoding: Option<&str>) -> Result<TextFile, String> {
+    if path.trim().is_empty() {
+        return Err("File path is empty".to_string());
+    }
     let p = Path::new(path);
 
     let meta = match fs::metadata(p) {
@@ -211,6 +218,10 @@ fn read_text_file_blocking(path: &str, encoding: Option<&str>) -> Result<TextFil
         }
         Err(e) => return Err(format!("Cannot access file: {e}")),
     };
+
+    if meta.is_dir() {
+        return Err(format!("This path is a directory, not a file: {path}"));
+    }
 
     if meta.len() > MAX_FILE_SIZE {
         return Err(format!(
@@ -267,6 +278,8 @@ pub(crate) fn atomic_write(path: &str, bytes: &[u8]) -> Result<(), String> {
 ///
 /// 覆盖写之前会先把**磁盘上的旧内容**留一份到本地版本历史（内容没变则跳过），
 /// 这样误保存 / 误改都能从「文件历史」找回。
+///
+/// 信任边界与 `read_text_file` 一致：path 来自前端可信区，只做 sanity 检查。
 #[tauri::command]
 pub async fn write_text_file(
     app: tauri::AppHandle,
@@ -287,6 +300,13 @@ fn write_text_file_blocking(
     content: &str,
     encoding: &str,
 ) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("File path is empty".to_string());
+    }
+    // 目标是目录时提前给出明确原因：否则会落到 rename 失败，报出一句与真实原因无关的提示
+    if fs::metadata(path).is_ok_and(|m| m.is_dir()) {
+        return Err(format!("The target is a directory, not a file: {path}"));
+    }
     let enc =
         encoding_from_id(encoding).ok_or_else(|| format!("Unsupported encoding: {encoding}"))?;
 

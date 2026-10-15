@@ -58,7 +58,8 @@ export type DocTab = {
   htmlView: HtmlView;
   /** HTML 文档：预览 DOM 是否已被改动（尚未落回 content） */
   previewMutated: boolean;
-  /** 上次落草稿时的内容指纹（长度 + 前 64 字符）：内容没变就不重复写盘 */
+  /** 上次落草稿时的内容指纹（全量 FNV-1a 32 位 + 长度，见 autoSave.ts 的 recoveryFingerprint）：
+   *  内容没变就不重复写盘 */
   draftHash: string;
   /** 本标签的书签快照（不写入文档、不持久化到会话）：代码/纯文本按行首字符偏移；
    *  Markdown 按块锚点（text + 同文本序号 occ + 源码偏移 offset） */

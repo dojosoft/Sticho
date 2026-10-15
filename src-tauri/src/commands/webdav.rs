@@ -29,6 +29,13 @@ const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 /// 单纯放宽此值即可支持更大文档，无需改动上传流程。
 const MAX_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
+/// 原子上传临时名的进程内自增序号。
+///
+/// 只靠秒级时间戳做序号时，同一秒内的两次上传会得到同一个临时名：后者 PUT 到
+/// 同一个临时文件，再各自 MOVE，先 MOVE 的那个会被对方的半截内容覆盖。
+/// 追加一个进程内自增序号保证同秒唯一（与 `file_io.rs` 的本地原子写同一思路）。
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// 冲突判定容差（秒）：远端 size 相同、modified 相差不超过此值，视为「就是自己刚传的那份」。
 ///
 /// WebDAV 服务器写入后回填的 Last-Modified 与本地记录可能有 1 秒级抖动，
@@ -633,9 +640,11 @@ fn put_atomic(
     bytes: &[u8],
     content_type: &str,
 ) -> Result<(), String> {
-    // 临时名与目标同目录（`ensure_dirs` 已建好父目录），序号取当前秒保证唯一
-    let seq = crate::logging::now_secs();
-    let tmp_remote = format!("{remote}.{seq}.sticho.tmp");
+    // 临时名与目标同目录（`ensure_dirs` 已建好父目录）：
+    // 「秒级时间戳 + 进程内自增序号」保证同一秒内并发上传不会撞名（见 TMP_SEQ）
+    let secs = crate::logging::now_secs();
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_remote = format!("{remote}.{secs}.{seq}.sticho.tmp");
     let tmp_url = join_url(base, &tmp_remote);
     let dest_url = join_url(base, remote);
 
@@ -660,10 +669,13 @@ fn put_atomic(
     }
 }
 
-/// 远端原子上传留下的临时文件名（形如 `<目标>.<序号>.sticho.tmp`）。
+/// 远端原子上传留下的临时文件名（形如 `<目标>.<秒>.<序号>.sticho.tmp`）。
 ///
 /// 上传成功后 MOVE 会把它搬走，正常不会出现在列表里；只有 MOVE 与清理 DELETE
 /// 双双失败的极端情况才会残留。列目录时统一挡掉，免得被当成正常文档打开。
+///
+/// 只判断「名字形状」，**不区分文件与目录**：调用方负责只对文件调用它——
+/// 用户完全可能建一个恰好同名的目录，把目录一并藏掉同样是错的。
 fn is_upload_tmp_name(name: &str) -> bool {
     let Some(rest) = name.strip_suffix(".sticho.tmp") else {
         return false;
@@ -955,8 +967,9 @@ pub async fn webdav_list(
             propfind_children(&agent, &url, &user, &password, &path).map_err(DavError::message)?;
         let mut list: Vec<WebdavEntry> = children
             .into_iter()
-            // 挡掉原子上传残留的临时文件（MOVE + 清理 DELETE 双双失败的极端情况）
-            .filter(|c| !is_upload_tmp_name(&c.name))
+            // 挡掉原子上传残留的临时**文件**（MOVE + 清理 DELETE 双双失败的极端情况）；
+            // 目录一律保留：同名目录是用户自己建的，不该被当成临时文件藏掉
+            .filter(|c| c.is_dir || !is_upload_tmp_name(&c.name))
             .map(|c| WebdavEntry {
                 name: c.name,
                 path: c.path,
@@ -1224,6 +1237,9 @@ mod tests {
         // 形如 <目标>.<纯数字序号>.sticho.tmp → 视为上传残留
         assert!(is_upload_tmp_name("a.md.1792000000.sticho.tmp"));
         assert!(is_upload_tmp_name("笔记.md.0.sticho.tmp"));
+        // 现在的临时名是 <目标>.<秒>.<进程内序号>.sticho.tmp，末段仍是纯数字
+        assert!(is_upload_tmp_name("a.md.1792000000.7.sticho.tmp"));
+        assert!(is_upload_tmp_name("笔记.md.1792000000.0.sticho.tmp"));
         // 不带数字序号的同名文件是用户自己的文件，不能误藏
         assert!(!is_upload_tmp_name("笔记.sticho.tmp"));
         assert!(!is_upload_tmp_name("a.md.sticho.tmp"));
