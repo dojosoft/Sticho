@@ -177,7 +177,7 @@
     removeTrailingSpaces,
   } from "./lib/textTools";
   import { ENCODINGS, encodingLabel } from "./lib/encoding";
-  import { newDocTab, sessionOf, applyEol, detectEol, type DocTab, type Eol, type SessionState } from "./lib/docState";
+  import { newDocTab, sessionOf, applyEol, detectEol, restoredTabNeedsWelcome, type DocTab, type Eol, type SessionState } from "./lib/docState";
   import { parseOutline, parseOutlineFromHtml, parseFrontMatter, htmlPlainText, type OutlineItem, type SidebarView } from "./lib/sidebar";
   import Sidebar from "./components/Sidebar.svelte";
   import CodeTools from "./components/CodeTools.svelte";
@@ -5289,6 +5289,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         tab.content = draft;
         tab.loaded = true;
         if (item.eol === undefined) tab.eol = detectEol(draft); // 老会话无行尾字段：按草稿探测
+      } else if (restoredTabNeedsWelcome(item, tab.remote)) {
+        // 干净、未命名、无云端绑定：这是上次那个「欢迎文档」标签。正文只来自 createTab 注入的
+        // 欢迎文案，从未变脏，所以既没有路径也没有草稿——不补回来，下面 activateTab 投影到
+        // 编辑器里的就是空正文（实测现象：关掉再打开，文档是空白）。
+        tab.content = welcomeText();
+        tab.loaded = true;
       }
       built.push(tab);
     }
@@ -6502,6 +6508,13 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       await ensureConfigReady();
       // 启动配置一次性读回：此前二十个键逐个 await 是二十次串行 IPC，整体拖慢首帧
       const s = await loadAllSettings();
+      // 启动计时（长期保留）：窗口由前端在首帧后 show()，「感知启动时间」= 页面开始 →
+      // 编辑器显示出内容这一刻。各阶段写进应用日志（「帮助 → 导出诊断信息」能看到），
+      // 用户机器上启动慢时能直接看出卡在哪一段，不必靠猜。wall 是墙钟，用于与 Rust 侧的
+      // 「应用启动」日志对时间线（进程启动 → 页面开始 这一段只能这样才看出来）。
+      const startupMark = (stage: string): void =>
+        void logEvent("INFO", `[startup] ${stage} +${Math.round(performance.now())}ms (wall ${Date.now()})`).catch(() => {});
+      startupMark("settings loaded");
       // 启动配置：外观（主题统一决定）、最近文件、侧边栏、文件关联
       // 外观已并入「主题」：未选主题 = 内置浅色默认；选中主题按自身 color-scheme 定深浅
       // （见 refreshThemes）。这里先落默认浅色，深色主题随后由 refreshThemes 切换。
@@ -6582,6 +6595,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       await tick();
       window.setTimeout(() => {
         win.show().catch((e) => console.error("[sticho] 亮窗失败：", e));
+        startupMark("window shown");
       }, 0);
 
       // 编辑器运行时（Vditor 本体 + i18n）先预取：与下面几次目录 IPC 并行下载 / 解析，
@@ -6593,7 +6607,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 顺序不能并行：内置「暗墨」等主题文件要先由 initPacks 落盘，refreshThemes 才能把
       // 用户选中的主题认出来，否则会被当成「文件已被删除」而回落默认。
       await initPacks();
+      startupMark("packs released");
       await refreshThemes();
+      startupMark("themes refreshed");
 
       const host = document.getElementById("editor-host")!;
       // 打开即阅读模式：先把只读意图写进编辑器层（此时正文元素还没建好，
@@ -6606,6 +6622,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       const firstTab = tabs[activeIndex];
       if (firstTab && firstTab.path === null && !firstTab.dirty) firstTab.content = initial;
       void initEditor(host, initial, theme === "dark");
+      startupMark("editor init kicked off");
       onEditorChange(() => syncFromEditor());
       // 渲染模式变化（工具栏下拉或菜单）：同步状态栏图标与视图菜单复选
       onEditorModeChange((mode) => {
@@ -6633,6 +6650,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
 
       // Vditor 异步加载资源，初始化完成前读写内容会抛错（侧边栏大纲、启动文件都要用到）
       await whenEditorReady();
+      startupMark("editor ready (awaited)");
       tabsReady = true; // 此刻起才允许把编辑器正文搬进标签快照
       refreshSideNow();
 
@@ -6659,6 +6677,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 环境自检（用户要求）：pandoc 缺失时提示一次并可一键下载。
       // 放在最后，避免与上面的会话恢复 / 启动文件对话框抢焦点。
       await checkPandocOnStartup();
+      startupMark("startup finished");
 
       // 入门指南（批次四）：首次启动弹一次，与上面的对话框顺序出现，避免叠在一起
       if (!welcomeShown) welcomeOpen = true;

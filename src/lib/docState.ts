@@ -108,6 +108,21 @@ export function newDocTab(id: number, content: string): DocTab {
   };
 }
 
+/**
+ * 会话恢复出来的标签是否应当补回欢迎正文。
+ *
+ * 「欢迎文档」不是独立文件，而是**新建标签的初始正文**（见 App.svelte 的 createTab →
+ * `newDocTab(…, welcomeText())`）：它没有路径、不会被保存，只要用户没动过就不会变 dirty，
+ * 因此恢复草稿里从来没有它。而会话恢复只带元信息、正文一律从草稿取——不把这份正文补回去，
+ * 恢复出来的标签就是空正文，用户看到「打开后文档是空白」。
+ *
+ * 只认「干净 + 没有路径 + 没有云端绑定」：dirty 标签的正文在草稿里，草稿万一读失败
+ * 宁可留空，也不能用欢迎文案把「未知内容」顶掉。
+ */
+export function restoredTabNeedsWelcome(item: SessionTab, remote: string | null): boolean {
+  return !item.dirty && item.path === null && remote === null;
+}
+
 /** 生成会话快照（不含正文：正文分别落在恢复草稿里） */
 export function sessionOf(tabs: DocTab[], active: number): SessionState {
   return {
