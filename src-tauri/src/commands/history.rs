@@ -175,6 +175,9 @@ fn newest_entry(dir: &Path) -> Option<String> {
 ///
 /// 从最新往最旧扫：某一项一旦超限，该版本与它之后更旧的版本一并删除——
 /// 效果就是「从最老的开始删」。三类上限（数量 / 容量 / 时长）各自独立开关。
+///
+/// 无论上限多紧（如容量上限小于单份体积、数量上限为 1），最新一份永远保留：
+/// 裁剪的目的是释放旧空间，不是把用户仅存的回滚点删掉。
 fn prune(dir: &Path, limits: &HistoryLimits) {
     let Ok(entries) = list_entries(dir) else {
         return;
@@ -182,10 +185,11 @@ fn prune(dir: &Path, limits: &HistoryLimits) {
     let now = crate::logging::now_secs();
     let mut kept = 0usize;
     let mut bytes = 0u64;
-    for e in entries {
-        let too_old = limits.age_on && now.saturating_sub(e.saved_at) > limits.max_age_secs;
-        let too_many = limits.count_on && kept >= limits.keep;
-        let too_big = limits.size_on && bytes + e.size > limits.max_bytes;
+    for (index, e) in entries.into_iter().enumerate() {
+        // 最新一份（index 0）无条件保留；超龄也保住它——删掉它历史就整体作废了
+        let too_old = index > 0 && limits.age_on && now.saturating_sub(e.saved_at) > limits.max_age_secs;
+        let too_many = index > 0 && limits.count_on && kept >= limits.keep;
+        let too_big = index > 0 && limits.size_on && bytes + e.size > limits.max_bytes;
         if too_old || too_many || too_big {
             let _ = fs::remove_file(dir.join(&e.file));
             continue;

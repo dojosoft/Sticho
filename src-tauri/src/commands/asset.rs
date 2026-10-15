@@ -163,6 +163,13 @@ fn save_image_asset_blocking(path: &str, name: &str, data: &str) -> Result<Strin
     Ok(target)
 }
 
+/// 目录本身或其上层是系统目录：`lower` 与 `base`（或 `base\` 前缀）相等才算命中，
+/// 纯 starts_with 会把 `C:\Windows.old`、`C:\Program Files (x86)\自助工具` 这类
+/// 用户目录误判成系统目录
+fn under_or_eq(lower: &str, base: &str) -> bool {
+    lower == base || lower.starts_with(&format!("{base}\\"))
+}
+
 /// 根目录 / Windows 系统目录不应放行给 asset 协议。
 ///
 /// 放行的目的是让文档里的相对路径图片能显示；盘符根（`D:\`）与系统目录里不存在
@@ -177,10 +184,10 @@ fn is_forbidden_asset_dir(dir: &Path) -> bool {
         .unwrap_or_else(|_| "C:\\Windows".to_string())
         .replace('/', "\\")
         .to_ascii_lowercase();
-    lower.starts_with(&windir)
-        || lower.starts_with("c:\\windows")
-        || lower.starts_with("c:\\program files")
-        || lower.starts_with("c:\\program files (x86)")
+    under_or_eq(&lower, &windir)
+        || under_or_eq(&lower, "c:\\windows")
+        || under_or_eq(&lower, "c:\\program files")
+        || under_or_eq(&lower, "c:\\program files (x86)")
 }
 
 /// 把「某个文档所在目录」（含子目录）放行给 asset 协议读取。

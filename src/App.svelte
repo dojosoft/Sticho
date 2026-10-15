@@ -3005,11 +3005,17 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     docKind === "html"
       ? exportAs(t("Export as HTML Document"), "html", t("HTML Document"), (path, source) => writeTextFile(path, source, encoding))
       : exportAs(t("Export as HTML Document"), "html", t("HTML Document"), (path, source) =>
-          import("./lib/export-html").then((m) => m.exportHtml(path, source, locale, activeEntries)),
+          import("./lib/export-html").then((m) =>
+            // 代码 / 纯文本按 <pre> 原样出，只有 Markdown 走渲染（与 exportPdf 同口径）
+            m.exportHtml(path, source, locale, activeEntries, docKind === "code" ? "code" : "markdown"),
+          ),
         );
   const exportTxtFile = () =>
     exportAs(t("Export as Plain Text File"), "txt", t("Plain Text"), (path, source) =>
-      import("./lib/export-txt").then((m) => m.exportTxt(path, source)),
+      import("./lib/export-txt").then((m) =>
+        // 代码 / 纯文本 / HTML 源码原样导出，只有 Markdown 走「渲染再抽正文」
+        m.exportTxt(path, source, docKind === "markdown" ? "markdown" : "code"),
+      ),
     );
 
   /** 通过 Pandoc 导出（批次八）：LaTeX / Epub，未装 Pandoc 时先引导下载 */
@@ -5641,13 +5647,14 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
           label: t("Export"),
           disabled: () => busy,
           sub: [
-            { label: t("Export as Word"), shortcut: "Ctrl+Shift+E", action: exportWord },
+            { label: t("Export as Word"), shortcut: "Ctrl+Shift+E", disabled: () => docKind !== "markdown", action: exportWord },
             { label: t("Export as PDF"), shortcut: "Ctrl+Shift+P", action: exportPdfFile },
             { label: t("Export as HTML"), shortcut: "Ctrl+Shift+H", action: exportHtmlFile },
             { label: t("Export as Plain Text"), shortcut: "Ctrl+Shift+T", action: exportTxtFile },
             { sep: true },
-            { label: t("Export as LaTeX (.tex)"), action: exportLatexFile },
-            { label: t("Export as Epub (.epub)"), action: exportEpubFile },
+            // LaTeX / Epub 经 Pandoc 转 Markdown，对代码与 HTML 文档语义不成立，置灰
+            { label: t("Export as LaTeX (.tex)"), disabled: () => docKind !== "markdown", action: exportLatexFile },
+            { label: t("Export as Epub (.epub)"), disabled: () => docKind !== "markdown", action: exportEpubFile },
           ],
         },
         { label: t("Print…"), action: () => void printDoc() },
@@ -6343,8 +6350,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       e.preventDefault();
       void setBrowseMode(!browseMode);
     } else if (key === "e" && e.shiftKey) {
-      e.preventDefault();
-      void exportWord();
+      // Word 只对 Markdown 有意义（与菜单置灰同口径）：其他文档类型下不拦截、不动作
+      if (docKind === "markdown") {
+        e.preventDefault();
+        void exportWord();
+      }
     } else if (key === "p" && e.shiftKey) {
       e.preventDefault();
       void exportPdfFile();

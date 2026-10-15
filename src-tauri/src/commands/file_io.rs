@@ -160,8 +160,11 @@ pub(crate) fn decode_auto(bytes: &[u8]) -> (String, String) {
         );
     }
     if let Some(id) = sniff_bomless_utf16(bytes) {
-        let enc = encoding_from_id(id).expect("嗅探结果必为已知编码");
-        return (enc.decode_without_bom_handling(bytes).0.into_owned(), id.to_string());
+        // 嗅探只会给 utf-16le / utf-16be，正常必然命中；生产路径不该有 expect，
+        // 万一将来嗅探名单变了，这里直接放行给后面的 chardetng，而不是 panic
+        if let Some(enc) = encoding_from_id(id) {
+            return (enc.decode_without_bom_handling(bytes).0.into_owned(), id.to_string());
+        }
     }
     // 纯 ASCII 一律按 UTF-8：ASCII 是各编码的公共子集，按 UTF-8 保存兼容性最好
     if bytes.is_ascii() {

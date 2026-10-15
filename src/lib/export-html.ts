@@ -9,23 +9,56 @@ import MarkdownIt from "markdown-it";
 import { writeFileBase64 } from "./tauri-api";
 import { toBase64 } from "./export-pdf";
 import { applyAutoSpace } from "./typography";
+import { makeT, type Locale } from "./i18n";
 
 const md = new MarkdownIt({ html: false, linkify: true });
 applyAutoSpace(md);
 
-export async function exportHtml(path: string, markdown: string): Promise<void> {
-  const body = md.render(markdown);
-  const html = buildStandaloneHtml(body);
+/**
+ * 导出源类型：code（纯文本 / 源码文件）不能被当 Markdown 渲染——单换行会被合并成段、
+ * 行首缩进被剥掉、`#`/`*` 会被解释成标题与强调，导出结果面目全非（与 export-pdf 的
+ * kind 分支同一口径）。HTML 文档不经过本函数：App.svelte 对 html 源码走原样写出。
+ */
+export type HtmlExportKind = "markdown" | "code";
+
+export async function exportHtml(
+  path: string,
+  markdown: string,
+  locale: Locale = "zh-CN",
+  entries?: Record<string, string>,
+  kind: HtmlExportKind = "markdown",
+): Promise<void> {
+  const body =
+    kind === "code" ? `<pre class="plain">${escapeHtml(markdown)}</pre>` : md.render(markdown);
+  const html = buildStandaloneHtml(body, locale, entries);
   await writeFileBase64(path, toBase64(new TextEncoder().encode(html)));
 }
 
-function buildStandaloneHtml(bodyHtml: string): string {
+/** HTML 文本转义（正文里可能出现 `&` `<` 等字符） */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function buildStandaloneHtml(
+  bodyHtml: string,
+  locale: Locale,
+  entries?: Record<string, string>,
+): string {
+  // 文档标题与 html lang 都跟随界面语言，避免中文界面导出到英文环境时错配
+  // entries 为语言包合并词表：由调用方注入后自定义语言包也能生效
+  const title = makeT(locale, entries)("Sticho Export Document");
+  // lang / title 一律转义：与 export-pdf（buildPrintHtml）的口径一致，
+  // 语言包值与 locale 再受限也不该原样拼进标记
   return `<!doctype html>
-<html lang="zh-CN">
+<html lang="${escapeHtml(locale)}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sticho 导出文档</title>
+<title>${escapeHtml(title)}</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -71,6 +104,8 @@ function buildStandaloneHtml(bodyHtml: string): string {
     overflow-x: auto;
   }
   pre code { background: none; padding: 0; font-size: 0.86em; line-height: 1.6; }
+  /* 代码 / 纯文本文件直接导出：只要等宽换行，不要代码块的灰底与边框 */
+  pre.plain { background: none; border: none; border-radius: 0; padding: 0; }
 
   blockquote {
     margin: 0.8em 0;

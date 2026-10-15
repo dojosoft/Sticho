@@ -579,6 +579,9 @@ fn propfind(
 /// 保留扁平错误类型更直观，故显式豁免该 lint。
 #[allow(clippy::result_large_err)]
 fn mkcol(agent: &ureq::Agent, url: &str, user: &str, password: &str) -> Result<(), ureq::Error> {
+    // 405 = 目录已存在（规范语义）；409 规范上表示「父目录缺失」，但部分服务器
+    // 对「已存在」也返回 409，故一并放行。代价是：真缺父目录时错误会延迟到
+    // 最后的 PUT 才暴露——那时报 409 的就是文件自身，无需再区分到目录级别。
     match request(agent, "MKCOL", url, user, password).call() {
         Ok(_) => Ok(()),
         Err(ureq::Error::Status(405, _)) | Err(ureq::Error::Status(409, _)) => Ok(()),
@@ -730,6 +733,12 @@ fn parse_children(xml: &str, request_path: &str, remote: &str) -> Vec<ChildEntry
         let Some(rest) = full.strip_prefix(request_path.trim_end_matches('/')) else {
             continue;
         };
+        // 前缀剥离后必须是「空（目录自身）」或「以 / 开头（子项）」：
+        // 否则同前缀兄弟目录（如同时存在 MDStudio 与 MDStudio2）会把
+        // MDStudio2 的子项剥出 "2/xxx" 这种伪条目混进列表
+        if !rest.is_empty() && !rest.starts_with('/') {
+            continue;
+        }
         let name = rest.trim_start_matches('/');
         // 空 = 目录自身；含 / = 更深层级（Depth:1 理论上不会出现）
         if name.is_empty() || name.contains('/') {
@@ -1178,6 +1187,21 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].path, "/root/x.txt");
         assert_eq!(items[0].size, 1);
+    }
+
+    #[test]
+    fn parse_children_skips_prefix_sibling_dirs() {
+        // 请求列 /dav/MDStudio，同前缀兄弟目录 MDStudio2 不该出现在响应里；
+        // 防御性校验：万一服务器把它们混进来，也不能剥出 "2" 这种伪条目
+        let xml = r#"<d:multistatus xmlns:d="DAV:">
+          <d:response><d:href>/dav/MDStudio/</d:href></d:response>
+          <d:response><d:href>/dav/MDStudio2/</d:href></d:response>
+          <d:response><d:href>/dav/MDStudio2/x.md</d:href></d:response>
+          <d:response><d:href>/dav/MDStudio/ok.md</d:href></d:response>
+        </d:multistatus>"#;
+        let items = parse_children(xml, "/dav/MDStudio", "/MDStudio");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "ok.md");
     }
 
     #[test]

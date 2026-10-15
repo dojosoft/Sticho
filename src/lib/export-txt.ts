@@ -43,21 +43,33 @@ function collect(node: Node, out: string[]): void {
   if (block) out.push("\n");
 }
 
+/**
+ * 源类型：Markdown 要渲染后再抽正文；代码 / 纯文本 / HTML 源码必须原样导出——
+ * 过一遍 markdown-it 会把单换行并成段、行首缩进剥掉、把 `#` `*` 当语法
+ * （与 export-pdf、export-html 的 kind 分支同一口径）。
+ */
+export type TextExportKind = "markdown" | "code";
+
 /** Markdown 源码 → 纯文本 */
-export function markdownToPlainText(source: string): string {
+export function markdownToPlainText(source: string, kind: TextExportKind = "markdown"): string {
+  if (kind === "code") return source;
   const doc = new DOMParser().parseFromString(md.render(source), "text/html");
   const out: string[] = [];
   collect(doc.body, out);
-  return (
-    out
-      .join("")
-      .replace(/[ \t]+\n/g, "\n") // 行尾空白
-      .replace(/\n{3,}/g, "\n\n") // 连续空行压缩为一段间距
-      .trim() + "\n"
-  );
+  const text = out
+    .join("")
+    .replace(/[ \t]+\n/g, "\n") // 行尾空白
+    .replace(/\n{3,}/g, "\n\n") // 连续空行压缩为一段间距
+    .trim();
+  // 空文档就该导出成空文件：无条件补换行会凭空多出内容
+  return text === "" ? "" : text + "\n";
 }
 
 /** 导出为 .txt（走与 Markdown 保存相同的原子写通道；纯文本导出统一 UTF-8） */
-export async function exportTxt(path: string, source: string): Promise<void> {
-  await writeTextFile(path, markdownToPlainText(source), "utf-8");
+export async function exportTxt(
+  path: string,
+  source: string,
+  kind: TextExportKind = "markdown",
+): Promise<void> {
+  await writeTextFile(path, markdownToPlainText(source, kind), "utf-8");
 }
