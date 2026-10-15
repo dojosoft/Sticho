@@ -10,12 +10,15 @@
 | `@tauri-apps/api` | ^2.1 | MIT OR Apache-2.0 | Tauri 前端 API |
 | `@tauri-apps/plugin-dialog` | ^2.0 | MIT OR Apache-2.0 | 文件打开/保存对话框 |
 | `@tauri-apps/plugin-store` | ^2.0 | MIT OR Apache-2.0 | 轻量键值存储（主题/最近文件记忆） |
+| `@tauri-apps/plugin-clipboard-manager` | ^2.3 | MIT OR Apache-2.0 | 原生剪贴板（编辑菜单剪切/复制/粘贴） |
 | `vditor` | ^3.11 | MIT | Markdown 编辑器内核 |
 | `markdown-it` | ^14 | MIT | MD→HTML 渲染（导出管道） |
 | `docx` | ^9 | MIT | 生成 .docx（导出 Word） |
 | `pdfjs-dist` | ^4.10 | Apache-2.0 | 导入 PDF：文本层抽取（仅运行时解析，无传染性） |
 | `turndown` | ^7.2 | MIT | 导入 HTML：HTML→Markdown 转换 |
 | `turndown-plugin-gfm` | ^1.0 | MIT | turndown 的 GFM 扩展（表格/删除线/任务列表） |
+| `@codemirror/*`（state / view / commands / language / search / autocomplete / legacy-modes 及各 `lang-*`） | ^6 | MIT | 代码文件视图内核、各语言模式与查找替换 |
+| `@lezer/highlight` | ^1.2 | MIT | 代码高亮的标签体系 |
 | `@tauri-apps/cli` | ^2.1 | MIT OR Apache-2.0 | Tauri CLI（开发期） |
 | `@sveltejs/vite-plugin-svelte` | ^5.0 | MIT | Svelte 的 Vite 插件（开发期） |
 | `svelte` | ^5.16 | MIT | 前端框架 |
@@ -29,11 +32,18 @@
 | `tauri` | ^2 | MIT OR Apache-2.0 | 桌面框架 |
 | `tauri-plugin-dialog` | ^2 | MIT OR Apache-2.0 | 对话框（Rust 侧） |
 | `tauri-plugin-store` | ^2 | MIT OR Apache-2.0 | 键值存储（Rust 侧） |
+| `tauri-plugin-single-instance` | ^2 | MIT OR Apache-2.0 | 单实例：文件关联后双击复用已有窗口 |
+| `tauri-plugin-clipboard-manager` | ^2 | MIT OR Apache-2.0 | 原生剪贴板（Rust 侧） |
 | `base64` | ^0.22 | MIT OR Apache-2.0 | 导出二进制 base64 编解码 |
 | `webview2-com` | ^0.38 | MIT | PDF 导出：WebView2 COM 打印接口（wry 传递依赖，零额外体积） |
 | `windows-core` | ^0.61 | MIT OR Apache-2.0 | COM 回调实现宏（wry 传递依赖） |
 | `ureq` | ^2 | MIT OR Apache-2.0 | 下载 Pandoc 发行包（rustls，无 OpenSSL） |
 | `zip` | ^2 | MIT OR Apache-2.0 | 解压 Pandoc 发行包 |
+| `encoding_rs` | ^0.8 | (Apache-2.0 OR MIT) AND BSD-3-Clause | 文本编解码 |
+| `chardetng` | ^0.1 | Apache-2.0 OR MIT | 打开文件时的编码嗅探（Firefox 组件） |
+| `winreg` | ^0.52 | MIT | 文件关联与右键菜单读写 HKCU |
+| `windows-sys` | ^0.61 | MIT OR Apache-2.0 | 原生对话框、打开链接、WebView2 注册表检测 |
+| `sha2` | ^0.10 | MIT OR Apache-2.0 | Pandoc 发行包完整性校验 |
 | `tauri-build` | ^2 | MIT OR Apache-2.0 | 构建脚本（开发期） |
 | `serde` / `serde_json` | ^1 | MIT OR Apache-2.0 | 序列化 |
 
@@ -74,6 +84,11 @@
 > 具弱传染性的互惠许可，不在本项目白名单内）。编辑器工具栏未提供 Graphviz 入口（见 `editor.ts`），
 > 故按「移除未使用能力」原则整目录删除，避免白名单外许可随包分发。
 > 删除后 graphviz / dot 代码块不再渲染（与其余未启用引擎表现一致）。
+>
+> **同步机制（构建期）**：上表资源由 `scripts/sync-vditor-assets.mjs` 在 `predev` / `prebuild`
+> 时从 `node_modules/vditor/dist` 同步到 `public/vditor/dist`（只同步 `js/`、`css/`、`images/`），
+> 仓库不保存这份约 12MB 的副本。脚本里的排除项 `js/graphviz`（EPL-1.0）与 `js/mathjax`（本项目
+> 数学走 KaTeX，未启用）是**许可证与体积的硬约束**：加回任何一项都必须先在本文件登记。
 
 ## 例外条款：Pandoc（阶段 5 引入时生效）
 
@@ -84,4 +99,4 @@
 
 ---
 
-*最后更新：审查改进批次 2（安全加固——资产作用域收窄、远程资源默认不加载、内置第三方引擎许可清单，并移除 EPL 系 Graphviz）*
+*最后更新：发布前审查（补齐 npm / Rust 直接依赖清单，登记 Vditor 运行资源的构建期同步与排除项）*
