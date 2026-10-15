@@ -74,6 +74,12 @@ function usedKeys(text) {
 
 const zh = zhKeys(readFileSync(join(srcDir, "lib", "i18n.ts"), "utf8"));
 
+/**
+ * 刻意不翻译的键：中英文一致的专有名词（如 "Markdown" / "HTML"）不入词表，
+ * 否则词表里只是多一条与原文相同的噪音。列入这里即不再算「未收录」。
+ */
+const DELIBERATELY_UNTRANSLATED = new Set(["Markdown", "HTML"]);
+
 /** 键 → 首次出现的文件（仅用于报告，方便定位） */
 const used = new Map();
 for (const file of walk(srcDir)) {
@@ -83,7 +89,7 @@ for (const file of walk(srcDir)) {
   }
 }
 
-const missing = [...used.keys()].filter((k) => !zh.has(k));
+const missing = [...used.keys()].filter((k) => !zh.has(k) && !DELIBERATELY_UNTRANSLATED.has(k));
 const unused = [...zh].filter((k) => !used.has(k));
 
 console.log(`ZH 词条：${zh.size} 条；源码中出现的 t() 字面量键：${used.size} 条`);
@@ -91,4 +97,6 @@ console.log(`\n未收录英文的键（${missing.length} 条）：`);
 for (const k of missing) console.log(`  ${used.get(k)}  ${JSON.stringify(k)}`);
 
 console.log(`\n已收录但源码中未再使用的键（${unused.length} 条）：`);
+console.log("  （注意：本脚本只认 t(\"字面量\")。运行时拼接的键——如 t(res.error)、WebDAV 服务商名、");
+console.log("    编码名——扫不到也会被列进来，清理词表前请逐个确认，不要照清单批量删除）");
 for (const k of unused) console.log(`  ${JSON.stringify(k)}`);

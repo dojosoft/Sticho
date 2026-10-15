@@ -672,6 +672,7 @@ export const ZH: Record<string, string> = {
   "Recovery Center…": "恢复中心…",
   "Recovery Center": "恢复中心",
   "Recovery Drafts": "恢复草稿",
+  "The original file has been updated externally since this draft was saved. The recovered content may not include those changes.": "草稿生成后原文件已在外部被修改，恢复出来的内容可能不含那些改动。",
   "Local Version History": "本地版本历史",
   "Close Preview": "关闭预览",
   "No recovery drafts": "暂无恢复草稿",
