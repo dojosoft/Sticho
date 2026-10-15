@@ -39,15 +39,23 @@ export function classifyImageSrc(src: string | null | undefined): ImageSourceKin
 
 /** 去掉 file:// 前缀，得到本机可用的路径 */
 function stripFileScheme(src: string): string {
-  return src
-    .replace(/^file:\/+/i, "")
-    .replace(/^\/([A-Za-z]:)/, "$1"); // file:///C:/x → C:/x
+  const m = /^file:\/\/([^/]*)(\/.*)?$/i.exec(src);
+  if (m) {
+    const host = m[1] ?? "";
+    const rest = m[2] ?? "";
+    // file://host/share → \\host\share（UNC 共享路径）
+    if (host !== "") return `\\\\${host}${rest.replace(/\//g, "\\")}`;
+    // file:///C:/x → C:/x（空主机即本机绝对路径）
+    return rest.replace(/^\/([A-Za-z]:)/, "$1");
+  }
+  return src.replace(/^file:\/+/i, "");
 }
 
 /**
  * 把 src 解析成本机绝对路径；相对路径必须给出 baseDir（当前文档所在目录）。
  *
- * 不校验文件是否存在，也不处理 `..` 归一化——Rust 侧 fs::read 能直接吃这些路径。
+ * 不校验文件是否存在。相对路径里的 `..` 段一律拒收：文档可能来自 WebDAV 等不可信来源，
+ * 不能让它把读取位置带出当前文档目录；绝对路径按用户显式给出的位置原样交给 Rust 侧 fs::read。
  */
 export function resolveLocalImagePath(src: string, baseDir: string | null): string | null {
   const kind = classifyImageSrc(src);
@@ -62,6 +70,8 @@ export function resolveLocalImagePath(src: string, baseDir: string | null): stri
       .replace(/^(?:\.\/|\.\\)+/, "") // 去掉 ./ 前缀，避免路径里留下多余的 ".\"
       .replace(/^[\\/]+/, "")
       .replace(/\//g, "\\");
+    // 命中 `..` 即放弃嵌入，由调用方回落到占位文字
+    if (rel.split("\\").some((seg) => seg === "..")) return null;
     const base = baseDir.replace(/[\\/]+$/, "");
     return `${base}\\${rel}`;
   }

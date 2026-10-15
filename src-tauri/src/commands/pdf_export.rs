@@ -20,15 +20,15 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::webview::PageLoadEvent;
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2_7, ICoreWebView2CallDevToolsProtocolMethodCompletedHandler,
+    ICoreWebView2CallDevToolsProtocolMethodCompletedHandler,
     ICoreWebView2CallDevToolsProtocolMethodCompletedHandler_Impl, ICoreWebView2Environment6,
     ICoreWebView2PrintToPdfCompletedHandler, ICoreWebView2PrintToPdfCompletedHandler_Impl,
-    COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT,
+    ICoreWebView2_7, COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT,
 };
-use windows_core::{implement, BOOL, HSTRING, Interface, PCWSTR};
+use windows_core::{implement, Interface, BOOL, HSTRING, PCWSTR};
 
 /// A4 纵向（英寸）。PrintSettings 的页宽/高/边距单位均为英寸。
 const A4_WIDTH: f64 = 8.27;
@@ -50,10 +50,13 @@ impl ICoreWebView2PrintToPdfCompletedHandler_Impl for PrintDoneHandler_Impl {
             if result.as_bool() {
                 Ok(())
             } else {
-                Err("生成 PDF 失败（WebView2 返回失败状态）".to_string())
+                Err("Failed to generate PDF (WebView2 returned a failure status)".to_string())
             }
         } else {
-            Err(format!("生成 PDF 失败（错误码 0x{:08X}）", errorcode.0 as u32))
+            Err(format!(
+                "Failed to generate PDF (error code 0x{:08X})",
+                errorcode.0 as u32
+            ))
         };
         let _ = self.tx.send(outcome);
         Ok(())
@@ -68,7 +71,11 @@ struct CdpDoneHandler {
 }
 
 impl ICoreWebView2CallDevToolsProtocolMethodCompletedHandler_Impl for CdpDoneHandler_Impl {
-    fn Invoke(&self, errorcode: windows_core::HRESULT, result: &PCWSTR) -> windows_core::Result<()> {
+    fn Invoke(
+        &self,
+        errorcode: windows_core::HRESULT,
+        result: &PCWSTR,
+    ) -> windows_core::Result<()> {
         let outcome = cdp_output(errorcode, result, &self.path);
         let _ = self.tx.send(outcome);
         Ok(())
@@ -79,25 +86,26 @@ impl ICoreWebView2CallDevToolsProtocolMethodCompletedHandler_Impl for CdpDoneHan
 /// 所有错误都带 `[CDP]` 前缀，调用方据此决定是否回落原生 PrintToPdf。
 fn cdp_output(errorcode: windows_core::HRESULT, result: &PCWSTR, path: &str) -> Result<(), String> {
     if !errorcode.is_ok() {
-        return Err(format!("[CDP] 打印失败（0x{:08X}）", errorcode.0 as u32));
+        return Err(format!("[CDP] Print failed (0x{:08X})", errorcode.0 as u32));
     }
-    let json = unsafe { result.to_string() }.map_err(|e| format!("[CDP] 读取打印结果失败：{e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&json).map_err(|e| format!("[CDP] 解析打印结果失败：{e}"))?;
+    let json = unsafe { result.to_string() }
+        .map_err(|e| format!("[CDP] Failed to read print result: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| format!("[CDP] Failed to parse print result: {e}"))?;
     if let Some(message) = value
         .get("error")
         .and_then(|e| e.get("message"))
         .and_then(|m| m.as_str())
     {
-        return Err(format!("[CDP] 打印被拒绝：{message}"));
+        return Err(format!("[CDP] Print rejected: {message}"));
     }
     let data = value
         .get("data")
         .and_then(|d| d.as_str())
-        .ok_or("[CDP] 打印结果里没有 PDF 数据")?;
+        .ok_or("[CDP] No PDF data in the print result")?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.trim())
-        .map_err(|e| format!("[CDP] PDF 数据解码失败：{e}"))?;
+        .map_err(|e| format!("[CDP] Failed to decode PDF data: {e}"))?;
     crate::commands::file_io::atomic_write(path, &bytes)
 }
 
@@ -106,23 +114,33 @@ pub async fn export_pdf(app: AppHandle, path: String, html_b64: String) -> Resul
     // 1. 解码前端传来的打印 HTML，落临时文件
     let html = base64::engine::general_purpose::STANDARD
         .decode(html_b64.trim())
-        .map_err(|e| format!("打印数据解码失败：{e}"))?;
+        .map_err(|e| format!("Failed to decode print data: {e}"))?;
 
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let tmp_html = std::env::temp_dir().join(format!("sticho-print-{nanos}.html"));
-    fs::write(&tmp_html, &html).map_err(|e| format!("写入临时打印文件失败：{e}"))?;
+    fs::write(&tmp_html, &html)
+        .map_err(|e| format!("Failed to write temporary print file: {e}"))?;
 
     let label = format!("pdf-print-{nanos}");
-    let url = tauri::Url::from_file_path(&tmp_html)
-        .map_err(|_| "临时文件路径无法转为 URL".to_string())?;
+    let url = match tauri::Url::from_file_path(&tmp_html) {
+        Ok(u) => u,
+        Err(_) => {
+            // 临时 HTML 已落盘，提前返回前必须清掉，否则每次失败都在临时目录留一份拷贝
+            let _ = fs::remove_file(&tmp_html);
+            return Err("The temporary file path cannot be converted to a URL".to_string());
+        }
+    };
 
     // 2. 结果通道
     let (tx, rx) = mpsc::channel::<Result<(), String>>();
 
     // 3. 不可见窗口加载打印 HTML
     let pdf_path = path.clone();
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(url))
-        .title("Sticho 打印")
+    if let Err(e) = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(url))
+        .title("Sticho Print")
         .inner_size(794.0, 1123.0) // A4 @96dpi 比例，仅影响布局视口
         .visible(false)
         .skip_taskbar(true)
@@ -136,19 +154,24 @@ pub async fn export_pdf(app: AppHandle, path: String, html_b64: String) -> Resul
                         let _ = tx_inner.send(Err(err));
                     }
                 }) {
-                    let _ = tx.send(Err(format!("访问 WebView 失败：{e}")));
+                    let _ = tx.send(Err(format!("[CDP] Failed to access WebView: {e}")));
                 }
             }
         })
         .build()
-        .map_err(|e| format!("创建打印视图失败：{e}"))?;
+    {
+        // 同上：窗口没建起来也要清掉临时 HTML
+        let _ = fs::remove_file(&tmp_html);
+        return Err(format!("Failed to create print view: {e}"));
+    }
 
     // 4. 等待打印完成（handler 回调发送结果）
     let mut result = rx
         .recv_timeout(TIMEOUT)
-        .unwrap_or_else(|_| Err("生成 PDF 超时（60 秒）".to_string()));
+        .unwrap_or_else(|_| Err("PDF generation timed out (60 seconds)".to_string()));
 
-    // CDP 整体不可用时回落原生 PrintToPdf（丢掉书签，但 PDF 仍能导出）
+    // CDP 通路整体不可用（接口拿不到、方法调用失败、结果异常）时回落原生 PrintToPdf：
+    // 丢掉书签，但 PDF 仍能导出。CDP 通路出来的错误一律带 "[CDP]" 前缀，据此判定。
     if matches!(&result, Err(e) if e.starts_with("[CDP]")) {
         if let Some(window) = app.get_webview_window(&label) {
             let (tx2, rx2) = mpsc::channel::<Result<(), String>>();
@@ -163,7 +186,7 @@ pub async fn export_pdf(app: AppHandle, path: String, html_b64: String) -> Resul
             {
                 result = rx2
                     .recv_timeout(TIMEOUT)
-                    .unwrap_or_else(|_| Err("生成 PDF 超时（60 秒）".to_string()));
+                    .unwrap_or_else(|_| Err("PDF generation timed out (60 seconds)".to_string()));
             }
         }
     }
@@ -196,7 +219,7 @@ fn print_via_cdp(
         let core = pw
             .controller()
             .CoreWebView2()
-            .map_err(|e| format!("获取 WebView 核心接口失败：{e}"))?;
+            .map_err(|e| format!("[CDP] Failed to get WebView core interface: {e}"))?;
 
         let params = format!(
             concat!(
@@ -205,19 +228,22 @@ fn print_via_cdp(
                 r#""displayHeaderFooter":true,"preferCSSPageSize":false,"#,
                 r#""generateDocumentOutline":true,"transferMode":"ReturnAsBase64","#,
                 r#""headerTemplate":"<div style=\"font-size:9px;width:100%;padding:0 0.7in;color:#8a8f98;white-space:nowrap;overflow:hidden;\"><span class=\"title\"></span></div>","#,
-                r#""footerTemplate":"<div style=\"font-size:9px;width:100%;text-align:center;color:#8a8f98;\">第 <span class=\"pageNumber\"></span> / <span class=\"totalPages\"></span> 页</div>"}}"#
+                r#""footerTemplate":"<div style=\"font-size:9px;width:100%;text-align:center;color:#8a8f98;\">Page <span class=\"pageNumber\"></span> / <span class=\"totalPages\"></span></div>"}}"#
             ),
             A4_WIDTH, A4_HEIGHT, MARGIN_INCH, MARGIN_INCH, MARGIN_INCH, MARGIN_INCH
         );
 
-        let handler: ICoreWebView2CallDevToolsProtocolMethodCompletedHandler =
-            CdpDoneHandler { path: pdf_path.to_string(), tx }.into();
+        let handler: ICoreWebView2CallDevToolsProtocolMethodCompletedHandler = CdpDoneHandler {
+            path: pdf_path.to_string(),
+            tx,
+        }
+        .into();
         core.CallDevToolsProtocolMethod(
             &HSTRING::from("Page.printToPDF"),
             &HSTRING::from(params.as_str()),
             &handler,
         )
-        .map_err(com_err)?;
+        .map_err(|e| format!("[CDP] {}", com_err(e)))?;
     }
     Ok(())
 }
@@ -232,20 +258,20 @@ fn print_via_webview2(
         let controller = pw.controller();
         let core = controller
             .CoreWebView2()
-            .map_err(|e| format!("获取 WebView 核心接口失败：{e}"))?;
+            .map_err(|e| format!("Failed to get WebView core interface: {e}"))?;
 
-        let core7: ICoreWebView2_7 = core
-            .cast()
-            .map_err(|_| "当前 WebView2 运行时过旧，不支持打印为 PDF（ICoreWebView2_7）".to_string())?;
+        let core7: ICoreWebView2_7 = core.cast().map_err(|_| {
+            "The current WebView2 runtime is too old to support printing to PDF (ICoreWebView2_7)".to_string()
+        })?;
 
-        let env6: ICoreWebView2Environment6 = pw
-            .environment()
-            .cast()
-            .map_err(|_| "当前 WebView2 运行时过旧，不支持打印设置（Environment6）".to_string())?;
+        let env6: ICoreWebView2Environment6 = pw.environment().cast().map_err(|_| {
+            "The current WebView2 runtime is too old to support print settings (Environment6)"
+                .to_string()
+        })?;
 
         let settings = env6
             .CreatePrintSettings()
-            .map_err(|e| format!("创建打印设置失败：{e}"))?;
+            .map_err(|e| format!("Failed to create print settings: {e}"))?;
 
         // A4 + 边距 + 打印背景色（代码块/表头底色必须保留）+ 页眉页脚
         settings.SetPageWidth(A4_WIDTH).map_err(com_err)?;
@@ -258,8 +284,12 @@ fn print_via_webview2(
         // 原生接口只能整体开关页眉页脚，样式与内容由 WebView2 固定（页脚含页码，
         // 同时会带上日期与临时文件 URL），不支持 CDP 那套自定义模板。
         // 这里仍开启，是为了「宁可样式差一点，也别丢了页码」——该分支只在 CDP 整体失败时走到。
-        settings.SetShouldPrintHeaderAndFooter(true).map_err(com_err)?;
-        settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT).map_err(com_err)?;
+        settings
+            .SetShouldPrintHeaderAndFooter(true)
+            .map_err(com_err)?;
+        settings
+            .SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT)
+            .map_err(com_err)?;
         settings.SetScaleFactor(1.0).map_err(com_err)?;
 
         let handler: ICoreWebView2PrintToPdfCompletedHandler = PrintDoneHandler { tx }.into();
@@ -271,5 +301,5 @@ fn print_via_webview2(
 }
 
 fn com_err(e: windows_core::Error) -> String {
-    format!("WebView2 打印接口调用失败：{e}")
+    format!("WebView2 print interface call failed: {e}")
 }

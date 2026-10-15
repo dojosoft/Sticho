@@ -75,6 +75,11 @@ export type DocxExportOptions = {
   baseDir?: string | null;
   /** Mermaid 源码 → PNG；不提供时 mermaid 代码块按普通代码块导出 */
   renderMermaid?: (code: string) => Promise<DocxImage | null>;
+  /**
+   * 取词函数（键 = 英文原文）。用于把「未能嵌入的图片说明」与占位文字并入当前界面语言；
+   * 不提供时原样返回英文键（兜底英文，与界面未覆盖处一致）。
+   */
+  t?: (key: string, vars?: Record<string, string | number>) => string;
 };
 
 export type DocxExportResult = {
@@ -84,14 +89,23 @@ export type DocxExportResult = {
   skipped: string[];
 };
 
-/** 本次导出预取的图片，key 为 img 的 src（列表项里节点被克隆也能命中） */
-let imageCache = new Map<string, DocxImage>();
-/** 本次导出预取的 Mermaid 图，key 为 mermaidKey(源码) */
-let mermaidCache = new Map<string, DocxImage>();
-/** 本次导出未能嵌入的图片 */
-let skippedImages: string[] = [];
-/** 本次导出实际嵌入的图片数 */
-let embeddedImages = 0;
+/**
+ * 单次导出的上下文：图片 / Mermaid 缓存、未嵌入清单、计数与取词函数全部装在对象里，
+ * 由 exportDocx 每次导出新建后逐层传入，避免模块级可变状态跨次导出互相污染
+ * （图片可能已被替换、Mermaid 源码也可能变了）。
+ */
+type ExportContext = {
+  /** 预取的图片，key 为 img 的 src（列表项里节点被克隆也能命中） */
+  images: Map<string, DocxImage>;
+  /** 预取的 Mermaid 图，key 为 mermaidKey(源码) */
+  mermaid: Map<string, DocxImage>;
+  /** 未能嵌入的图片说明 */
+  skipped: string[];
+  /** 实际嵌入的图片数 */
+  embedded: number;
+  /** 取词函数（缺省为英文兜底） */
+  t: (key: string, vars?: Record<string, string | number>) => string;
+};
 
 /** Mermaid 缓存 key：预取与 PRE 分支必须用同一口径取值 */
 function mermaidKey(code: string): string {
@@ -138,7 +152,7 @@ async function measureImage(
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const el = new Image();
       el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error("图片解码失败"));
+      el.onerror = () => reject(new Error("image decode failed"));
       el.src = url;
     });
     if (!img.naturalWidth || !img.naturalHeight) return null;
@@ -158,8 +172,8 @@ function scaledSize(image: DocxImage): { width: number; height: number } {
 }
 
 /** 构造可嵌入的 ImageRun（尺寸已按正文宽度缩放） */
-function imageRun(image: DocxImage, alt: string): ImageRun {
-  embeddedImages++;
+function imageRun(ctx: ExportContext, image: DocxImage, alt: string): ImageRun {
+  ctx.embedded++;
   return new ImageRun({
     type: image.type,
     data: image.data,
@@ -174,17 +188,11 @@ function imageRun(image: DocxImage, alt: string): ImageRun {
  * 远端地址刻意不下载：本程序面向涉密环境，导出过程不发起任何网络请求，
  * 这类图片一律回落成占位文字，并在导出结果里说明原因。
  */
-async function prefetchImages(dom: Document, options: DocxExportOptions): Promise<void> {
-  imageCache = new Map();
-  mermaidCache = new Map();
-  skippedImages = [];
-  embeddedImages = 0;
-
+async function prefetchImages(dom: Document, options: DocxExportOptions, ctx: ExportContext): Promise<void> {
   for (const img of Array.from(dom.querySelectorAll("img"))) {
     const src = img.getAttribute("src") ?? "";
-    const alt = img.getAttribute("alt") || "无描述";
-    const label = `[图片：${alt}]`;
-    if (imageCache.has(src)) continue; // 同一张图重复引用只读一次
+    const alt = img.getAttribute("alt") || ctx.t("No description");
+    if (ctx.images.has(src)) continue; // 同一张图重复引用只读一次
 
     const kind = classifyImageSrc(src);
     if (kind === "data") {
@@ -192,40 +200,44 @@ async function prefetchImages(dom: Document, options: DocxExportOptions): Promis
       const type = payload ? docxImageType(payload.mime) : null;
       const size = payload && type ? await measureImage(payload.bytes, payload.mime) : null;
       if (!payload || !type || !size) {
-        skippedImages.push(`${label}（格式不支持，仅支持 PNG/JPG/GIF/BMP）`);
+        ctx.skipped.push(ctx.t("[Image: {alt}] (unsupported format; only PNG/JPG/GIF/BMP)", { alt }));
         continue;
       }
-      imageCache.set(src, { data: payload.bytes, ...size, type });
+      ctx.images.set(src, { data: payload.bytes, ...size, type });
       continue;
     }
 
     if (kind === "absolute" || kind === "relative") {
       const local = resolveLocalImagePath(decodeSrcPath(src), options.baseDir ?? null);
       if (!local) {
-        skippedImages.push(`${label}（文档尚未保存，无法解析相对路径）`);
+        ctx.skipped.push(ctx.t("[Image: {alt}] (save the document first to resolve relative paths)", { alt }));
         continue;
       }
       const type = docxImageType(local);
       if (!type) {
-        skippedImages.push(`${label}（格式不支持，仅支持 PNG/JPG/GIF/BMP）`);
+        ctx.skipped.push(ctx.t("[Image: {alt}] (unsupported format; only PNG/JPG/GIF/BMP)", { alt }));
         continue;
       }
       try {
         const bytes = base64ToBytes(await readImageBase64(local));
         const size = await measureImage(bytes, `image/${type === "jpg" ? "jpeg" : type}`);
         if (!size) {
-          skippedImages.push(`${label}（图片无法解码）`);
+          ctx.skipped.push(ctx.t("[Image: {alt}] (image could not be decoded)", { alt }));
           continue;
         }
-        imageCache.set(src, { data: bytes, ...size, type });
+        ctx.images.set(src, { data: bytes, ...size, type });
       } catch (e) {
-        skippedImages.push(`${label}（${e instanceof Error ? e.message : String(e)}）`);
+        ctx.skipped.push(
+          ctx.t("[Image: {alt}] ({detail})", { alt, detail: e instanceof Error ? e.message : String(e) }),
+        );
       }
       continue;
     }
 
-    skippedImages.push(
-      kind === "remote" ? `${label}（远端图片不联网下载）` : `${label}（图片地址无效）`,
+    ctx.skipped.push(
+      kind === "remote"
+        ? ctx.t("[Image: {alt}] (remote image not downloaded offline)", { alt })
+        : ctx.t("[Image: {alt}] (invalid image address)", { alt }),
     );
   }
 
@@ -234,10 +246,10 @@ async function prefetchImages(dom: Document, options: DocxExportOptions): Promis
   for (const code of blocks) {
     const source = code.textContent ?? "";
     const key = mermaidKey(source);
-    if (mermaidCache.has(key)) continue;
+    if (ctx.mermaid.has(key)) continue;
     try {
       const png = await options.renderMermaid(source.replace(/\n$/, ""));
-      if (png) mermaidCache.set(key, png);
+      if (png) ctx.mermaid.set(key, png);
     } catch {
       // 渲染失败保持代码块形态：导出不能因为一张图失败
     }
@@ -261,7 +273,7 @@ function textOf(el: Element): string {
 /** 行内元素产物：文本 / 超链接 / 嵌入图片（图片走 ImageRun） */
 type InlineChild = TextRun | ExternalHyperlink | ImageRun;
 
-function inlineRuns(el: Node, init: RunProps = {}): InlineChild[] {
+function inlineRuns(el: Node, ctx: ExportContext, init: RunProps = {}): InlineChild[] {
   const out: InlineChild[] = [];
 
   el.childNodes.forEach((child) => {
@@ -287,18 +299,18 @@ function inlineRuns(el: Node, init: RunProps = {}): InlineChild[] {
     switch (node.tagName) {
       case "STRONG":
       case "B":
-        out.push(...inlineRuns(node, { ...init, bold: true }));
+        out.push(...inlineRuns(node, ctx, { ...init, bold: true }));
         break;
       case "EM":
       case "I":
-        out.push(...inlineRuns(node, { ...init, italics: true }));
+        out.push(...inlineRuns(node, ctx, { ...init, italics: true }));
         break;
       case "DEL":
       case "S":
-        out.push(...inlineRuns(node, { ...init, strike: true }));
+        out.push(...inlineRuns(node, ctx, { ...init, strike: true }));
         break;
       case "CODE":
-        out.push(...inlineRuns(node, { ...init, code: true }));
+        out.push(...inlineRuns(node, ctx, { ...init, code: true }));
         break;
       case "A": {
         const href = node.getAttribute("href") ?? "";
@@ -312,7 +324,7 @@ function inlineRuns(el: Node, init: RunProps = {}): InlineChild[] {
             }),
           );
         } else {
-          out.push(...inlineRuns(node, init));
+          out.push(...inlineRuns(node, ctx, init));
         }
         break;
       }
@@ -321,18 +333,20 @@ function inlineRuns(el: Node, init: RunProps = {}): InlineChild[] {
         break;
       case "IMG": {
         const src = node.getAttribute("src") ?? "";
-        const alt = node.getAttribute("alt") || "无描述";
-        const image = imageCache.get(src);
+        const alt = node.getAttribute("alt") || ctx.t("No description");
+        const image = ctx.images.get(src);
         if (image) {
-          out.push(imageRun(image, alt));
+          out.push(imageRun(ctx, image, alt));
         } else {
           // 未命中预取缓存（远端图 / 不支持格式 / 文档未保存）：回落为占位文字
-          out.push(new TextRun({ text: `[图片：${alt}]`, italics: true, color: "6E7781", font: cnFont() }));
+          out.push(
+            new TextRun({ text: ctx.t("[Image: {alt}]", { alt }), italics: true, color: "6E7781", font: cnFont() }),
+          );
         }
         break;
       }
       default:
-        out.push(...inlineRuns(node, init)); // 未知行内标签：透明递归
+        out.push(...inlineRuns(node, ctx, init)); // 未知行内标签：透明递归
     }
   });
 
@@ -340,8 +354,8 @@ function inlineRuns(el: Node, init: RunProps = {}): InlineChild[] {
 }
 
 /** 表头单元格变体：内容整体加粗 */
-function inlineRunsBold(el: Node): InlineChild[] {
-  return inlineRuns(el, { bold: true });
+function inlineRunsBold(el: Node, ctx: ExportContext): InlineChild[] {
+  return inlineRuns(el, ctx, { bold: true });
 }
 
 // ---- 块级元素 → (Paragraph | Table)[] ----
@@ -355,14 +369,7 @@ const HEADING_MAP: Record<string, (typeof HeadingLevel)[keyof typeof HeadingLeve
   H6: HeadingLevel.HEADING_6,
 };
 
-function alignOf(el: Element): (typeof AlignmentType)[keyof typeof AlignmentType] | undefined {
-  const style = el.getAttribute("style") ?? "";
-  if (style.includes("text-align:center")) return AlignmentType.CENTER;
-  if (style.includes("text-align:right")) return AlignmentType.RIGHT;
-  return undefined;
-}
-
-function renderBlocks(parent: Node, listLevel = 0, inQuote = false): (Paragraph | Table)[] {
+function renderBlocks(ctx: ExportContext, parent: Node, listLevel = 0, inQuote = false): (Paragraph | Table)[] {
   const out: (Paragraph | Table)[] = [];
 
   // 引用块段落样式：整体缩进 + 左侧竖线
@@ -393,8 +400,7 @@ function renderBlocks(parent: Node, listLevel = 0, inQuote = false): (Paragraph 
         out.push(
           new Paragraph({
             heading: HEADING_MAP[el.tagName],
-            alignment: alignOf(el),
-            children: inlineRuns(el),
+            children: inlineRuns(el, ctx),
           }),
         );
         break;
@@ -404,7 +410,7 @@ function renderBlocks(parent: Node, listLevel = 0, inQuote = false): (Paragraph 
         // 正文默认字号 10.5pt，2 字符 = 420 twips；firstLineChars 让 Word 按「2 字符」识别。
         const bodyIndent = inQuote ? {} : { indent: { firstLine: 420, firstLineChars: 200 } };
         out.push(
-          new Paragraph({ alignment: alignOf(el), children: inlineRuns(el), ...bodyIndent, ...quoteStyle }),
+          new Paragraph({ children: inlineRuns(el, ctx), ...bodyIndent, ...quoteStyle }),
         );
         break;
       }
@@ -412,12 +418,12 @@ function renderBlocks(parent: Node, listLevel = 0, inQuote = false): (Paragraph 
       // ---- 列表（嵌套递归）----
       case "UL":
       case "OL":
-        renderList(el, listLevel, out);
+        renderList(ctx, el, listLevel, out);
         break;
 
       // ---- 引用块：递归时带上引用样式 ----
       case "BLOCKQUOTE":
-        out.push(...renderBlocks(el, listLevel, true));
+        out.push(...renderBlocks(ctx, el, listLevel, true));
         break;
 
       // ---- 代码块：等宽 + 灰底 + 细框（相邻段落边框在 Word 中融合为一块）----
@@ -427,13 +433,13 @@ function renderBlocks(parent: Node, listLevel = 0, inQuote = false): (Paragraph 
         const isMermaid = !!codeEl?.classList.contains("language-mermaid");
         if (isMermaid) {
           const source = codeEl?.textContent ?? el.textContent ?? "";
-          const mermaid = mermaidCache.get(mermaidKey(source));
+          const mermaid = ctx.mermaid.get(mermaidKey(source));
           if (mermaid) {
             out.push(
               new Paragraph({
                 alignment: AlignmentType.CENTER,
                 spacing: { before: 120, after: 120 },
-                children: [imageRun(mermaid, "Mermaid 图")],
+                children: [imageRun(ctx, mermaid, ctx.t("Mermaid Diagram"))],
               }),
             );
             break;
@@ -464,7 +470,7 @@ function renderBlocks(parent: Node, listLevel = 0, inQuote = false): (Paragraph 
       }
 
       case "TABLE":
-        out.push(renderTable(el));
+        out.push(renderTable(el, ctx));
         break;
 
       // ---- 水平线：空段落 + 底边框 ----
@@ -478,7 +484,7 @@ function renderBlocks(parent: Node, listLevel = 0, inQuote = false): (Paragraph 
         break;
 
       default:
-        out.push(...renderBlocks(el, listLevel));
+        out.push(...renderBlocks(ctx, el, listLevel));
     }
   });
 
@@ -486,7 +492,7 @@ function renderBlocks(parent: Node, listLevel = 0, inQuote = false): (Paragraph 
 }
 
 /** 列表：li 的子节点拆成「行内内容」与「嵌套子列表」分别处理 */
-function renderList(listEl: Element, level: number, out: (Paragraph | Table)[]): void {
+function renderList(ctx: ExportContext, listEl: Element, level: number, out: (Paragraph | Table)[]): void {
   const ordered = listEl.tagName === "OL";
 
   Array.from(listEl.children)
@@ -499,7 +505,7 @@ function renderList(listEl: Element, level: number, out: (Paragraph | Table)[]):
         holder.appendChild(c.cloneNode(true));
       });
 
-      const runs = inlineRuns(holder);
+      const runs = inlineRuns(holder, ctx);
       out.push(
         new Paragraph({
           children: runs.length ? runs : [new TextRun({ text: "", font: cnFont() })],
@@ -512,26 +518,31 @@ function renderList(listEl: Element, level: number, out: (Paragraph | Table)[]):
       // 嵌套子列表
       Array.from(li.children)
         .filter((c) => c.tagName === "UL" || c.tagName === "OL")
-        .forEach((sub) => renderList(sub, level + 1, out));
+        .forEach((sub) => renderList(ctx, sub, level + 1, out));
     });
 }
 
-function renderTable(tableEl: Element): Table {
+function renderTable(tableEl: Element, ctx: ExportContext): Table {
   const rows: TableRow[] = [];
 
-  Array.from(tableEl.querySelectorAll("tr")).forEach((tr, rowIndex) => {
-    const isHeader = rowIndex === 0;
+  // 只取本表的「直接行」：markdown-it 会把表头放在 thead、正文放在 tbody，
+  // 用 :scope 限定层级可避免把单元格里嵌套表格的行也一并吞进来。
+  const trs = Array.from(
+    tableEl.querySelectorAll(":scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr, :scope > tr"),
+  );
+  trs.forEach((tr) => {
+    // 表头按是否含 th 判定（而非「第一行」），嵌套结构下也更稳
+    const isHeader = tr.querySelector(":scope > th") !== null;
     const cells: TableCell[] = [];
 
-    Array.from(tr.querySelectorAll("th, td")).forEach((cell) => {
+    Array.from(tr.querySelectorAll(":scope > th, :scope > td")).forEach((cell) => {
       cells.push(
         new TableCell({
           shading: isHeader ? { fill: "EFF2F5" } : undefined,
           margins: { top: 80, bottom: 80, left: 120, right: 120 },
           children: [
             new Paragraph({
-              alignment: alignOf(cell),
-              children: isHeader ? inlineRunsBold(cell) : inlineRuns(cell),
+              children: isHeader ? inlineRunsBold(cell, ctx) : inlineRuns(cell, ctx),
             }),
           ],
         }),
@@ -571,55 +582,55 @@ export async function exportDocx(
 ): Promise<DocxExportResult> {
   const html = md.render(markdown);
   const dom = new DOMParser().parseFromString(html, "text/html");
+  // 每次导出新建上下文，缓存与计数不跨次复用
+  const ctx: ExportContext = {
+    images: new Map(),
+    mermaid: new Map(),
+    skipped: [],
+    embedded: 0,
+    t: options.t ?? ((key) => key),
+  };
 
-  try {
-    // 渲染阶段是同步的，图片字节与 Mermaid 图必须在这里先备好
-    await prefetchImages(dom, options);
-    const blocks = renderBlocks(dom.body);
+  // 渲染阶段是同步的，图片字节与 Mermaid 图必须在这里先备好
+  await prefetchImages(dom, options, ctx);
+  const blocks = renderBlocks(ctx, dom.body);
 
-    const doc = new DocxDocument({
-      styles: {
-        default: {
-          document: {
-            run: { font: cnFont(), size: 21, color: TEXT_COLOR }, // 10.5pt ≈ 五号
-            paragraph: { spacing: { line: 312, after: 120 } }, // 1.3 倍行距，段后 6pt
-          },
-          // 标题样式中文字体三处齐设（否则标题中文回落宋体）
-          heading1: { run: { font: cnFont(), size: 36, bold: true, color: "0A3069" } },
-          heading2: { run: { font: cnFont(), size: 32, bold: true, color: "0550AE" } },
-          heading3: { run: { font: cnFont(), size: 28, bold: true, color: TEXT_COLOR } },
-          heading4: { run: { font: cnFont(), size: 24, bold: true, color: TEXT_COLOR } },
-          heading5: { run: { font: cnFont(), size: 22, bold: true, color: TEXT_COLOR } },
-          heading6: { run: { font: cnFont(), size: 20, bold: true, color: "6E7781" } },
+  const doc = new DocxDocument({
+    styles: {
+      default: {
+        document: {
+          run: { font: cnFont(), size: 21, color: TEXT_COLOR }, // 10.5pt ≈ 五号
+          paragraph: { spacing: { line: 312, after: 120 } }, // 1.3 倍行距，段后 6pt
         },
+        // 标题样式中文字体三处齐设（否则标题中文回落宋体）
+        heading1: { run: { font: cnFont(), size: 36, bold: true, color: "0A3069" } },
+        heading2: { run: { font: cnFont(), size: 32, bold: true, color: "0550AE" } },
+        heading3: { run: { font: cnFont(), size: 28, bold: true, color: TEXT_COLOR } },
+        heading4: { run: { font: cnFont(), size: 24, bold: true, color: TEXT_COLOR } },
+        heading5: { run: { font: cnFont(), size: 22, bold: true, color: TEXT_COLOR } },
+        heading6: { run: { font: cnFont(), size: 20, bold: true, color: "6E7781" } },
       },
-      numbering: {
-        config: [
-          {
-            reference: "md-ordered",
-            levels: [0, 1, 2, 3].map((i) => ({
-              level: i,
-              format: LevelFormat.DECIMAL,
-              text: `%${i + 1}.`,
-              alignment: AlignmentType.START,
-              style: { paragraph: { indent: { left: 720 + 480 * i, hanging: 360 } } },
-            })),
-          },
-        ],
-      },
-      sections: [{ children: blocks }],
-    });
+    },
+    numbering: {
+      config: [
+        {
+          reference: "md-ordered",
+          levels: [0, 1, 2, 3].map((i) => ({
+            level: i,
+            format: LevelFormat.DECIMAL,
+            text: `%${i + 1}.`,
+            alignment: AlignmentType.START,
+            style: { paragraph: { indent: { left: 720 + 480 * i, hanging: 360 } } },
+          })),
+        },
+      ],
+    },
+    sections: [{ children: blocks }],
+  });
 
-    const blob = await Packer.toBlob(doc);
-    await writeFileBase64(path, await blobToBase64(blob));
-    return { embedded: embeddedImages, skipped: [...skippedImages] };
-  } finally {
-    // 缓存不跨次导出复用：图片可能已被替换，Mermaid 也可能改了源码
-    imageCache = new Map();
-    mermaidCache = new Map();
-    skippedImages = [];
-    embeddedImages = 0;
-  }
+  const blob = await Packer.toBlob(doc);
+  await writeFileBase64(path, await blobToBase64(blob));
+  return { embedded: ctx.embedded, skipped: [...ctx.skipped] };
 }
 
 /** Blob → base64（分块避免 String.fromCharCode 参数上限） */

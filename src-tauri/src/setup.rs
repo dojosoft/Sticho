@@ -48,7 +48,7 @@ pub fn ensure_webview2_or_exit() {
     // 已自动装过一轮仍检测不到：不再重复自动安装，直接引导到官网（防死循环）
     if std::env::var_os(RETRY_GUARD).is_some() {
         if message_box(
-            "仍未检测到 WebView2 运行时，程序无法启动。\n\n是否打开官方下载页面手动安装？",
+            "The WebView2 runtime is still not detected; the program cannot start.\n\nOpen the official download page to install it manually?",
             BoxIcon::Error,
             true,
         ) {
@@ -58,9 +58,9 @@ pub fn ensure_webview2_or_exit() {
     }
 
     let auto_install = message_box(
-        "本程序需要「Microsoft Edge WebView2 运行时」，但在当前系统中未检测到。\n\n\
-         · 选择「是」：自动下载并静默安装（约 2MB，需要联网）\n\
-         · 选择「否」：打开官方下载页面手动安装",
+        "This program requires the \"Microsoft Edge WebView2 Runtime\", but it was not detected on the current system.\n\n\
+         · Choose \"Yes\": download and install it silently (about 2 MB, requires internet)\n\
+         · Choose \"No\": open the official download page to install it manually",
         BoxIcon::Warning,
         true,
     );
@@ -72,13 +72,13 @@ pub fn ensure_webview2_or_exit() {
 
     match install_webview2() {
         Ok(()) => {
-            info_box("WebView2 运行时安装完成，程序即将重新启动。");
+            info_box("The WebView2 runtime has been installed; the program will restart shortly.");
             relaunch_and_exit();
         }
         Err(e) => {
             // 自动安装失败 → 转跳官网下载页（需求要求的兜底出口）
             let go = message_box(
-                &format!("自动安装 WebView2 失败：\n{e}\n\n是否打开官方下载页面手动安装？"),
+                &format!("Failed to install WebView2 automatically:\n{e}\n\nOpen the official download page to install it manually?"),
                 BoxIcon::Error,
                 true,
             );
@@ -250,36 +250,59 @@ fn read_reg_string(
 /// 下载 Evergreen Bootstrapper 并静默安装，装完以注册表为准复验。
 #[cfg(windows)]
 fn install_webview2() -> Result<(), String> {
-    let setup = std::env::temp_dir().join("MicrosoftEdgeWebview2Setup.exe");
+    // 固定文件名在多实例并发时会互相覆盖下载结果，用进程号区分
+    let setup = std::env::temp_dir().join(format!("MicrosoftEdgeWebview2Setup-{}.exe", std::process::id()));
     download(WEBVIEW2_BOOTSTRAPPER_URL, &setup)?;
 
     // /silent /install 是微软文档给出的静默安装参数；需要提权时系统会自行弹 UAC。
     let status = new_command(&setup)
         .args(["/silent", "/install"])
         .status()
-        .map_err(|e| format!("无法运行安装程序：{e}"))?;
+        .map_err(|e| format!("Failed to run the installer: {e}"))?;
     let _ = std::fs::remove_file(&setup); // 清理下载到的安装包
 
     if !status.success() {
-        return Err(format!("安装程序返回失败（退出码 {:?}）", status.code()));
+        return Err(format!(
+            "The installer reported failure (exit code {:?})",
+            status.code()
+        ));
     }
     // 装没装上不轻信安装程序的返回值，以上述注册表检测为准
     Ok(())
 }
 
-/// 下载单个 URL 到文件（带超时与状态码校验）
+/// 下载体积上限：WebView2 引导安装包约 2MB，给足余量取 8MB。
+///
+/// 设上限的原因：`ureq` 默认无长度限制，若 URL 被劫持 / 被重定向到超大文件（或对方
+/// 返回无限流），`io::copy` 会一直写盘直到磁盘写满并长时间占用带宽。
+#[cfg(windows)]
+const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 下载单个 URL 到文件（带超时、状态码与体积上限校验）
 #[cfg(windows)]
 fn download(url: &str, dest: &Path) -> Result<(), String> {
     let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(300))
         .call()
-        .map_err(|e| format!("下载失败（请检查网络连接）：{e}"))?;
+        .map_err(|e| format!("Download failed (please check your network connection): {e}"))?;
     if resp.status() != 200 {
-        return Err(format!("下载失败（HTTP {}）", resp.status()));
+        return Err(format!("Download failed (HTTP {})", resp.status()));
     }
-    let mut reader = resp.into_reader();
-    let mut file = std::fs::File::create(dest).map_err(|e| format!("创建临时文件失败：{e}"))?;
-    std::io::copy(&mut reader, &mut file).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    use std::io::Read as _;
+    // 多读 1 字节：正好读到上限即说明被截断，据此判定「超限」而不是「恰好等于上限」
+    let mut reader = resp.into_reader().take(MAX_DOWNLOAD_BYTES + 1);
+    let mut file =
+        std::fs::File::create(dest).map_err(|e| format!("Failed to create temporary file: {e}"))?;
+    let written = std::io::copy(&mut reader, &mut file)
+        .map_err(|e| format!("Failed to write temporary file: {e}"))?;
+    drop(file);
+    if written > MAX_DOWNLOAD_BYTES {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!(
+            "Downloaded file exceeds the {} MB limit; download aborted",
+            MAX_DOWNLOAD_BYTES / 1024 / 1024
+        ));
+    }
     Ok(())
 }
 

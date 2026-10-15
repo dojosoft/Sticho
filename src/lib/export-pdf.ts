@@ -20,15 +20,50 @@ import { applyAutoSpace } from "./typography";
 const md = new MarkdownIt({ html: false, linkify: true });
 applyAutoSpace(md);
 
+/** 导出源类型：与打印（print.ts 的 PrintKind）一致，HTML / 纯文本不能被当 Markdown 渲染 */
+export type ExportKind = "markdown" | "html" | "code";
+
 /**
  * 导出 PDF。
  *
  * `title` 为文档主名，写入打印 HTML 的 `<title>`，由页眉模板取出显示。
+ * `locale` 写入 `<html lang>`，让打印环境按界面语言排版（标点、断行规则）。
+ * `kind` 决定正文怎么来：HTML 文档必须原样出 HTML（否则标签会被转义成源码文本），
+ * 纯文本文件按等宽纯文本出，只有 Markdown 才走渲染。
  */
-export async function exportPdf(path: string, markdown: string, title = ""): Promise<void> {
-  const body = md.render(markdown);
-  const html = buildPrintHtml(body, title);
+export async function exportPdf(
+  path: string,
+  source: string,
+  title = "",
+  locale = "zh-CN",
+  kind: ExportKind = "markdown",
+): Promise<void> {
+  const body =
+    kind === "html"
+      ? sanitizeHtmlBody(source)
+      : kind === "code"
+        ? `<pre class="plain">${escapeHtml(source)}</pre>`
+        : md.render(source);
+  const html = buildPrintHtml(body, title, locale);
   await invoke("export_pdf", { path, htmlB64: toBase64(new TextEncoder().encode(html)) });
+}
+
+/**
+ * HTML 文档导出前的净化。
+ *
+ * Rust 侧会把这份 HTML 落成临时文件交给隐藏 WebView 渲染，而本应用 CSP 允许 inline
+ * 脚本、隐藏窗口同样会执行它们，所以先摘掉 `<script>` 与 `on*` 事件属性——
+ * 只留下结构与样式，导出结果与「打印」看到的一致。
+ */
+function sanitizeHtmlBody(source: string): string {
+  const doc = new DOMParser().parseFromString(source, "text/html");
+  doc.querySelectorAll("script, noscript").forEach((el) => el.remove());
+  doc.querySelectorAll("*").forEach((el) => {
+    for (const attr of Array.from(el.attributes)) {
+      if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
+    }
+  });
+  return doc.body ? doc.body.innerHTML : "";
 }
 
 /** HTML 文本转义（title 里可能出现 `&` `<` 等字符） */
@@ -41,9 +76,9 @@ function escapeHtml(text: string): string {
 }
 
 /** 完整打印文档：A4 纵向 + 中文排版 + 分页控制。导出 PDF 与「打印」共用同一份样式 */
-export function buildPrintHtml(bodyHtml: string, title: string): string {
+export function buildPrintHtml(bodyHtml: string, title: string, locale = "zh-CN"): string {
   return `<!doctype html>
-<html lang="zh-CN">
+<html lang="${escapeHtml(locale)}">
 <head>
 <meta charset="utf-8">
 <title>${escapeHtml(title)}</title>

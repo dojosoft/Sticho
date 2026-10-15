@@ -20,7 +20,8 @@ use tauri::AppHandle;
 
 /// Pandoc 官方发行包（GitHub Releases，固定版本保证可复现）
 const PANDOC_VERSION: &str = "3.6.3";
-const PANDOC_RELEASE_PATH: &str = "jgm/pandoc/releases/download/3.6.3/pandoc-3.6.3-windows-x86_64.zip";
+const PANDOC_RELEASE_PATH: &str =
+    "jgm/pandoc/releases/download/3.6.3/pandoc-3.6.3-windows-x86_64.zip";
 /// 下载源列表：官方 GitHub 直连优先，失败后回落公共加速镜像（部分网络环境无法直连 GitHub）
 const PANDOC_DOWNLOAD_URLS: [&str; 3] = [
     "https://github.com",
@@ -89,7 +90,10 @@ pub async fn check_pandoc(app: AppHandle) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || {
         let pandoc = find_pandoc(&app)?;
         let out = command(&pandoc).arg("--version").output().ok()?;
-        String::from_utf8_lossy(&out.stdout).lines().next().map(str::to_string)
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(str::to_string)
     })
     .await
     .ok()
@@ -104,14 +108,15 @@ pub async fn check_pandoc(app: AppHandle) -> Option<String> {
 pub async fn download_pandoc(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || download_pandoc_blocking(&app))
         .await
-        .map_err(|e| format!("下载任务调度失败：{e}"))?
+        .map_err(|e| format!("Download task spawn failed: {e}"))?
 }
 
 fn download_pandoc_blocking(app: &AppHandle) -> Result<String, String> {
     let data_dir = crate::commands::config::data_root(app)
-        .map_err(|e| format!("无法定位用户数据目录：{e}"))?;
+        .map_err(|e| format!("Failed to locate user data directory: {e}"))?;
     let pandoc_dir = data_dir.join("pandoc");
-    fs::create_dir_all(&pandoc_dir).map_err(|e| format!("创建 pandoc 目录失败：{e}"))?;
+    fs::create_dir_all(&pandoc_dir)
+        .map_err(|e| format!("Failed to create pandoc directory: {e}"))?;
 
     let target = pandoc_dir.join("pandoc.exe");
     if target.exists() {
@@ -134,7 +139,9 @@ fn download_pandoc_blocking(app: &AppHandle) -> Result<String, String> {
     }
     if !ok {
         let _ = fs::remove_file(&zip_path); // 清掉可能残留的半包
-        return Err(format!("下载失败（官方与镜像源均不可达）：{last_err}"));
+        return Err(format!(
+            "Download failed (both the official and mirror sources are unreachable): {last_err}"
+        ));
     }
 
     // 2. 校验 SHA256：加速镜像若被投毒，哈希必然不匹配，从而拒绝安装与执行
@@ -142,26 +149,30 @@ fn download_pandoc_blocking(app: &AppHandle) -> Result<String, String> {
     if !actual.eq_ignore_ascii_case(PANDOC_ZIP_SHA256) {
         let _ = fs::remove_file(&zip_path);
         return Err(format!(
-            "下载包校验失败（SHA256 不匹配），已中止安装以避免执行被篡改的程序：期望 {PANDOC_ZIP_SHA256}，实际 {actual}"
+            "Download package verification failed (SHA256 mismatch); installation aborted to avoid running a tampered program: expected {PANDOC_ZIP_SHA256}, actual {actual}"
         ));
     }
 
     // 3. 解压出 pandoc.exe（流式落盘，避免把上百 MB 的 exe 整个读进内存）
-    let file = fs::File::open(&zip_path).map_err(|e| format!("打开下载包失败：{e}"))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("下载包损坏（zip 解析失败）：{e}"))?;
+    let file =
+        fs::File::open(&zip_path).map_err(|e| format!("Failed to open download package: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Download package is corrupted (zip parse failed): {e}"))?;
 
     let mut found = false;
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("读取下载包失败：{e}"))?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read download package: {e}"))?;
         if entry.name().replace('\\', "/").ends_with("pandoc.exe") {
-            let mut out =
-                fs::File::create(&target).map_err(|e| format!("写入 pandoc.exe 失败：{e}"))?;
+            let mut out = fs::File::create(&target)
+                .map_err(|e| format!("Failed to write pandoc.exe: {e}"))?;
             let copied = std::io::copy(&mut entry, &mut out).and_then(|_| out.flush());
             drop(out);
             if let Err(e) = copied {
                 // 解压失败不能留下半截 exe：否则下次启动会误判成「已安装」
                 let _ = fs::remove_file(&target);
-                return Err(format!("解压 pandoc 失败：{e}"));
+                return Err(format!("Failed to extract pandoc: {e}"));
             }
             found = true;
             break;
@@ -170,27 +181,34 @@ fn download_pandoc_blocking(app: &AppHandle) -> Result<String, String> {
     let _ = fs::remove_file(&zip_path); // 清理下载包
 
     if !found {
-        return Err("下载包结构异常（未找到 pandoc.exe）".to_string());
+        return Err("Unexpected download package structure (pandoc.exe not found)".to_string());
     }
 
     // 4. 验证可执行
     let out = command(&target).arg("--version").output().map_err(|e| {
-        format!("pandoc.exe 无法运行（可能被安全软件拦截）：{e}")
+        format!("pandoc.exe cannot run (it may be blocked by security software): {e}")
     })?;
     if !out.status.success() {
-        return Err("pandoc.exe 运行异常".to_string());
+        return Err("pandoc.exe exited with an error".to_string());
     }
-    let first = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(PANDOC_VERSION).to_string();
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or(PANDOC_VERSION)
+        .to_string();
     Ok(first)
 }
 
 /// 计算文件 SHA256（十六进制小写；分块读，避免整包进内存）。
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|e| format!("读取下载包失败：{e}"))?;
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("Failed to read download package: {e}"))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf).map_err(|e| format!("读取下载包失败：{e}"))?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("Failed to read download package: {e}"))?;
         if n == 0 {
             break;
         }
@@ -204,19 +222,26 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     let resp = ureq::get(url)
         .timeout(DOWNLOAD_TIMEOUT)
         .call()
-        .map_err(|e| format!("下载失败（检查网络连接）：{e}"))?;
+        .map_err(|e| format!("Download failed (check your network connection): {e}"))?;
     if resp.status() != 200 {
-        return Err(format!("下载失败（HTTP {}）", resp.status()));
+        return Err(format!("Download failed (HTTP {})", resp.status()));
     }
     let mut reader = resp.into_reader();
-    let mut file = fs::File::create(dest).map_err(|e| format!("创建临时下载文件失败：{e}"))?;
+    let mut file = fs::File::create(dest)
+        .map_err(|e| format!("Failed to create temporary download file: {e}"))?;
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("下载中断：{e}"))?;
-        if n == 0 { break; }
-        file.write_all(&buf[..n]).map_err(|e| format!("写入下载文件失败：{e}"))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("Download interrupted: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n])
+            .map_err(|e| format!("Failed to write download file: {e}"))?;
     }
-    file.flush().map_err(|e| format!("写入下载文件失败：{e}"))?;
+    file.flush()
+        .map_err(|e| format!("Failed to write download file: {e}"))?;
     Ok(())
 }
 
@@ -229,31 +254,52 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
 pub async fn import_docx(app: AppHandle, path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || import_docx_blocking(&app, &path))
         .await
-        .map_err(|e| format!("任务调度失败：{e}"))?
+        .map_err(|e| format!("Task spawn failed: {e}"))?
 }
 
 fn import_docx_blocking(app: &AppHandle, path: &str) -> Result<String, String> {
-    let pandoc = find_pandoc(app).ok_or("Pandoc 未安装（请先点击下载）")?;
+    let pandoc = find_pandoc(app).ok_or("Pandoc is not installed (please click download first)")?;
     let src = Path::new(path);
     if !src.exists() {
-        return Err(format!("文件不存在：{path}"));
+        return Err(format!("File does not exist: {path}"));
     }
 
     // 临时工作目录（--extract-media 的媒体输出位置）
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let work = std::env::temp_dir().join(format!("sticho-import-{nanos}"));
-    fs::create_dir_all(&work).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    fs::create_dir_all(&work).map_err(|e| format!("Failed to create temporary directory: {e}"))?;
 
     // 带超时的子进程调用（线程 + 通道，避免卡死主线程）
     let mut cmd = command(&pandoc);
-    cmd.args(["-f", "docx", "-t", "gfm", "--wrap=none", "--extract-media=media"])
-        .arg(path)
-        .current_dir(&work);
-    let out = run_with_timeout(cmd, PANDOC_TIMEOUT)?;
+    cmd.args([
+        "-f",
+        "docx",
+        "-t",
+        "gfm",
+        "--wrap=none",
+        "--extract-media=media",
+    ])
+    .arg(path)
+    .current_dir(&work);
+    let out = match run_with_timeout(cmd, PANDOC_TIMEOUT) {
+        Ok(out) => out,
+        Err(e) => {
+            // 超时/启动失败同样要清临时媒体，否则每次失败都在 %TEMP% 里留一份
+            let _ = fs::remove_dir_all(&work);
+            return Err(e);
+        }
+    };
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("Pandoc 转换失败：{}", stderr.trim().chars().take(300).collect::<String>()));
+        let _ = fs::remove_dir_all(&work); // 转换失败也要清临时媒体
+        return Err(format!(
+            "Pandoc conversion failed: {}",
+            stderr.trim().chars().take(300).collect::<String>()
+        ));
     }
 
     let md = String::from_utf8_lossy(&out.stdout).to_string();
@@ -293,7 +339,7 @@ pub async fn export_pandoc(
         export_pandoc_blocking(&app, &path, &content, &kind, base.as_deref())
     })
     .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
+    .map_err(|e| format!("Task spawn failed: {e}"))?
 }
 
 fn export_pandoc_blocking(
@@ -303,16 +349,27 @@ fn export_pandoc_blocking(
     kind: &str,
     base: Option<&str>,
 ) -> Result<(), String> {
-    let (to, extra) = export_target(kind).ok_or_else(|| format!("不支持的导出格式：{kind}"))?;
-    let pandoc = find_pandoc(app).ok_or("Pandoc 未安装（请先在「文件 → 导入 Word」中点击下载）")?;
+    let (to, extra) =
+        export_target(kind).ok_or_else(|| format!("Unsupported export format: {kind}"))?;
+    let pandoc = find_pandoc(app).ok_or(
+        "Pandoc is not installed (please click download in \"File -> Import Word\" first)",
+    )?;
 
     // 正文落临时文件（pandoc 从文件读，避免命令行长度与编码问题）
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let tmp_md = std::env::temp_dir().join(format!("sticho-export-{nanos}.md"));
-    fs::write(&tmp_md, content.as_bytes()).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    fs::write(&tmp_md, content.as_bytes())
+        .map_err(|e| format!("Failed to write temporary file: {e}"))?;
 
     let mut cmd = command(&pandoc);
-    cmd.args(["-f", "gfm", "-t", to]).args(extra).arg(&tmp_md).arg("-o").arg(path);
+    cmd.args(["-f", "gfm", "-t", to])
+        .args(extra)
+        .arg(&tmp_md)
+        .arg("-o")
+        .arg(path);
     if let Some(dir) = base.filter(|d| !d.is_empty()) {
         cmd.current_dir(dir);
     }
@@ -322,7 +379,10 @@ fn export_pandoc_blocking(
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("Pandoc 导出失败：{}", stderr.trim().chars().take(300).collect::<String>()));
+        return Err(format!(
+            "Pandoc export failed: {}",
+            stderr.trim().chars().take(300).collect::<String>()
+        ));
     }
     Ok(())
 }
@@ -333,9 +393,9 @@ fn export_pandoc_blocking(
 /// 只做 `join()` 而不杀进程会让本函数永不返回（进而冻结调用它的命令）。
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process::Output, String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("启动 Pandoc 失败（可能被安全软件拦截）：{e}"))?;
+    let child = cmd.spawn().map_err(|e| {
+        format!("Failed to start Pandoc (it may be blocked by security software): {e}")
+    })?;
     let pid = child.id();
 
     let (tx, rx) = mpsc::channel();
@@ -346,11 +406,11 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
 
     match rx.recv_timeout(timeout) {
         Ok(Ok(out)) => Ok(out),
-        Ok(Err(e)) => Err(format!("等待 Pandoc 失败：{e}")),
+        Ok(Err(e)) => Err(format!("Failed to wait for Pandoc: {e}")),
         Err(_) => {
             kill_tree(pid);
             let _ = handle.join(); // 进程已终止，等待线程随即返回
-            Err("Pandoc 转换超时（60 秒），已终止子进程；请检查文档是否损坏".to_string())
+            Err("Pandoc conversion timed out (60 seconds); the child process has been terminated. Please check whether the document is corrupted".to_string())
         }
     }
 }
@@ -368,6 +428,25 @@ fn kill_tree(pid: u32) {
 #[cfg(not(windows))]
 fn kill_tree(pid: u32) {
     let _ = command("kill").args(["-9", &pid.to_string()]).status();
+}
+
+/// 把 pandoc 输出里的相对媒体引用安全地解析到 `base` 之内。
+///
+/// `rel` 直接来自 pandoc 输出的正文，未校验就 `base.join(rel)` 会有目录穿越面：
+/// 恶意 docx 可让关系目标写成 `media/../../…`，读盘后内容以 data URI 回传前端。
+/// 这里只接受普通相对片段（拒绝绝对/盘符前缀、`.`、`..`、空段），并对结果
+/// `canonicalize` 校验仍位于 `base` 之下，顺带挡住符号链接绕行。
+fn safe_media_path(base: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = rel.replace('\\', "/");
+    if rel.is_empty() || rel.starts_with('/') || rel.contains(':') {
+        return None;
+    }
+    if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return None;
+    }
+    let canon = base.join(&rel).canonicalize().ok()?;
+    let base_canon = base.canonicalize().ok()?;
+    canon.starts_with(&base_canon).then_some(canon)
 }
 
 /// 把 markdown 中的媒体引用内联为 data URI，覆盖两种形式：
@@ -398,18 +477,21 @@ fn replace_media_refs(md: &str, base: &Path, needle: &[u8], terminator: u8) -> S
                 }
             };
             let rel = &md[rel_start..end];
-            let file = base.join(rel);
 
-            if let Some(data_uri) = read_as_data_uri(&file) {
+            // 经安全解析后再读盘：不可信（越界）或读不到的引用一律原样保留。
+            if let Some(data_uri) = safe_media_path(base, rel).and_then(|f| read_as_data_uri(&f)) {
                 out.push_str(&md[i..rel_start]); // 前缀 ]( 或 src="
                 out.push_str(&data_uri);
-                out.push(md[end..].chars().next().unwrap()); // 终止符 ) 或 "
+                out.push(terminator as char); // 终止符 ) 或 "（ASCII，按字节取即可，不再对切片取字符）
             } else {
                 out.push_str(&md[i..end + 1]); // 原样保留
             }
             i = end + 1;
         } else {
-            let ch = md[i..].chars().next().unwrap();
+            // i 始终落在字符边界上（推进方式见上），此处必有字符；用 let-else 代替 unwrap
+            let Some(ch) = md[i..].chars().next() else {
+                break;
+            };
             out.push(ch);
             i += ch.len_utf8();
         }
@@ -454,9 +536,9 @@ mod tests {
         fs::create_dir_all(dir.join("media/media")).unwrap();
         // 1x1 透明 PNG
         let png: &[u8] = &[
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49,
-            0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
-            0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89,
         ];
         fs::write(dir.join("media/media/img1.png"), png).unwrap();
         // 期望的 data URI 前缀（base64 编码后内容）

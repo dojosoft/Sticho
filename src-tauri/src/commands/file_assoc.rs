@@ -106,7 +106,16 @@ const SUPPORTED_EXTS: &[(&str, &str)] = &[
 
 /// 「替代系统记事本」覆盖的扩展名：都是 Windows 记事本的典型默认处理对象。
 /// 勾选该开关即对这批扩展名批量建立关联。
-const NOTEPAD_EXTS: &[&str] = &["txt", "text", "log", "ini", "cfg", "conf", "properties", "env"];
+const NOTEPAD_EXTS: &[&str] = &[
+    "txt",
+    "text",
+    "log",
+    "ini",
+    "cfg",
+    "conf",
+    "properties",
+    "env",
+];
 
 /// 右键菜单在注册表里的位置（`*` = 所有文件）
 const CTX_KEY: &str = "Software\\Classes\\*\\shell\\Sticho";
@@ -118,6 +127,26 @@ const SHCNF_IDLIST: u32 = 0;
 extern "system" {
     /// 通知资源管理器刷新文件关联（shell32）
     fn SHChangeNotify(event: i32, flags: u32, item1: *const c_void, item2: *const c_void);
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    /// 当前用户界面语言（LANGID：低 10 位为主语言 ID，高 6 位为子语言）
+    fn GetUserDefaultUILanguage() -> u16;
+}
+
+/// `LANG_CHINESE`：LANGID 的主语言 ID（低 10 位）为 0x04 即中文（含简繁及各子语言）
+const LANG_CHINESE: u16 = 0x04;
+
+/// 右键菜单文案是否用中文：优先以操作系统当前 UI 语言为准；取不到时回落前端传入的
+/// Sticho 界面语言（zh 开头即中文，其余一律英文）。
+fn menu_label_is_chinese(locale: &str) -> bool {
+    let langid = unsafe { GetUserDefaultUILanguage() };
+    if langid != 0 {
+        (langid & 0x03FF) == LANG_CHINESE
+    } else {
+        locale.trim().to_lowercase().starts_with("zh")
+    }
 }
 
 /// 扩展名所属分组（不在清单内一律按纯文本处理）
@@ -133,7 +162,7 @@ fn group_of(ext: &str) -> &'static str {
 fn normalize(ext: &str) -> Result<String, String> {
     let ext = ext.trim_start_matches('.').to_lowercase();
     if !SUPPORTED_EXTS.iter().any(|(e, _)| *e == ext) {
-        return Err(format!("不支持的扩展名：.{ext}"));
+        return Err(format!("Unsupported extension: .{ext}"));
     }
     Ok(ext)
 }
@@ -154,13 +183,13 @@ fn ext_key(ext: &str) -> String {
 /// 资源管理器「类型」列显示的名称（按分组给一个统一的名字）
 fn friendly_name(ext: &str) -> String {
     match ext {
-        "md" | "markdown" | "mdx" => "Sticho Markdown 文档",
+        "md" | "markdown" | "mdx" => "Sticho Markdown Document",
         _ => match group_of(ext) {
-            "web" => "Sticho 网页文档",
-            "config" => "Sticho 配置文件",
-            "code" => "Sticho 源代码文件",
-            "script" => "Sticho 脚本文件",
-            _ => "Sticho 文本文档",
+            "web" => "Sticho Web Document",
+            "config" => "Sticho Config File",
+            "code" => "Sticho Source File",
+            "script" => "Sticho Script File",
+            _ => "Sticho Text Document",
         },
     }
     .to_string()
@@ -169,17 +198,21 @@ fn friendly_name(ext: &str) -> String {
 /// 程序（exe）绝对路径字符串
 fn exe_string() -> Result<String, String> {
     Ok(std::env::current_exe()
-        .map_err(|e| format!("无法获取程序路径：{e}"))?
+        .map_err(|e| format!("Failed to get program path: {e}"))?
         .to_string_lossy()
         .into_owned())
 }
 
 /// 打开（必要时创建）HKCU\Software\Classes
+///
+/// 刻意不传 KEY_WOW64_*：winreg 默认按**本进程**的注册表视图访问，而本程序只出 64 位
+/// 构建，视图即 64 位——资源管理器读的就是同一处，关联立刻生效。将来若出 32 位构建，
+/// 这里必须补 KEY_WOW64_64KEY，否则会写进 Wow6432Node 而资源管理器读不到。
 fn classes() -> Result<RegKey, String> {
     RegKey::predef(HKEY_CURRENT_USER)
         .create_subkey("Software\\Classes")
         .map(|(key, _)| key)
-        .map_err(|e| format!("无法访问注册表 HKCU\\Software\\Classes：{e}"))
+        .map_err(|e| format!("Cannot access registry HKCU\\Software\\Classes: {e}"))
 }
 
 // ---------------------------------------------------------------- 扩展名清单
@@ -230,6 +263,42 @@ pub fn get_file_association(ext: String) -> Result<bool, String> {
     Ok(current == prog_id(&ext))
 }
 
+/// 撤下某扩展名的关联（供关闭开关与「清理系统写入」共用）。
+///
+/// 只在该扩展名当前仍指向本程序时移除默认值与「可用处理程序」登记，避免把用户后来
+/// 指定的其他程序抢走；ProgId 键则总是删除（那是本程序自己的登记，不存在误删风险）。
+fn unbind(classes: &RegKey, ext: &str) {
+    let prog_id = prog_id(ext);
+    let ours = classes
+        .open_subkey(ext_key(ext))
+        .ok()
+        .and_then(|key| key.get_value::<String, _>("").ok())
+        .map(|current| current == prog_id)
+        .unwrap_or(false);
+    if ours {
+        // 只删默认值，保留 .ext 键下其他系统写入的值（如 Content Type）
+        if let Ok(key) = classes.open_subkey_with_flags(ext_key(ext), KEY_SET_VALUE) {
+            let _ = key.delete_value("");
+        }
+        // 一并撤下「可用处理程序」清单里的登记
+        if let Ok(owp) = classes
+            .open_subkey_with_flags(format!("{}\\OpenWithProgids", ext_key(ext)), KEY_SET_VALUE)
+        {
+            let _ = owp.delete_value(&prog_id);
+        }
+    }
+    let _ = classes.delete_subkey_all(&prog_id);
+}
+
+/// 删除右键菜单项（不存在时视为成功，返回是否真的删了点东西）。
+fn remove_context_menu() -> Result<bool, std::io::Error> {
+    match RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(CTX_KEY) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// 打开 / 关闭某扩展名的文件关联
 #[tauri::command]
 pub fn set_file_association(ext: String, enable: bool) -> Result<(), String> {
@@ -243,64 +312,56 @@ pub fn set_file_association(ext: String, enable: bool) -> Result<(), String> {
         // .ext → ProgId
         let ext_reg_key = classes
             .create_subkey(ext_key(&ext))
-            .map_err(|e| format!("写入注册表失败（{}）：{e}", ext_key(&ext)))?
+            .map_err(|e| format!("Failed to write registry ({}): {e}", ext_key(&ext)))?
             .0;
         ext_reg_key
             .set_value("", &prog_id)
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
 
         // .ext\OpenWithProgids → ProgId
         // 只写 .ext 的默认值在 Windows 11 上不够：缺少这份「可用处理程序」清单时，
         // 双击文档会弹「选取应用」让用户自己挑程序，而不是直接用本程序打开。
         ext_reg_key
             .create_subkey("OpenWithProgids")
-            .map_err(|e| format!("写入注册表失败（{}\\OpenWithProgids）：{e}", ext_key(&ext)))?
+            .map_err(|e| {
+                format!(
+                    "Failed to write registry ({} \\OpenWithProgids): {e}",
+                    ext_key(&ext)
+                )
+            })?
             .0
-            .set_raw_value(&prog_id, &RegValue { bytes: Vec::new(), vtype: REG_NONE })
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .set_raw_value(
+                &prog_id,
+                &RegValue {
+                    bytes: Vec::new(),
+                    vtype: REG_NONE,
+                },
+            )
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
 
         // ProgId → 显示名 / 图标 / 打开命令
         let (prog_key, _) = classes
             .create_subkey(&prog_id)
-            .map_err(|e| format!("写入注册表失败（{prog_id}）：{e}"))?;
+            .map_err(|e| format!("Failed to write registry ({prog_id}): {e}"))?;
         prog_key
             .set_value("", &friendly_name(&ext))
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
 
         let (icon_key, _) = prog_key
             .create_subkey("DefaultIcon")
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
         icon_key
             .set_value("", &format!("\"{exe}\",0"))
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
 
         let (cmd_key, _) = prog_key
             .create_subkey("shell\\open\\command")
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
         cmd_key
             .set_value("", &format!("\"{exe}\" \"%1\""))
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
     } else {
-        // 扩展名仍指向本程序时才解绑，否则保留（用户可能已改为其他程序）
-        let ours = classes
-            .open_subkey(ext_key(&ext))
-            .ok()
-            .and_then(|key| key.get_value::<String, _>("").ok())
-            .map(|current| current == prog_id)
-            .unwrap_or(false);
-        if ours {
-            // 只删默认值，保留 .ext 键下其他系统写入的值（如 Content Type）
-            if let Ok(key) = classes.open_subkey_with_flags(ext_key(&ext), KEY_SET_VALUE) {
-                let _ = key.delete_value("");
-            }
-            // 一并撤下「可用处理程序」清单里的登记
-            if let Ok(owp) = classes
-                .open_subkey_with_flags(format!("{}\\OpenWithProgids", ext_key(&ext)), KEY_SET_VALUE)
-            {
-                let _ = owp.delete_value(&prog_id);
-            }
-        }
-        let _ = classes.delete_subkey_all(&prog_id);
+        unbind(&classes, &ext);
     }
 
     notify_shell();
@@ -321,25 +382,33 @@ pub fn get_context_menu() -> Result<bool, String> {
     Ok(cmd.to_lowercase().contains(&exe.to_lowercase()))
 }
 
-/// 打开 / 关闭「用 Sticho 打开」右键菜单项（作用于所有文件）
+/// 打开 / 关闭「用 Sticho 打开」右键菜单项（作用于所有文件）。
+///
+/// 菜单文案的语种以操作系统当前语言为准，取不到时以 `locale`（Sticho 界面语言）为准：
+/// 中文环境写中文，其余一律英文。
 #[tauri::command]
-pub fn set_context_menu(enable: bool) -> Result<(), String> {
+pub fn set_context_menu(enable: bool, locale: String) -> Result<(), String> {
     let base = RegKey::predef(HKEY_CURRENT_USER);
     if enable {
         let exe = exe_string()?;
+        let label = if menu_label_is_chinese(&locale) {
+            "用 Sticho 打开"
+        } else {
+            "Open with Sticho"
+        };
         let (key, _) = base
             .create_subkey(CTX_KEY)
-            .map_err(|e| format!("写入注册表失败（{CTX_KEY}）：{e}"))?;
-        key.set_value("", &"用 Sticho 打开".to_string())
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry ({CTX_KEY}): {e}"))?;
+        key.set_value("", &label.to_string())
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
         key.set_value("Icon", &format!("\"{exe}\",0"))
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
         let (cmd_key, _) = key
             .create_subkey("command")
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
         cmd_key
             .set_value("", &format!("\"{exe}\" \"%1\""))
-            .map_err(|e| format!("写入注册表失败：{e}"))?;
+            .map_err(|e| format!("Failed to write registry: {e}"))?;
     } else {
         let _ = base.delete_subkey_all(CTX_KEY);
     }
@@ -356,11 +425,41 @@ pub fn open_default_apps_settings() -> Result<(), String> {
         .args(["/C", "start", "", "ms-settings:defaultapps"])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .map_err(|e| format!("打开系统默认应用设置失败：{e}"))?;
+        .map_err(|e| format!("Failed to open the system default apps settings: {e}"))?;
     Ok(())
+}
+
+/// 清理本程序对系统做过的全部改动，把软件恢复到「便携」状态：
+/// - 撤销所有扩展名的文件关联（含「替代系统记事本」写入的那批）；
+/// - 删除右键菜单「用 Sticho 打开」。
+///
+/// 只清 `HKCU\Software\Classes` 下属于本程序的登记，不动用户后来指定的其他程序；
+/// 返回逐项清理过程中的告警（正常为空）。
+#[tauri::command]
+pub fn clear_system_integration() -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+
+    let classes = classes()?;
+    for (ext, _) in SUPPORTED_EXTS {
+        unbind(&classes, ext);
+    }
+
+    if let Err(e) = remove_context_menu() {
+        warnings.push(format!("Failed to delete the context menu item: {e}"));
+    }
+
+    notify_shell();
+    Ok(warnings)
 }
 
 /// 通知资源管理器立即刷新关联（否则可能要等其自身刷新或重启才生效）
 fn notify_shell() {
-    unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, std::ptr::null(), std::ptr::null()) }
+    unsafe {
+        SHChangeNotify(
+            SHCNE_ASSOCCHANGED,
+            SHCNF_IDLIST,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    }
 }

@@ -18,6 +18,9 @@ import { applyAutoSpace } from "./typography";
 const md = new MarkdownIt({ html: false, linkify: true });
 applyAutoSpace(md);
 
+/** iframe onload 的兜底时限：超时仍未加载就收尾，避免调用方 await 永久挂起 */
+const PRINT_LOAD_TIMEOUT_MS = 15_000;
+
 export type PrintKind = "markdown" | "html" | "code";
 
 export interface PrintSource {
@@ -28,16 +31,18 @@ export interface PrintSource {
   title: string;
   /** 文档所在目录：把正文里相对路径的图片换成可访问的 asset URL；未保存文档传 null */
   dir?: string | null;
+  /** 当前界面语言：写入 <html lang>，避免打印环境用错误 locale 排版 */
+  locale?: string;
 }
 
 /** 组装一份可直接打印的完整 HTML */
-export function buildPrintDocument({ source, kind, title, dir }: PrintSource): string {
+export function buildPrintDocument({ source, kind, title, dir, locale = "zh-CN" }: PrintSource): string {
   let body: string;
   if (kind === "code") body = `<pre class="plain">${escapeHtml(source)}</pre>`;
   else if (kind === "html") body = source;
   else body = md.render(source);
   if (dir) body = rewriteImageSrc(body, dir);
-  return buildPrintHtml(body, title);
+  return buildPrintHtml(body, title, locale);
 }
 
 /**
@@ -52,15 +57,26 @@ export function printHtml(html: string): Promise<void> {
   return new Promise((resolve) => {
     const frame = document.createElement("iframe");
     frame.setAttribute("aria-hidden", "true");
+    // 必须上沙箱：srcdoc 会继承父页面的源，HTML 文档里的 <script> 一旦能跑就与本应用同源，
+    // 可以反过来操作主窗口（含 Tauri IPC）。只放行 allow-modals 让 print() 能弹系统打印
+    // 对话框，绝不给 allow-scripts——与「执行脚本」关闭时 HTML 预览的沙箱口径一致。
+    frame.setAttribute("sandbox", "allow-same-origin allow-modals");
     // 必须保持「已渲染」：display:none 的 iframe 不会打印，故移出视口而非隐藏
     frame.style.cssText = "position:fixed;top:0;left:-10000px;width:1px;height:1px;border:0;";
     let done = false;
+    let timer = 0;
     const finish = () => {
       if (done) return;
       done = true;
+      window.clearTimeout(timer);
       window.setTimeout(() => frame.remove(), 0);
       resolve();
     };
+    // onload 万一不触发（异常 HTML），也不能让调用方永久 await：兜底时限到点照样收尾
+    timer = window.setTimeout(() => {
+      frame.remove();
+      finish();
+    }, PRINT_LOAD_TIMEOUT_MS);
     frame.onload = () => {
       const win = frame.contentWindow;
       if (!win) return finish();

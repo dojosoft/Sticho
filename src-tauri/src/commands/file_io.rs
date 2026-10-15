@@ -525,9 +525,15 @@ pub async fn read_pdf_base64(path: String) -> Result<String, String> {
 /// 与 read_pdf_base64 同理：IPC 走 JSON，二进制必须编码后过通道。
 /// 这里只做大小与存在性检查，能不能真正嵌入由前端按扩展名/MIME 判定——
 /// 判断失败时前端回落到占位文字，不影响整篇导出。
+///
+/// 信任边界与 `read_text_file` 一致：path 来自前端对正文里 `src` 的地址解析，
+/// 属编辑器语义下的可信输入，故只做「非空 / 不是目录」这类 sanity 检查。
 #[tauri::command]
 pub async fn read_image_base64(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if path.trim().is_empty() {
+            return Err("Image path is empty".to_string());
+        }
         let p = Path::new(&path);
 
         let meta = match fs::metadata(p) {
@@ -537,6 +543,11 @@ pub async fn read_image_base64(path: String) -> Result<String, String> {
             }
             Err(e) => return Err(format!("Cannot access file: {e}")),
         };
+
+        // 目标是目录时提前给出明确原因，否则会落到 fs::read 报一句与真实原因无关的错
+        if meta.is_dir() {
+            return Err(format!("Path is a directory, not an image file: {path}"));
+        }
 
         if meta.len() > MAX_IMAGE_SIZE {
             return Err(format!(

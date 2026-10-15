@@ -2998,7 +2998,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     });
   const exportPdfFile = () =>
     exportAs(t("Export as PDF Document"), "pdf", t("PDF Document"), (path, source) =>
-      import("./lib/export-pdf").then((m) => m.exportPdf(path, source, docBaseName(), locale)),
+      import("./lib/export-pdf").then((m) => m.exportPdf(path, source, docBaseName(), locale, docKind)),
     );
   // HTML 文档导出 HTML：源码原样写出（走 markdown-it 会把标签转义成文本）
   const exportHtmlFile = () =>
