@@ -1,6 +1,24 @@
 /* Sticho 全局样式 —— 主题变量化（阶段 7）
  * 由 JS 在 <html> 上切 light/dark 类驱动（用户显式选择优先，未设置时跟随系统）。
- * color-scheme 让滚动条等原生控件同步深浅色。 */
+ * color-scheme 让滚动条等原生控件同步深浅色。
+ *
+ * ── 主题如何覆盖整个界面（皮肤设置 → 主题）──────────────────────────────
+ * 整份界面（窗口底、工具栏、标签栏、侧边栏、状态栏、菜单面板、对话框、编辑器工具栏…）
+ * 都由下面这组变量驱动。自定义主题只要把这些变量重新赋值，就能一次性换掉全局配色。
+ *
+ * 由于变量定义在 `html.light` / `html.dark` 上（选择器优先级高于 `:root`），主题里
+ * 请按下面三种写法之一覆盖，才能盖过默认值：
+ *   html { … }                    // 明暗共用一套（推荐：整套主题色，不随明/暗档位变）
+ *   html.light { … }              // 只改浅色档位
+ *   html.dark  { … }              // 只改深色档位
+ * 主题文件晚于本文件加载，同优先级时后者胜，故上述写法都能生效。
+ *
+ * 例外（主题不接管，见需求）：HTML 文档正文区（.html-view，文档自带配色）与编辑器里
+ * 语法高亮的文字颜色（Vditor 的 --ir-* / 代码视图的 token 色）——这两处保持原样。
+ * Vditor 编辑器工具栏/面板另有一套自己的变量（--toolbar-background-color 等），
+ * 需要时在主题里对 `.vditor, .vditor--dark` 赋值即可（内置主题已示范）。
+ * ────────────────────────────────────────────────────────────────────
+ */
 
 html,
 html.light {
@@ -12,11 +30,30 @@ html.light {
   --border: #dddddd;
   --hover: rgba(0, 0, 0, 0.07);
   --danger: #c0392b;
+  /* 警告态文字（状态栏等） */
+  --warning: #b7791f;
+  /* 对话框遮罩层：压暗背板，越深越聚焦 */
+  --overlay: rgba(0, 0, 0, 0.35);
+  /* 强调色的浅色填充（差异高亮底）与强调色上的文字 */
+  --accent-soft: rgba(37, 99, 235, 0.12);
+  --accent-contrast: #ffffff;
+  /* 键盘焦点环（输入框 / 主按钮聚焦时的外发光） */
+  --focus-ring: rgba(37, 99, 235, 0.35);
+  /* 危险色的浅色填充与危险色上的文字 */
+  --danger-soft: rgba(192, 57, 43, 0.12);
+  --danger-contrast: #ffffff;
+  /* 阅读模式标签的强调色（与编辑模式的蓝区分开） */
+  --read-accent: #2f9e44;
   /* 段落聚焦时压在非当前块上的暗色（浅色主题下用浅一点的遮罩就够） */
   --spotlight-dim: rgba(0, 0, 0, 0.18);
   /* 查找命中高亮（批次五）：普通命中用暖黄，当前命中用橙红以区分 */
   --find-hl: #ffe58f;
   --find-hl-active: #ff9c6e;
+  /* 自绘提示浮窗（替代系统气泡）：浅色下用略带不透明的白面 + 柔和描边 */
+  --tip-bg: rgba(255, 255, 255, 0.98);
+  --tip-fg: #1f2328;
+  --tip-border: rgba(0, 0, 0, 0.1);
+  --tip-shadow: 0 10px 24px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.08);
   color-scheme: light;
 }
 
@@ -29,10 +66,23 @@ html.dark {
   --border: #3c3c3c;
   --hover: rgba(255, 255, 255, 0.09);
   --danger: #f48771;
+  --warning: #d29922;
+  --overlay: rgba(0, 0, 0, 0.55);
+  --accent-soft: rgba(96, 165, 250, 0.16);
+  --accent-contrast: #ffffff;
+  --focus-ring: rgba(96, 165, 250, 0.4);
+  --danger-soft: rgba(244, 135, 113, 0.18);
+  --danger-contrast: #ffffff;
+  --read-accent: #4ade80;
   --spotlight-dim: rgba(0, 0, 0, 0.45);
   /* 深色下用低饱和的黄/橙，避免整片文字反而看不清 */
   --find-hl: #6b5c1e;
   --find-hl-active: #a1521f;
+  /* 自绘提示浮窗（替代系统气泡）：深色下用略亮的深面 + 亮描边 */
+  --tip-bg: rgba(48, 48, 52, 0.98);
+  --tip-fg: #e6e6e6;
+  --tip-border: rgba(255, 255, 255, 0.12);
+  --tip-shadow: 0 10px 26px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
   color-scheme: dark;
 }
 
@@ -253,6 +303,24 @@ body {
 }
 
 /**
+ * SV 分屏预览：右侧渲染栏的代码块不再显示 Vditor 自带的块内行号。
+ *
+ * 「显示行号」是「正文即源码」视图的特性：SV 下由 editor.ts 自绘的行号栏承担，落在左侧
+ * 源码栏。而 Vditor 的 hljs.lineNumber 会给渲染栏里每个围栏代码块套上 .vditor-linenumber
+ * （块内 4em 的行号列 + 每行一个序号），于是右栏平白多出一套行号，与左栏的行号栏相互错位。
+ * 这里按 .vditor-content.md-studio-linenumbers 精确匹配 SV（IR / 所见即所得的该类挂在
+ * .vditor-ir / .vditor-wysiwyg 上，见上面让车道规则），只隐藏块内行号列并收回它预留的
+ * 4em 缩进；代码块本身与复制按钮不受影响。
+ */
+.vditor-content.md-studio-linenumbers .vditor-preview code.vditor-linenumber {
+  padding-left: 0 !important;
+}
+
+.vditor-content.md-studio-linenumbers .vditor-preview .vditor-linenumber__rows {
+  display: none;
+}
+
+/**
  * 代码块语言下拉面板（配套 editor.ts 的 openLangPanel）。
  *
  * 面板由 editor.ts 直接创建并挂到 body 上，拿不到 App.svelte 里 scoped 的 .menu-panel
@@ -414,6 +482,17 @@ body {
   word-break: normal;
 }
 
+/* 自动换行开启时（视图 → 自动换行）：正文不再横向滚动，交给软换行 */
+.md-large-reader.wrap {
+  overflow-x: hidden;
+}
+
+/* 自动换行开启时：纯文本分节的 <pre> 按容器宽度折行（默认是 pre + 横向滚动） */
+.md-large-reader.wrap .md-large-reader__body--plain pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /**
  * 段落聚焦（聚光灯，配套 editor.ts 的 attachSpotlight）。
  *
@@ -439,4 +518,12 @@ body {
   pointer-events: none;
   box-shadow: 0 0 0 9999px var(--spotlight-dim);
   transition: height 0.12s ease;
+}
+
+/* Markdown「不渲染」：只保留 SV 源码栏，隐藏渲染结果栏。
+ * 预览栏的显隐由 Vditor 切模式时写成**行内样式**（`element.style.display`），行内样式优先级
+ * 高于普通规则，所以这里必须 `!important` 才能盖过它——否则「不渲染」和「分屏预览」长得
+ * 一模一样（都是源码栏 + 渲染栏两栏）。同见上面的 `.md-large-mode` 规则。 */
+.md-source-only .vditor-preview {
+  display: none !important;
 }

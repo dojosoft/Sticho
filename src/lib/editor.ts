@@ -11,8 +11,9 @@
 import type Vditor from "vditor";
 import "vditor/dist/index.css";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { saveImageAsset } from "./tauri-api";
+import { saveImageAsset, allowAssetDir } from "./tauri-api";
 import { LargeReader, LARGE_DOC_BYTES, type MountedSection } from "./largeReader";
+import { interpolateAnchors, type SvAnchor } from "./svScrollAnchor";
 
 let vditor: Vditor | null = null;
 
@@ -45,6 +46,105 @@ let readyResolve: (() => void) | null = null;
 let readyPromise: Promise<void> = Promise.resolve();
 /** 编辑器界面语言（批次八）：构造时写入 options.lang，见 setEditorLocale */
 let editorLang: "zh_CN" | "en_US" = "zh_CN";
+
+/**
+ * 编辑器内由本文件自绘、Vditor 的 i18n 表覆盖不到的文案（工具栏自定义项、代码块语言面板、
+ * 图片插入提示等）。Vditor 自带的按钮文案走它的 i18n 脚本（见 loadVditorI18n），
+ * 这里只放我们自己的；值用 `{name}` 占位符，插值由 editorText 的第二个参数完成。
+ */
+const EDITOR_TEXT: Record<string, { zh_CN: string; en_US: string }> = {
+  // 键名与工具栏的 data-type 对齐（insert-math / insert-mermaid）：refreshToolbarTips 是
+  // 按 data-type 取译文的，键名不一致会导致语言热切换后这两项的浮窗停在旧语言。
+  "insert-math": { zh_CN: "行间公式", en_US: "Math Block" },
+  "insert-mermaid": { zh_CN: "Mermaid 图", en_US: "Mermaid Diagram" },
+  saveBeforeImage: { zh_CN: "请先保存文档，再插入图片", en_US: "Save the document before inserting images." },
+  searchLanguage: { zh_CN: "搜索语言…", en_US: "Search languages…" },
+  chooseLanguage: { zh_CN: "选择代码块语言", en_US: "Choose code block language" },
+  emptyLanguage: { zh_CN: "语言", en_US: "Language" },
+  imageTooLarge: { zh_CN: "（超过 {n} MB）", en_US: " (over {n} MB)" },
+  imageReadFailed: { zh_CN: "（读取失败）", en_US: " (read failed)" },
+  imageSaveFailed: { zh_CN: "（保存失败）", en_US: " (save failed)" },
+  imagesNotInserted: { zh_CN: "未插入：{list}", en_US: "Not inserted: {list}" },
+  listSeparator: { zh_CN: "、", en_US: ", " },
+  // 排版工具栏最后一个按钮（Vditor 的 edit-mode）：改叫「切换渲染模式」以贴合本软件的语感，
+  // 覆盖 Vditor 自带 i18n 的「切换编辑模式」（见 refreshToolbarTips 的优先取 EDITOR_TEXT）。
+  "edit-mode": { zh_CN: "切换渲染模式", en_US: "Switch Render Mode" },
+};
+
+/** 取当前编辑器语言下的自绘文案，`{name}` 占位符按 vars 插值 */
+function editorText(key: keyof typeof EDITOR_TEXT, vars?: Record<string, string | number>): string {
+  const raw = EDITOR_TEXT[key][editorLang];
+  if (!vars) return raw;
+  return raw.replace(/\{(\w+)\}/g, (whole, name: string) =>
+    name in vars ? String(vars[name]) : whole,
+  );
+}
+
+/**
+ * 把目标语言的 Vditor i18n 脚本加载进页面（写入 window.VditorI18n）。
+ *
+ * Vditor 只在构造时按 options.lang 拉一次 i18n；脚本 id 沿用它的命名约定
+ * （vditorI18nScript{lang}），并清掉其它语言的脚本，避免与它自己的账本打架。
+ */
+async function loadVditorI18n(lang: "zh_CN" | "en_US"): Promise<void> {
+  const id = `vditorI18nScript${lang}`;
+  const loaded = document.getElementById(id);
+  if (loaded) {
+    // 脚本已加载但 VditorI18n 可能已被后续语言覆盖，重跑一次刷新全局表
+    loaded.remove();
+  }
+  document
+    .querySelectorAll('head script[id^="vditorI18nScript"]')
+    .forEach((el) => el.remove());
+
+  await new Promise<void>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.id = id;
+    script.src = `${CDN_PATH}/dist/js/i18n/${lang}.js`;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`加载 Vditor 语言脚本失败：${script.src}`));
+    document.head.appendChild(script);
+  });
+}
+
+/**
+ * 重刷已渲染的工具栏按钮提示与「渲染模式」下拉面板文案。
+ *
+ * Vditor 的提示是初始化时一次性写进按钮 aria-label 的（CSS 用
+ * `.vditor-tooltipped::after { content: attr(aria-label) }` 渲染），
+ * 运行中改 options.lang 不会回头更新，故这里按新语言重算一遍。
+ * 快捷键后缀（形如 " <⌘B>"）沿用原值，不做翻译。
+ */
+function refreshToolbarTips(): void {
+  const toolbar = vditor?.vditor.toolbar?.element;
+  if (!toolbar) return;
+  const dict = (window as unknown as { VditorI18n?: Record<string, string> }).VditorI18n ?? {};
+  toolbar.querySelectorAll<HTMLElement>("[data-type]").forEach((element) => {
+    const name = element.getAttribute("data-type") ?? "";
+    if (!name) return;
+    const base = (EDITOR_TEXT[name as keyof typeof EDITOR_TEXT]?.[editorLang] ?? dict[name]) || "";
+    if (!base) return; // 拿不到译文的（如分隔符）不动，保持原样
+    const current = element.getAttribute("aria-label") ?? "";
+    const at = current.indexOf(" <");
+    element.setAttribute("aria-label", base + (at >= 0 ? current.slice(at) : ""));
+  });
+
+  // 「渲染模式」下拉面板：Vditor 在初始化时把三个按钮的文案（所见即所得 / 即时渲染 /
+  // 分屏预览）直接写死进 DOM（见其 EditMode 构造函数），之后换语言不会重刷，
+  // 这里按新语言重写一遍，快捷键后缀原样保留。键名对应 Vditor i18n 表的三个词条。
+  const panelKeys: Record<string, string> = {
+    wysiwyg: "wysiwyg",
+    ir: "instantRendering",
+    sv: "splitView",
+  };
+  toolbar.querySelectorAll<HTMLElement>('[data-type="edit-mode"] button[data-mode]').forEach((button) => {
+    const text = dict[panelKeys[button.getAttribute("data-mode") ?? ""] ?? ""];
+    if (!text) return;
+    const current = button.textContent ?? "";
+    const at = current.indexOf(" <");
+    button.textContent = text + (at >= 0 ? current.slice(at) : "");
+  });
+}
 
 /**
  * 阅读模式（只读）开关。
@@ -110,19 +210,19 @@ function insertLocalImages(files: File[]): Promise<null> {
     // 阅读模式下拖入 / 粘贴图片同样要拦住（Vditor 的丢放与粘贴会走这个 handler）
     if (blockedByReadonly()) return null;
     if (!currentDocPath) {
-      vditor?.vditor.tip.show("请先保存文档，再插入图片");
+      vditor?.vditor.tip.show(editorText("saveBeforeImage"));
       return null;
     }
     const marks: string[] = [];
     const failed: string[] = [];
     for (const file of files) {
       if (file.size > MAX_IMAGE_BYTES) {
-        failed.push(`${file.name}（超过 ${MAX_IMAGE_BYTES / 1024 / 1024} MB）`);
+        failed.push(`${file.name}${editorText("imageTooLarge", { n: MAX_IMAGE_BYTES / 1024 / 1024 })}`);
         continue;
       }
       const data = await readImageAsBase64(file);
       if (data === null) {
-        failed.push(`${file.name}（读取失败）`);
+        failed.push(`${file.name}${editorText("imageReadFailed")}`);
         continue;
       }
       try {
@@ -133,11 +233,12 @@ function insertLocalImages(files: File[]): Promise<null> {
         const target = encodeURI(`${ASSET_DIR}/${fileName}`).replace(/#/g, "%23");
         marks.push(`![${file.name.replace(/[[\]()]/g, "")}](${target})`);
       } catch (e) {
-        failed.push(`${file.name}（${typeof e === "string" ? e : "保存失败"}）`);
+        failed.push(`${file.name}${typeof e === "string" ? ` (${e})` : editorText("imageSaveFailed")}`);
       }
     }
     if (marks.length > 0) vditor?.insertValue(marks.join("\n"));
-    if (failed.length > 0) vditor?.vditor.tip.show(`未插入：${failed.join("、")}`);
+    if (failed.length > 0)
+      vditor?.vditor.tip.show(editorText("imagesNotInserted", { list: failed.join(editorText("listSeparator")) }));
     scheduleImageResolve(150);
     return null;
   })();
@@ -191,11 +292,21 @@ function resolveLocalImages(): void {
 
 /** 把 root 子树里的相对路径图片换成 asset URL（大文档阅读器按分节逐块调用） */
 function resolveImagesIn(root: HTMLElement): void {
-  if (!currentDocPath || !ready || !vditor) return;
-  const docDir = currentDocPath.replace(/[\\/][^\\/]*$/, "");
+  if (!ready || !vditor) return;
+  const docDir = currentDocPath ? currentDocPath.replace(/[\\/][^\\/]*$/, "") : null;
   for (const img of Array.from(root.querySelectorAll<HTMLImageElement>("img"))) {
     const src = img.getAttribute("src") ?? "";
-    if (src === "" || /^(data:|https?:|asset:|blob:|\/\/)/i.test(src)) continue;
+    if (src === "") continue;
+    // 远程图片：CSP 已移除 https:/http:，默认不联网加载 → 换成占位并给出提示
+    if (/^(https?:)?\/\//i.test(src)) {
+      const ph = remoteBlockedPlaceholder();
+      if (img.getAttribute("src") !== ph) img.src = ph;
+      if (!img.title) img.title = remoteBlockedNotice();
+      if (!img.alt) img.alt = remoteBlockedNotice();
+      continue;
+    }
+    if (/^(data:|asset:|blob:)/i.test(src)) continue;
+    if (!docDir) continue; // 未保存文档没有落盘目录，相对路径无从换算
     let decoded = src;
     try {
       decoded = decodeURI(src);
@@ -205,6 +316,35 @@ function resolveImagesIn(root: HTMLElement): void {
     const abs = isAbsolutePath(decoded) ? decoded : normalizeJoin(docDir, decoded);
     img.src = convertFileSrc(abs);
   }
+}
+
+/** 远程图片护栏提示文案（跟随编辑器语言） */
+function remoteBlockedNotice(): string {
+  return editorLang === "en_US"
+    ? "Remote image not loaded (blocked by default)"
+    : "远程图片已阻止加载";
+}
+
+/** 占位图缓存（按语言生成一次，避免每张图重复拼接） */
+let remotePlaceholderCache: { lang: "zh_CN" | "en_US"; uri: string } | null = null;
+
+/**
+ * 远程图片占位图：内联 SVG 的 data URI（CSP 的 img-src 放行 data:），
+ * 不产生任何网络请求，正好用来替代被拦下的远程图。
+ */
+function remoteBlockedPlaceholder(): string {
+  if (remotePlaceholderCache && remotePlaceholderCache.lang === editorLang) {
+    return remotePlaceholderCache.uri;
+  }
+  const label = remoteBlockedNotice();
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="260" height="90" viewBox="0 0 260 90">` +
+    `<rect x="0.5" y="0.5" width="259" height="89" fill="#f6f6f6" stroke="#cfcfcf" stroke-dasharray="4 3"/>` +
+    `<text x="130" y="52" font-family="system-ui,sans-serif" font-size="14" fill="#8a8a8a" text-anchor="middle">${label}</text>` +
+    `</svg>`;
+  const uri = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  remotePlaceholderCache = { lang: editorLang, uri };
+  return uri;
 }
 
 /** 待重算图片 URL 的句柄 */
@@ -221,13 +361,19 @@ function scheduleImageResolve(delay = 200): void {
   imageResolveTimer = window.setTimeout(() => {
     imageResolveTimer = null;
     resolveLocalImages();
+    // 图片换 src 后加载完成会改变右栏高度，SV 的左右对齐锚点要跟着重算
+    scheduleSvAnchors();
   }, delay);
 }
 
 /** 同步当前文档路径（打开 / 另存 / 新建文档时由应用层调用），并立即重算一次图片 URL */
 export function setDocumentPath(path: string | null): void {
   currentDocPath = path;
-  scheduleImageResolve(0);
+  // 静态 asset scope 已收窄为空：必须先把文档所在目录放行，再重算图片 URL。
+  // 否则浏览器会抢在放行之前请求图片、拿到 403，而且不会自动重试——本地图就裂了。
+  const dir = path ? path.replace(/[\\/][^\\/]*$/, "") : "";
+  const allowed = dir ? allowAssetDir(dir).catch(() => undefined) : Promise.resolve();
+  void allowed.then(() => scheduleImageResolve(0));
 }
 
 /** 随包内置的表情图片目录（Vditor 的 hint.emojiPath 默认指向 unpkg CDN） */
@@ -321,6 +467,16 @@ function commonEmojiValues(): string[] {
   return ranked.slice(0, COMMON_EMOJI_COUNT);
 }
 
+/** 拼进 HTML 文本节点的最小转义 */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** 拼进 HTML 属性值的最小转义（属性用双引号包裹，故引号也要转） */
+function escapeAttr(text: string): string {
+  return escapeHtml(text).replace(/"/g, "&quot;");
+}
+
 /**
  * 单个表情按钮的 HTML。
  *
@@ -329,9 +485,11 @@ function commonEmojiValues(): string[] {
  * 值里带点的是图片文件，其余是 Unicode 字符。
  */
 function emojiButtonHTML(key: string, value: string): string {
+  // key / value 来自 Lute 的表情表（运行时数据），拼进标记前一律转义
+  const k = escapeAttr(key);
   return value.includes(".")
-    ? `<button data-value=":${key}: " data-key=":${key}:"><img class="vditor-emojis__icon" src="${value}"/></button>`
-    : `<button data-value="${value} " data-key="${key}"><span class="vditor-emojis__icon">${value}</span></button>`;
+    ? `<button data-value=":${k}: " data-key=":${k}:"><img class="vditor-emojis__icon" src="${escapeAttr(value)}"/></button>`
+    : `<button data-value="${escapeAttr(value)} " data-key="${k}"><span class="vditor-emojis__icon">${escapeHtml(value)}</span></button>`;
 }
 
 /**
@@ -566,10 +724,10 @@ function closeLangPanel(): void {
   langPanelAnchor = null;
 }
 
-/** 语言按钮列表（语言名取自 highlight.js 的语言表，只含字母数字与 + - #，无需转义） */
+/** 语言按钮列表（语言名通常只含字母数字与 + - #，但仍按文本原样拼进标记前转义） */
 function langButtonHTML(langs: string[]): string {
   return langs
-    .map((lang) => `<button type="button" data-lang="${lang}">${lang}</button>`)
+    .map((lang) => `<button type="button" data-lang="${escapeAttr(lang)}">${escapeHtml(lang)}</button>`)
     .join("");
 }
 
@@ -592,7 +750,7 @@ function openLangPanel(infoEl: HTMLElement, anchor: HTMLElement): void {
   const panel = document.createElement("div");
   panel.className = "md-studio-lang-panel";
   panel.innerHTML = `
-    <input class="md-studio-lang-search" type="text" placeholder="搜索语言…" />
+    <input class="md-studio-lang-search" type="text" placeholder="${editorText("searchLanguage")}" />
     <div class="md-studio-lang-list">
       ${langButtonHTML(COMMON_LANGUAGES)}
       <span class="md-studio-lang-sep"></span>
@@ -687,8 +845,8 @@ function langBadgeFor(codeEl: HTMLElement): HTMLElement | null {
 
   const badge = document.createElement("span");
   badge.className = "md-studio-lang-badge";
-  badge.textContent = infoEl.textContent?.replace(/\u200B/g, "").trim() || "语言";
-  badge.title = "选择代码块语言";
+  badge.textContent = infoEl.textContent?.replace(/\u200B/g, "").trim() || editorText("emptyLanguage");
+  badge.title = editorText("chooseLanguage");
   // 拦掉 mousedown/click：否则 IR 的点击处理会把光标送进代码块并把该块展开
   badge.addEventListener("mousedown", (event) => {
     event.preventDefault();
@@ -803,11 +961,12 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
       "list", "ordered-list", "check", "indent", "outdent", "|",
       "quote", "line", "code", "inline-code", "|",
       "link", "upload", "table", "emoji", "|",
-      { name: "insert-math", tip: "行间公式", tipPosition: "se", icon: MATH_ICON, click: insertMathBlock },
-      { name: "insert-mermaid", tip: "Mermaid 图", tipPosition: "se", icon: MERMAID_ICON, click: insertMermaidBlock },
+      { name: "insert-math", tip: editorText("insert-math"), tipPosition: "se", icon: MATH_ICON, click: insertMathBlock },
+      { name: "insert-mermaid", tip: editorText("insert-mermaid"), tipPosition: "se", icon: MERMAID_ICON, click: insertMermaidBlock },
       "|",
-      "undo", "redo", "|",
-      "edit-mode", "fullscreen",
+      // 撤销 / 重做 / 全屏不再放进排版工具栏：改由「皮肤设置 → 工具栏」按需显示在顶栏右侧，
+      // 与查找 / 保存同处一排（见 App.svelte 的工具栏自定义按钮）。
+      "edit-mode",
     ].map((item) =>
       typeof item === "string"
         ? item === "|"
@@ -825,6 +984,8 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
       attachLineNumbers();
       attachCodeLanguagePicker();
       attachModeWatcher();
+      // 用本文件的自绘文案覆盖 Vditor 自带按钮提示（如排版工具栏末位的「切换渲染模式」）
+      refreshToolbarTips();
       // 启动前读到的用户设置此刻才有正文元素可用（打字机模式要设选项、聚光灯要挂遮罩）
       setTypewriterMode(typewriterMode);
       attachSpotlight();
@@ -859,16 +1020,37 @@ export function whenEditorReady(): Promise<void> {
 }
 
 /**
- * 编辑器界面语言（批次八）：Vditor 的 lang 只接受 zh_CN / en_US 这套写法。
- *
- * 已初始化时同步改 options.lang——此后 Vditor 运行时新建的界面
- * （输入提示、表情面板、tip 消息等）用新语言；工具栏按钮的气泡提示
- * 是初始化时一次性写入 DOM 的，需重启后更新（设置面板里有说明）。
+ * 启动期预热编辑器运行时：提前拉取 Vditor 本体（约 300KB 的独立 chunk）与当前语言的
+ * i18n 脚本，让它们的下载 / 解析与应用启动期的若干次目录 IPC 并行，而不是串在
+ * initEditor 之前干等。失败无所谓——initEditor 内部会各自再拉一次（ensureVditor 有缓存，
+ * i18n 脚本按 id 复用）。
  */
-export function setEditorLocale(lang: "zh_CN" | "en_US"): void {
+export async function preloadEditor(): Promise<void> {
+  try {
+    await Promise.all([ensureVditor(), loadVditorI18n(editorLang)]);
+  } catch {
+    /* 预热失败不影响后续正常初始化 */
+  }
+}
+
+/**
+ * 切换编辑器界面语言（批次八；批次十四改为热切换）。
+ *
+ * 编辑器尚未就绪时只记下目标语言，由构造时的 options.lang 生效；
+ * 已就绪则重载对应语言的 i18n 脚本并重刷已渲染按钮的提示，
+ * 使排版工具栏的气泡提示立即跟随界面语言，无需重启。
+ */
+export async function setEditorLocale(lang: "zh_CN" | "en_US"): Promise<void> {
   editorLang = lang;
   if (!ready || !vditor) return;
   vditor.vditor.options.lang = lang;
+  try {
+    await loadVditorI18n(lang);
+  } catch (e) {
+    console.error("[sticho] 切换编辑器语言失败：", e);
+    return;
+  }
+  refreshToolbarTips();
 }
 
 /**
@@ -987,6 +1169,13 @@ let largePlain = false;
 let largeReaderPlain = false;
 /** 当前文档是否属于「大文档」（超过阈值）：编辑模式往返时用它决定要不要恢复分节渲染 */
 let largeCapable = false;
+/**
+ * 大文档阅读通路下的自动换行开关（视图 → 自动换行）。
+ *
+ * 阅读器是按需创建 / 重建的，所以这里保存开关状态，`ensureLargeReader()` 建完实例后
+ * 再按它把 class 补上；否则切一次文档（重建阅读器）就会丢掉换行设置。
+ */
+let largeWrap = false;
 /** 编辑器就绪前就收到大文档：先记下来，等 after 回调再建阅读器 */
 let largePending = false;
 let largeReader: LargeReader | null = null;
@@ -1052,6 +1241,23 @@ export function scrollLargeRangeIntoView(range: Range): void {
     if (left > 1) requestAnimationFrame(() => settle(left - 1));
   };
   settle(4);
+}
+
+/**
+ * 大文档阅读通路的自动换行开关（视图 → 自动换行）。
+ *
+ * 只在纯文本通路（`plain`，超大代码文件）有实际意义：`app.css` 里 `.md-large-reader`
+ * 默认 `overflow-x: auto` 且 `<pre>` 是 `white-space: pre`，长行不折、只能横向滚动；
+ * 开了以后换成 `pre-wrap` 按容器宽度折行。
+ *
+ * class 加在 `content` 与 `scroller` 两处：正文样式规则挂在 content（`__body`），
+ * 而横向滚动容器是 scroller，两处都要让位。
+ */
+export function setLargeReaderWrap(on: boolean): void {
+  largeWrap = on;
+  if (!largeReader) return;
+  largeReader.content.classList.toggle("wrap", on);
+  largeReader.scroller.classList.toggle("wrap", on);
 }
 
 /** 给大文档阅读器里刚挂载的分节补二次渲染：代码高亮 / 复制按钮 / 公式 / Mermaid / 图片 */
@@ -1141,11 +1347,17 @@ function ensureLargeReader(): LargeReader | null {
   const lute = v.lute as unknown as { Md2HTML(md: string): string } | undefined;
   largeReaderPlain = largePlain;
   largeReader = new LargeReader(scroller, {
-    md2html: (md) => lute?.Md2HTML(md) ?? "",
+    // lute 未就绪时显式抛错，避免静默产出空正文；让上层能提示失败而不是显示空白
+    md2html: (md) => {
+      if (!lute) throw new Error("Lute 渲染器未就绪，无法渲染大文档");
+      return lute.Md2HTML(md);
+    },
     decorate: decorateLargeSection,
     plain: largePlain,
     onRender: () => largeRenderListener?.(),
   });
+  // 阅读器是重建的：把应用层当前的换行开关重新贴回新实例
+  setLargeReaderWrap(largeWrap);
   return largeReader;
 }
 
@@ -1245,11 +1457,11 @@ function modeBodies(): HTMLElement[] {
  * 把 editorReadonly 落到 Vditor 上（走官方 disabled()/enable()）。
  *
  * disabled() 做两件事：把当前模式的正文元素 contenteditable 置 false，并给
- * EDIT_TOOLBARS + undo/redo/fullscreen/edit-mode 这些工具栏按钮加上
- * vditor-menu--disabled——Vditor 的点击处理器见到这个类就直接 return。
+ * EDIT_TOOLBARS + edit-mode 这些工具栏按钮加上 vditor-menu--disabled——Vditor 的
+ * 点击处理器见到这个类就直接 return。
  *
- * 但「编辑模式切换」和「沉浸式全屏」属于视图操作，阅读模式下也该能用，
- * 所以随后把它们身上的置灰类去掉。
+ * 但「编辑模式切换」属于视图操作，阅读模式下也该能用，所以随后把它身上的置灰类去掉。
+ *（撤销 / 重做 / 全屏已从排版工具栏移除，改由顶栏的自定义按钮调用，不受这里影响。）
  *
  * 还有一条缝必须自己堵：disabled() 只作用于「当前」模式的正文元素，而其余两个
  * 模式的元素 contenteditable 仍是 true。阅读模式下用户点工具栏的「编辑模式」下拉
@@ -1260,9 +1472,7 @@ function applyReadonlyState(): void {
   if (!ready || !vditor) return;
   if (editorReadonly) {
     vditor.disabled();
-    for (const name of ["edit-mode", "fullscreen"]) {
-      toolbarItem(name)?.children[0]?.classList.remove("vditor-menu--disabled");
-    }
+    toolbarItem("edit-mode")?.children[0]?.classList.remove("vditor-menu--disabled");
   } else {
     vditor.enable();
   }
@@ -1340,8 +1550,11 @@ function scrollTargetOf(content: HTMLElement): HTMLElement {
  * SV 分屏预览的左右滚动同步。
  *
  * Vditor 的 SV 模式把源码（左 `.vditor-sv`）与渲染结果（右 `.vditor-preview`）摆成两个
- * 并列、各自独立滚动的容器，滚动一边另一边不动，于是「左右两侧的行对不上」。这里让两栏
- * 按各自可滚动高度做比例换算互相带动：顶端与底端必然对齐，中间也按同一进度走。
+ * 并列、各自独立滚动的容器，滚动一边另一边不动，于是「左右两侧的行对不上」。而两栏高度
+ * 不成比例——源码一行 22px，同一段内容渲染后可能是表格、图片、代码块，高度差好几倍——
+ * 按整篇高度比例换算只能保证顶端、底端对齐，中段必然漂移。故改为按锚点分段线性映射：
+ * 锚点记录同一段内容在两栏滚动内容里的 y 偏移（见 buildSvAnchors），滚动时在夹住当前
+ * 位置的两锚点之间插值；锚点不足时退回比例换算。
  *
  * 给 scrollTop 赋值会再触发一次该元素的 scroll 事件，用 svSyncing 吃掉这一次回弹——
  * 只在目标位置确实变化时才置位，否则目标没动、事件不来，这个标记就会把用户的下一次
@@ -1351,11 +1564,25 @@ let svSyncSv: HTMLElement | null = null;
 let svSyncPreview: HTMLElement | null = null;
 let svSyncing = false;
 
+/** 左右对齐锚点（按 sv 严格递增）；内容 / 尺寸变化时经 scheduleSvAnchors 重建 */
+let svAnchors: SvAnchor[] = [];
+let svAnchorObserver: MutationObserver | null = null;
+let svAnchorTimer: number | null = null;
+
+/** 锚点重建的源码行数上限：超过就退回比例换算，避免一次性全量量盒卡顿 */
+const SV_ANCHOR_MAX_LINES = 3000;
+
 function syncSvScroll(from: HTMLElement, to: HTMLElement): void {
   const fromMax = from.scrollHeight - from.clientHeight;
   const toMax = to.scrollHeight - to.clientHeight;
   if (fromMax <= 0 || toMax <= 0) return;
-  const next = (from.scrollTop / fromMax) * toMax;
+  const mapped = interpolateAnchors(
+    svAnchors,
+    from === svSyncSv ? "sv" : "preview",
+    from.scrollTop,
+    toMax,
+  );
+  const next = Number.isNaN(mapped) ? (from.scrollTop / fromMax) * toMax : mapped;
   if (Math.abs(next - to.scrollTop) < 1) return;
   svSyncing = true;
   to.scrollTop = next;
@@ -1374,23 +1601,132 @@ function onSvPaneScroll(which: "sv" | "preview"): void {
 const onSvScrollFromSource = (): void => onSvPaneScroll("sv");
 const onSvScrollFromPreview = (): void => onSvPaneScroll("preview");
 
+/** 源码全文里每个（0 基）行的起始字符偏移 */
+function sourceLineStarts(text: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\n") starts.push(i + 1);
+  }
+  return starts;
+}
+
+/**
+ * 重建左右对齐锚点（内容 / 尺寸变化时经 scheduleSvAnchors 调用，绝不在滚动帧里跑）。
+ *
+ * 取右侧渲染栏的每个顶层块，借行号栏那套「渲染行 → 源码行」匹配（assignSourceLineNumbers）
+ * 拿到它的源码行号，再在左侧源码栏里量出该源码行的 y 偏移，得到一对 { sv, pv }。左侧用
+ * collectText 一次取全文与字符偏移表，锚点要哪一行就量哪一行，不必逐行全量量盒。
+ */
+function buildSvAnchors(): void {
+  svAnchors = [];
+  const sv = svSyncSv;
+  const preview = svSyncPreview;
+  if (!sv || !preview) return;
+
+  const { text: svText, parts: svParts } = collectText(sv);
+  const starts = sourceLineStarts(svText);
+  const reset = preview.querySelector<HTMLElement>(".vditor-reset");
+  const blocks = reset ? Array.from(reset.children) : [];
+  // 块级锚点至少要两块才谈得上分段；源码过长时全量量盒得不偿失，退回比例换算
+  if (blocks.length < 2 || starts.length > SV_ANCHOR_MAX_LINES) return;
+
+  // 能用 scrollTop 到达的最大内容偏移：超过它的锚点永远滚不到，只会把尾部外推拉偏
+  const svMax = sv.scrollHeight - sv.clientHeight;
+  const pvMax = preview.scrollHeight - preview.clientHeight;
+  if (svMax <= 0 || pvMax <= 0) return;
+
+  const normalized = normalizedSourceLines(svText);
+  // 只借文字匹配定源码行号，盒子用不到（故 box 传 null）
+  const blockUnits: LineUnit[] = blocks.map((el) => ({
+    text: collectText(el).text,
+    group: 0,
+    box: null,
+    base: null,
+  }));
+  const blockLines = assignSourceLineNumbers(blockUnits, normalized);
+
+  const svRect = sv.getBoundingClientRect();
+  const previewRect = preview.getBoundingClientRect();
+  const anchors: SvAnchor[] = [];
+  let lastSv = -1;
+  let lastPv = -1;
+  for (let i = 0; i < blocks.length; i++) {
+    const line = blockLines[i];
+    if (line <= 0) continue;
+    const start = starts[line - 1];
+    if (start === undefined) continue;
+    const nextStart = starts[line];
+    const box = measureLineBox(
+      svParts,
+      svText.length,
+      start,
+      nextStart === undefined ? svText.length : nextStart - 1,
+    );
+    if (!box) continue;
+    const svY = box.top - svRect.top + sv.scrollTop;
+    const pvY = blocks[i].getBoundingClientRect().top - previewRect.top + preview.scrollTop;
+    // 单调守卫：匹配错位的块会让锚点回退，丢弃它比留下错锚点强
+    if (svY <= lastSv || pvY <= lastPv) continue;
+    // 超出可滚动范围的锚点滚不到，只会在末尾外推时添乱
+    if (svY > svMax || pvY > pvMax) continue;
+    anchors.push({ sv: svY, pv: pvY });
+    lastSv = svY;
+    lastPv = pvY;
+  }
+  if (anchors.length === 0) return;
+
+  // 两端各钉一个合成锚点：滚到顶 / 到底时两栏一起到顶 / 到底。
+  // 否则最后一块之后的空白（右栏通常还带 trailing margin）只能靠尾段外推，越到底部偏得越多。
+  const pinned: SvAnchor[] = [];
+  if (anchors[0].sv > 0 && anchors[0].pv > 0) pinned.push({ sv: 0, pv: 0 });
+  pinned.push(...anchors);
+  const tail = anchors[anchors.length - 1];
+  if (svMax > tail.sv && pvMax > tail.pv) pinned.push({ sv: svMax, pv: pvMax });
+  svAnchors = pinned;
+}
+
+/** 延后重建锚点（内容 / 尺寸变化后调用，避开 Vditor 自身的重排节奏） */
+function scheduleSvAnchors(delay = 120): void {
+  if (!svSyncSv || !svSyncPreview) return;
+  if (svAnchorTimer !== null) clearTimeout(svAnchorTimer);
+  svAnchorTimer = window.setTimeout(() => {
+    svAnchorTimer = null;
+    buildSvAnchors();
+  }, delay);
+}
+
 /** 绑定/解绑 SV 两栏的滚动同步（切模式与换文档后都要重新确认一次，元素可能被重建） */
 function attachSvScrollSync(): void {
   const sv = (vditor?.vditor.sv?.element ?? null) as HTMLElement | null;
   // 渲染结果栏与 `.vditor-sv` 是 `.vditor-content` 下的兄弟节点
   const preview = sv?.parentElement?.querySelector<HTMLElement>(".vditor-preview") ?? null;
   if (!sv || !preview) return;
-  if (svSyncSv === sv && svSyncPreview === preview) return;
+  if (svSyncSv === sv && svSyncPreview === preview) {
+    scheduleSvAnchors(); // 元素没重建但内容换了（换文档），锚点要重算
+    return;
+  }
   detachSvScrollSync();
   svSyncSv = sv;
   svSyncPreview = preview;
   sv.addEventListener("scroll", onSvScrollFromSource, { passive: true });
   preview.addEventListener("scroll", onSvScrollFromPreview, { passive: true });
+  // 右栏内容由 Vditor 整块换掉（previewElement.innerHTML = html），盯住它重建锚点
+  const reset = preview.querySelector<HTMLElement>(".vditor-reset");
+  svAnchorObserver = new MutationObserver(() => scheduleSvAnchors());
+  svAnchorObserver.observe(reset ?? preview, { childList: true, subtree: true });
+  scheduleSvAnchors(0);
 }
 
 function detachSvScrollSync(): void {
   svSyncSv?.removeEventListener("scroll", onSvScrollFromSource);
   svSyncPreview?.removeEventListener("scroll", onSvScrollFromPreview);
+  svAnchorObserver?.disconnect();
+  svAnchorObserver = null;
+  if (svAnchorTimer !== null) {
+    clearTimeout(svAnchorTimer);
+    svAnchorTimer = null;
+  }
+  svAnchors = [];
   svSyncSv = null;
   svSyncPreview = null;
   svSyncing = false;
@@ -1519,15 +1855,17 @@ export function alignTableColumn(type: "left" | "center" | "right"): boolean {
   return true;
 }
 
-/** 撤销 / 重做（复用 Vditor 工具栏 undo、redo 项） */
+/** 撤销 / 重做（排版工具栏已无这两个按钮，直接走 Vditor 内部的 undo 栈） */
 export function undoEditor(): void {
   if (blockedByReadonly()) return;
-  toolbarItem("undo")?.children[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  const v = vditor?.vditor;
+  v?.undo?.undo(v);
 }
 
 export function redoEditor(): void {
   if (blockedByReadonly()) return;
-  toolbarItem("redo")?.children[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  const v = vditor?.vditor;
+  v?.undo?.redo(v);
 }
 
 /**
@@ -1569,9 +1907,23 @@ export function isEditorFullscreen(): boolean {
   return !!vditor?.vditor.element?.classList.contains("vditor--fullscreen");
 }
 
-/** 切换 Vditor 的沉浸式全屏编辑（视图菜单，复用工具栏 fullscreen 项） */
+/** 切换 Vditor 的沉浸式全屏编辑。
+ *  排版工具栏不再放全屏按钮，这里直接复刻 Vditor 内部那一套（.vditor--fullscreen + z-index
+ *  + 锁 body 滚动）；切完补一次 resize，让 Vditor 重算容器宽度变化后的内容内边距。 */
 export function toggleEditorFullscreen(): void {
-  toolbarItem("fullscreen")?.children[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  const v = vditor?.vditor;
+  if (!v) return;
+  const el = v.element;
+  if (el.classList.contains("vditor--fullscreen")) {
+    el.style.zIndex = "";
+    document.body.style.overflow = "";
+    el.classList.remove("vditor--fullscreen");
+  } else {
+    el.style.zIndex = String(v.options.fullscreen?.index ?? 90);
+    document.body.style.overflow = "hidden";
+    el.classList.add("vditor--fullscreen");
+  }
+  window.dispatchEvent(new Event("resize"));
 }
 
 /** 显示 / 隐藏 Vditor 自带工具栏（视图菜单） */
@@ -1604,6 +1956,211 @@ export function scrollToHeading(index: number, text: string): void {
     target = headings.find((h) => normalize(h.textContent) === normalize(text)) ?? target;
   }
   target?.scrollIntoView({ block: "start" });
+}
+
+// ---- 书签：Markdown 模式的锚点（编辑菜单 / 侧边栏「书签」共用）----
+
+/**
+ * Markdown 书签锚点。
+ *
+ * IR / WYSIWYG 模式下光标在渲染 DOM 里，光标位置到 Markdown 源码偏移没有可靠映射，
+ * 故用「块文本 + 同文本块序号」定位：正文文字几乎总能原样出现在源码里（标题 / 列表 /
+ * 代码块的文字同理），重复段落用 occ 消歧。offset 只在能算出时才有效（-1 = 未知），
+ * 供大文档分节通路直接按源码偏移挂载。SV 模式正文即源码，退化为按行定位。
+ */
+export type MdBookmarkAnchor = { text: string; occ: number; offset: number };
+
+/** 当前 Markdown 源码（大文档通路读分节拼回的原文） */
+function currentMdSource(): string {
+  if (largeSource !== null) return largeReader?.sourceText ?? largeSource;
+  return vditor?.getValue() ?? "";
+}
+
+/** 把文本压成可比较的形式：去首尾空白并把内部连续空白折成一个空格 */
+function squeeze(value: string | null): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** 顶层块：IR / WYSIWYG 用 data-block="0"（过滤掉嵌套块），其它情况退回根的直接子元素 */
+function topLevelBlocks(root: HTMLElement): HTMLElement[] {
+  const marked = Array.from(root.querySelectorAll<HTMLElement>('[data-block="0"]'));
+  if (marked.length > 0) {
+    return marked.filter((el) => el.parentElement?.closest('[data-block="0"]') == null);
+  }
+  return Array.from(root.children).filter((el): el is HTMLElement => el instanceof HTMLElement);
+}
+
+/** 在正文根的文本节点里按字符偏移造一个折叠 Range（SV 模式跳转用） */
+function rangeAtTextOffset(root: HTMLElement, offset: number): Range | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let seen = 0;
+  let node = walker.nextNode();
+  while (node) {
+    const len = node.textContent?.length ?? 0;
+    if (seen + len >= offset) {
+      const r = document.createRange();
+      r.setStart(node, Math.max(0, Math.min(offset - seen, len)));
+      r.collapse(true);
+      return r;
+    }
+    seen += len;
+    node = walker.nextNode();
+  }
+  return null;
+}
+
+/** 光标是否落在编辑器正文里；是则返回可用的 Range */
+function caretRangeInEditor(): { root: HTMLElement; range: Range } | null {
+  const root = getEditorContentElement();
+  if (!root) return null;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (!root.contains(range.startContainer)) return null;
+  return { root, range };
+}
+
+/** 取当前光标处的书签锚点；未聚焦 / 找不到块（空行等）时返回 null */
+export function getMdBookmarkAnchor(): MdBookmarkAnchor | null {
+  const hit = caretRangeInEditor();
+  if (!hit) return null;
+  const { root, range } = hit;
+  const source = currentMdSource();
+
+  // SV 模式：正文即源码，光标到根起点的字符数≈源码偏移，取所在行做锚点
+  if (getEditorMode() === "sv") {
+    const before = range.cloneRange();
+    before.selectNodeContents(root);
+    before.setEnd(range.startContainer, range.startOffset);
+    const textOffset = before.toString().length;
+    const lines = source.split("\n");
+    let consumed = 0;
+    let lineIdx = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const end = consumed + (lines[i]?.length ?? 0) + 1;
+      if (textOffset <= end) {
+        lineIdx = i;
+        break;
+      }
+      consumed = end;
+      lineIdx = i + 1;
+    }
+    const lineText = (lines[lineIdx] ?? "").trim();
+    if (lineText === "") return null;
+    let occ = 0;
+    for (let i = 0; i < lineIdx; i += 1) if ((lines[i] ?? "").trim() === lineText) occ += 1;
+    let offset = 0;
+    for (let i = 0; i < lineIdx; i += 1) offset += (lines[i]?.length ?? 0) + 1;
+    return { text: lineText, occ, offset };
+  }
+
+  // IR / WYSIWYG：块锚点
+  const blocks = topLevelBlocks(root);
+  const node = range.startContainer;
+  const nodeEl = node instanceof HTMLElement ? node : node.parentElement;
+  const block = blocks.find((b) => nodeEl && (b === nodeEl || b.contains(nodeEl)));
+  if (!block) return null;
+  const text = squeeze(block.textContent);
+  if (text === "") return null;
+
+  let occ = 0;
+  for (const b of blocks) {
+    if (b === block) break;
+    if (squeeze(b.textContent) === text) occ += 1;
+  }
+
+  let offset = -1;
+  let from = 0;
+  for (let i = 0; i <= occ; i += 1) {
+    const at = source.indexOf(text, from);
+    if (at < 0) {
+      offset = -1;
+      break;
+    }
+    offset = at;
+    from = at + 1;
+  }
+  return { text, occ, offset };
+}
+
+/**
+ * 跳到某个锚点：大文档分节通路按源码偏移挂载对应分节；正常通路按「文本 + 序号」
+ * 找到块并把选区落到块首、滚到视口中部。找到返回 true。
+ */
+export function revealMdBookmark(anchor: MdBookmarkAnchor): boolean {
+  if (largeSource !== null) {
+    if (anchor.offset < 0) return false;
+    revealLargeSourceOffset(anchor.offset);
+    return true;
+  }
+  const root = getEditorContentElement();
+  if (!root) return false;
+
+  if (getEditorMode() === "sv") {
+    if (anchor.offset < 0) return false;
+    const range = rangeAtTextOffset(root, anchor.offset);
+    if (!range) return false;
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    vditor?.focus();
+    (range.startContainer.parentElement ?? root).scrollIntoView({ block: "center" });
+    return true;
+  }
+
+  const blocks = topLevelBlocks(root).filter((b) => squeeze(b.textContent) === anchor.text);
+  const target = blocks[Math.min(anchor.occ, Math.max(blocks.length - 1, 0))];
+  if (!target) return false;
+  const range = document.createRange();
+  range.setStart(target, 0);
+  range.collapse(true);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+  vditor?.focus();
+  target.scrollIntoView({ block: "center" });
+  return true;
+}
+
+/**
+ * 文档最上方起始位置的书签锚点（无光标时「添加书签」的落点）；空文档返回 null。
+ *
+ * SV / 大文档通路取首个非空行；IR / WYSIWYG 取首个非空顶层块（与
+ * `getMdBookmarkAnchor` 的块锚点语义一致，`revealMdBookmark` 才能命中）。
+ */
+export function getMdTopBookmarkAnchor(): MdBookmarkAnchor | null {
+  const source = currentMdSource();
+  if (largeSource !== null || getEditorMode() === "sv") {
+    let offset = 0;
+    for (const line of source.split("\n")) {
+      const text = line.trim();
+      if (text !== "") return { text, occ: 0, offset };
+      offset += line.length + 1;
+    }
+    return null;
+  }
+
+  const root = getEditorContentElement();
+  if (!root) return null;
+  for (const block of topLevelBlocks(root)) {
+    const text = squeeze(block.textContent);
+    if (text === "") continue;
+    return { text, occ: 0, offset: source.indexOf(text) };
+  }
+  return null;
+}
+
+/** 全选 Markdown 正文（文档右键菜单「全选」用）；正文未就绪时返回 false */
+export function selectAllEditorContent(): boolean {
+  const root = getEditorContentElement();
+  if (!root) return false;
+  const range = document.createRange();
+  range.selectNodeContents(root);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+  vditor?.focus();
+  return true;
 }
 
 // ---- 阶段 12：正文行号栏（视图菜单可开关）----
@@ -2169,6 +2726,7 @@ export function setLineNumbersVisible(visible: boolean): void {
 window.addEventListener("resize", () => {
   scheduleLineNumbers(80);
   scheduleSpotlight();
+  scheduleSvAnchors(80); // 两栏宽度变了，块的折行与高度都要重算
 });
 
 /**

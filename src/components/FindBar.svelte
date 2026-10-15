@@ -14,6 +14,8 @@
 
   interface Props {
     locale: Locale;
+    /** 语言包合并词表（内置 + locales/ 下的语言包）：由 App 注入，缺省时回落内置词表 */
+    i18nEntries?: Record<string, string>;
     /** 查找词（与父级双向绑定） */
     findText?: string;
     /** 替换词（与父级双向绑定） */
@@ -38,6 +40,7 @@
 
   let {
     locale,
+    i18nEntries,
     findText = $bindable(""),
     replaceText = $bindable(""),
     findStatus,
@@ -53,16 +56,16 @@
     onClose,
   }: Props = $props();
 
-  const t = $derived(makeT(locale));
+  const t = $derived(makeT(locale, i18nEntries));
 
-  const readonlyTip = $derived(t("阅读模式下不可直接编辑，请先切到编辑模式（Ctrl+E）"));
+  const readonlyTip = $derived(t("Direct editing is unavailable in reading mode; switch to edit mode first (Ctrl+E)"));
 </script>
 
 <div class="findbar">
   <input
     class="f-input"
     bind:value={findText}
-    placeholder={t("查找内容")}
+    placeholder={t("Find")}
     oninput={onFindInput}
     onkeydown={(e) => {
       if (e.key === "Enter") {
@@ -72,21 +75,21 @@
     }}
   />
   <span class="f-status">{findStatus}</span>
-  <button class="f-toggle" class:active={findCase} title={t("区分大小写")} onclick={() => onToggleFlag("case")}>Aa</button>
-  <button class="f-toggle" class:active={findWord} title={t("全词匹配")} onclick={() => onToggleFlag("word")}>W</button>
-  <button class="f-toggle" class:active={findRegex} title={t("正则表达式")} onclick={() => onToggleFlag("regex")}>.*</button>
-  <button onclick={() => onNext(false)} title="F3">{t("下一个")}</button>
-  <button onclick={() => onNext(true)} title="Shift+F3">{t("上一个")}</button>
+  <button class="f-toggle" class:active={findCase} title={t("Match Case")} onclick={() => onToggleFlag("case")}>Aa</button>
+  <button class="f-toggle" class:active={findWord} title={t("Match Whole Word")} onclick={() => onToggleFlag("word")}>W</button>
+  <button class="f-toggle" class:active={findRegex} title={t("Regular Expression")} onclick={() => onToggleFlag("regex")}>.*</button>
+  <button onclick={() => onNext(false)} title="F3">{t("Next")}</button>
+  <button onclick={() => onNext(true)} title="Shift+F3">{t("Previous")}</button>
   <span class="f-divider"></span>
-  <input class="f-input" bind:value={replaceText} placeholder={t("替换为")} />
+  <input class="f-input" bind:value={replaceText} placeholder={t("Replace with")} />
   <button disabled={browseMode} title={browseMode ? readonlyTip : undefined} onclick={onReplaceOne}>
-    {t("替换")}
+    {t("Replace")}
   </button>
   <button disabled={browseMode} title={browseMode ? readonlyTip : undefined} onclick={onReplaceAll}>
-    {t("全部替换")}
+    {t("Replace All")}
   </button>
   <span class="spacer"></span>
-  <button class="f-close" onclick={onClose} title={t("关闭（Esc）")}>✕</button>
+  <button class="f-close" onclick={onClose} title={t("Close (Esc)")}>✕</button>
 </div>
 
 <style>
@@ -149,7 +152,7 @@
   .findbar .f-toggle.active {
     background: var(--accent);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--accent-contrast, #fff);
   }
 
   .findbar .f-divider {

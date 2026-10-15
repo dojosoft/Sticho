@@ -58,6 +58,13 @@ type MatchCursor = { next(): { done: boolean }; readonly value: { from: number; 
 export type CodeReaderStyle = {
   fontSize?: string;
   lineHeight?: string;
+  /**
+   * 正文区底色（护眼背景）。
+   *
+   * 代码视图只认「字号 / 行距 / 背景」三项：字体固定为等宽、文字色由语法高亮决定，
+   * 用户设的「文字颜色」在代码视图里不生效（见应用层 applyCodeReaderStyle 的取舍）。
+   */
+  background?: string;
 };
 
 export interface CodeEditorOptions {
@@ -81,6 +88,8 @@ export interface CodeEditorOptions {
   paragraphFocus?: boolean;
   dark: boolean;
   lineNumbers: boolean;
+  /** 自动换行（视图 → 自动换行）：开时长行按窗口宽度折行，关时一行占一行、横向滚动 */
+  wrap: boolean;
   /** 只读（阅读模式）：由应用层的 browseMode 决定 */
   readonly: boolean;
   /** 正文变化（含中文输入法的组合期）；应用层自行防抖后再做统计 */
@@ -111,6 +120,7 @@ let cGutter: Comp | null = null;
 let cIndent: Comp | null = null;
 let cType: Comp | null = null;
 let cFocus: Comp | null = null;
+let cWrap: Comp | null = null;
 
 /* ─────────────────────── 主题 ─────────────────────── */
 
@@ -198,6 +208,14 @@ function buildTheme(modules: CmModules, dark: boolean): Ext {
         border: "none",
       },
       ".cm-lineNumbers .cm-gutterElement": { padding: "0 10px 0 8px" },
+      // 折叠箭头默认是 <span> 文本（⌄/›），放大字号并留足点按区域
+      ".cm-foldGutter .cm-gutterElement": {
+        padding: "0 5px",
+        fontSize: "15px",
+        lineHeight: "1",
+        minWidth: "1.1em",
+        textAlign: "center",
+      },
       ".cm-activeLine": { backgroundColor: `var(--cm-active-line, ${activeLine})` },
       ".cm-activeLineGutter": { backgroundColor: `var(--cm-active-line, ${activeLine})` },
       "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
@@ -390,7 +408,10 @@ function localWordSource(context: CompletionContext): CompletionResult | null {
 
 /** 选中文本在全文中的出现次数（用 CM 自己的 RegExpCursor，逐行扫描，不整篇拷贝字符串） */
 function countMatches(modules: CmModules, state: St, text: string): number {
-  const pattern = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // 整词匹配：前后不能紧邻标识符字符，避免把「词内出现」（如 cat 里的 cat）也算进去。
+  // 用显式字符类而非 \w，是因为 RegExpCursor 见到 \w 会改走逐行拼装的多行正则分支。
+  const pattern = `(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`;
   const cursor = new modules.search.RegExpCursor(state.doc, pattern, {}, 0, state.doc.length);
   let n = 0;
   while (!cursor.next().done) {
@@ -680,6 +701,7 @@ export async function mountCodeEditor(host: HTMLElement, options: CodeEditorOpti
   cIndent = new state.Compartment();
   cType = new state.Compartment();
   cFocus = new state.Compartment();
+  cWrap = new state.Compartment();
 
   const bm = bookmarkKit(modules);
   const fk = findKitOf(modules);
@@ -728,14 +750,15 @@ export async function mountCodeEditor(host: HTMLElement, options: CodeEditorOpti
       ...language.foldKeymap,
       commands.indentWithTab,
       { key: "Ctrl-Space", run: autocomplete.startCompletion },
-      // 书签：F2 / F3 / F9 / F10 已各有归属，按 notepad4 的习惯挪到 F4
-      { key: "Ctrl-F2", run: () => toggleCodeBookmark(), preventDefault: true },
-      { key: "F4", run: () => nextCodeBookmark(1) },
-      { key: "Shift-F4", run: () => nextCodeBookmark(-1) },
+      // 书签快捷键（Ctrl+F2 / F4 / Shift+F4）统一由应用层的全局 keydown 处理：
+      // 这里不注册，否则 CM 处理一次（CM 的 keymap 只 preventDefault、不停冒泡），
+      // 事件继续冒到 window 又被应用层处理一次，会连跳两次 / 切了又立刻取消。
     ]),
     viewMod.EditorView.contentAttributes.of({ spellcheck: "false", autocapitalize: "off" }),
     cIndent.of(language.indentUnit.of(indentText(spec))),
     cGutter.of(options.lineNumbers ? viewMod.lineNumbers() : []),
+    // 自动换行：默认关（一行占一行，超出横向滚动）；开关由应用层经 setCodeLineWrapping 驱动
+    cWrap.of(options.wrap ? viewMod.EditorView.lineWrapping : []),
     cLang.of(langExt),
     cTheme.of(buildTheme(modules, options.dark)),
     cReadonly.of(readonlyExt(modules, options.readonly)),
@@ -786,6 +809,7 @@ export function unmountCodeEditor(): void {
   cIndent = null;
   cType = null;
   cFocus = null;
+  cWrap = null;
 }
 
 /** 代码视图是否处于挂载状态 */
@@ -842,6 +866,14 @@ export function setCodeLineNumbers(visible: boolean): void {
   view.dispatch({ effects: cGutter.reconfigure(visible ? cm.view.lineNumbers() : []) });
 }
 
+/** 自动换行开关（视图 → 自动换行）：未挂载时 no-op */
+export function setCodeLineWrapping(on: boolean): void {
+  if (!view || !cm || !cWrap) return;
+  view.dispatch({
+    effects: cWrap.reconfigure(on ? cm.view.EditorView.lineWrapping : []),
+  });
+}
+
 /** 打字机模式开关（未挂载时 no-op，与其余 setter 的既有约定一致） */
 export function setCodeTypewriter(on: boolean): void {
   if (!view || !cm || !cType) return;
@@ -854,13 +886,21 @@ export function setCodeParagraphFocus(on: boolean): void {
   view.dispatch({ effects: cFocus.reconfigure(on ? focusExt(cm) : []) });
 }
 
-/** 阅读排版：只消费字号与行距，作用在容器上（CM 的 theme 用 var() 读它们） */
+/** 阅读排版：消费字号 / 行距 / 背景，作用在容器上（CM 的 theme 用 var() 读它们） */
 export function setCodeReaderStyle(style: CodeReaderStyle): void {
   if (!hostEl) return;
   if (style.fontSize) hostEl.style.setProperty("--cm-font-size", style.fontSize);
   else hostEl.style.removeProperty("--cm-font-size");
   if (style.lineHeight) hostEl.style.setProperty("--cm-line-height", style.lineHeight);
   else hostEl.style.removeProperty("--cm-line-height");
+  // 背景要同时覆盖正文与行号槽：只改正文会让左侧一条仍是默认色，看着像没生效
+  if (style.background) {
+    hostEl.style.setProperty("--cm-bg", style.background);
+    hostEl.style.setProperty("--cm-gutter-bg", style.background);
+  } else {
+    hostEl.style.removeProperty("--cm-bg");
+    hostEl.style.removeProperty("--cm-gutter-bg");
+  }
 }
 
 export function focusCodeEditor(): void {
@@ -898,6 +938,111 @@ export function nextCodeBookmark(dir: 1 | -1): boolean {
   view.dispatch({ selection: { anchor: target }, scrollIntoView: true });
   view.focus();
   return true;
+}
+
+/** 当前全部书签的行首位置（升序），供应用层按标签存档 */
+export function getCodeBookmarkPositions(): number[] {
+  if (!view || !bmKit) return [];
+  const out: number[] = [];
+  const state = view.state;
+  state.field(bmKit.field).between(0, state.doc.length, (from) => {
+    out.push(from);
+  });
+  return out;
+}
+
+/** 当前全部书签（行号从 1 起 + 行文本），供侧边栏「书签」面板展示 */
+export function getCodeBookmarks(): { line: number; text: string }[] {
+  if (!view || !bmKit) return [];
+  const out: { line: number; text: string }[] = [];
+  const state = view.state;
+  state.field(bmKit.field).between(0, state.doc.length, (from) => {
+    const ln = state.doc.lineAt(from);
+    out.push({ line: ln.number, text: ln.text });
+  });
+  return out;
+}
+
+/** 清空全部书签 */
+export function clearCodeBookmarks(): void {
+  if (!view || !bmKit) return;
+  view.dispatch({ effects: bmKit.clear.of(null) });
+}
+
+/**
+ * 用一组行首位置重建书签：切换标签时把该标签存档的书签装回新文档。
+ * 先清空再逐条 toggle；位置按当前文档长度夹紧。
+ */
+export function setCodeBookmarks(positions: number[]): void {
+  const kit = bmKit;
+  if (!view || !kit) return;
+  const len = view.state.doc.length;
+  const effects = [
+    kit.clear.of(null),
+    ...positions.map((p) => kit.toggle.of(Math.min(Math.max(p, 0), len))),
+  ];
+  view.dispatch({ effects });
+}
+
+/** 把选区落到指定偏移并滚入视口（侧边栏点击书签跳转用） */
+export function scrollToCodeOffset(pos: number): void {
+  if (!view) return;
+  const target = Math.min(Math.max(pos, 0), view.state.doc.length);
+  view.dispatch({ selection: { anchor: target }, scrollIntoView: true });
+  view.focus();
+}
+
+/** 在光标所在行添加书签（该行已有书签则不动）；返回是否可用（编辑器已挂载） */
+export function addCodeBookmark(): boolean {
+  if (!view || !bmKit) return false;
+  const state = view.state;
+  const lineFrom = state.doc.lineAt(state.selection.main.head).from;
+  let exists = false;
+  state.field(bmKit.field).between(0, state.doc.length, (from) => {
+    if (from === lineFrom) exists = true;
+  });
+  if (!exists) view.dispatch({ effects: bmKit.toggle.of(lineFrom) });
+  return true;
+}
+
+/** 删除处于某个行首位置的书签（侧边栏「书签」面板的单条删除） */
+export function removeCodeBookmark(pos: number): void {
+  if (!view || !bmKit) return;
+  let exists = false;
+  view.state.field(bmKit.field).between(0, view.state.doc.length, (from) => {
+    if (from === pos) exists = true;
+  });
+  if (exists) view.dispatch({ effects: bmKit.toggle.of(pos) });
+}
+
+/** 当前选中文字（无选中则为空串）；文档右键菜单「复制 / 剪切」用 */
+export function getCodeSelectionText(): string {
+  if (!view) return "";
+  const sel = view.state.selection.main;
+  return sel.empty ? "" : view.state.sliceDoc(sel.from, sel.to);
+}
+
+/** 删除选区（文档右键菜单「剪切」用；无选中时 no-op） */
+export function deleteCodeSelection(): void {
+  if (!view) return;
+  const sel = view.state.selection.main;
+  if (sel.empty) return;
+  view.dispatch({ changes: { from: sel.from, to: sel.to } });
+  view.focus();
+}
+
+/** 在当前选区插入文本（文档右键菜单「粘贴」用） */
+export function insertCodeText(text: string): void {
+  if (!view) return;
+  view.dispatch(view.state.replaceSelection(text));
+  view.focus();
+}
+
+/** 全选（文档右键菜单「全选」用） */
+export function selectAllCode(): void {
+  if (!view) return;
+  view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+  view.focus();
 }
 
 /* ─────────────────────── 查找 / 替换命令 ─────────────────────── */
