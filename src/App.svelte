@@ -4277,6 +4277,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   function toggleEditorToolbar(): void {
     showToolbar = !showToolbar;
     setEditorToolbarVisible(showToolbar);
+    void saveSetting("showToolbar", showToolbar); // 与行号 / 自动换行一致：记住选择
   }
 
   /** 表格整列对齐（批次七）。光标不在单元格内时 Vditor 无从判断列，给出提示 */
@@ -6534,6 +6535,10 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 否则会在 IR / 所见即所得这类不支持行号的视图里把它硬打开
       showLineNumbers = (s["lineNumbers"] as boolean | undefined) ?? true;
       autoWrap = (s["wrapLongLines"] as boolean | undefined) ?? true;
+      // 排版工具栏的显示开关（视图菜单）：与行号 / 自动换行同属「视图偏好」，一律持久化。
+      // 编辑器此刻多半尚未就绪，setter 会暂存到 after 里回放（见 editor.ts 的 toolbarPending）
+      showToolbar = (s["showToolbar"] as boolean | undefined) ?? true;
+      setEditorToolbarVisible(showToolbar);
       typewriterOn = (s["typewriterMode"] as boolean | undefined) ?? false;
       paragraphFocus = (s["paragraphFocus"] as boolean | undefined) ?? false;
       setTypewriterMode(typewriterOn);
@@ -7250,6 +7255,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     {charCount}
     {lineCount}
     {currentPath}
+    {currentRemote}
     {dirty}
     {docKind}
     onSetDocKind={(kind) => void setDocMode(kind)}

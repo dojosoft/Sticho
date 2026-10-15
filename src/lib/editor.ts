@@ -44,6 +44,15 @@ let modeListener: ((mode: "ir" | "wysiwyg" | "sv") => void) | null = null;
 let ready = false;
 let readyResolve: (() => void) | null = null;
 let readyPromise: Promise<void> = Promise.resolve();
+/**
+ * 就绪前收到、需要在 `after` 里回放的东西。
+ *
+ * 文件头说过：实例内部的 vditor 要等 i18n 脚本就绪后才建立，在那之前 setValue() 会抛错、
+ * 工具栏元素也可能还不存在。「启动即打开文件」「双击关联文件启动」都正好落在这个窗口里，
+ * 所以这两项先暂存，等 `after` 回调再统一补上（大文档通路早有 largePending，这里对齐它）。
+ */
+let valuePending: { value: string; plain: boolean } | null = null;
+let toolbarPending: boolean | null = null;
 /** 编辑器界面语言（批次八）：构造时写入 options.lang，见 setEditorLocale */
 let editorLang: "zh_CN" | "en_US" = "zh_CN";
 
@@ -1005,6 +1014,17 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
         attachLineNumbers();
         attachSpotlight();
       }
+      // 编辑器就绪前就收到的普通文档 / 工具栏开关：此刻才轮到它们（同一套延迟回放）
+      if (valuePending) {
+        const pending = valuePending;
+        valuePending = null;
+        setEditorValue(pending.value, pending.plain);
+      }
+      if (toolbarPending !== null) {
+        const visible = toolbarPending;
+        toolbarPending = null;
+        setEditorToolbarVisible(visible);
+      }
       scheduleImageResolve(0);
       // 应用可能在编辑器就绪前就已进入阅读模式（启动即打开文件），这里补一次
       applyReadonlyState();
@@ -1426,6 +1446,12 @@ export function setEditorValue(value: string, plain = false): void {
     return;
   }
   exitLargeMode();
+  if (!ready) {
+    // 未就绪时不能直接 setValue（会抛错），也不能就这么算了：下面那行会按新正文算行号，
+    // 结果就是「行号栏是新的、正文还是空的」。暂存到 after 里回放。
+    valuePending = { value, plain };
+    return;
+  }
   vditor?.setValue(value);
   lineNumberSource = value;
   scheduleLineNumbers(150);
@@ -1936,10 +1962,16 @@ export function toggleEditorFullscreen(): void {
   window.dispatchEvent(new Event("resize"));
 }
 
-/** 显示 / 隐藏 Vditor 自带工具栏（视图菜单） */
+/** 显示 / 隐藏 Vditor 自带工具栏（视图菜单）。未就绪时暂存，由 after 回放。 */
 export function setEditorToolbarVisible(visible: boolean): void {
   const el = vditor?.vditor.toolbar?.element;
-  if (el) el.style.display = visible ? "" : "none";
+  if (!el) {
+    // 实例尚未建立（编辑器就绪前）或没有工具栏元素：记下来，等 after 再应用
+    toolbarPending = visible;
+    return;
+  }
+  toolbarPending = null;
+  el.style.display = visible ? "" : "none";
 }
 
 /**
