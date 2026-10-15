@@ -5,12 +5,12 @@
  * 用法：node scripts/i18n-missing.mjs
  *
  * 扫描 src/ 下所有源文件里 `t("…")` / `t('…')` 的字面量键，与 src/lib/i18n.ts 的
- * EN 词表比对，列出：
+ * ZH 词表（键 = 英文原文）比对，列出：
  *   - 已使用但未收录英文的键（增量补齐用）；
  *   - 已收录但源码里已无人使用的键（清理用）。
  *
- * 之所以是「清单工具」而不是门禁：EN 词表刻意保留「缺失回落中文」的可增量设计，
- * 硬失败会挡住正常开发；真正的不变量（英文值不为空串）由 i18n.test.ts 断言。
+ * 之所以是「清单工具」而不是门禁：ZH 词表刻意保留「缺失回落英文原文」的可增量设计，
+ * 硬失败会挡住正常开发；真正的不变量（中文值不为空串）由 i18n.test.ts 断言。
  * 因此本脚本退出码恒为 0，输出仅供人工参考。
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -46,16 +46,16 @@ function decode(raw) {
 }
 
 /**
- * 从 i18n.ts 里解析 EN 词表的键。
+ * 从 i18n.ts 里解析 ZH 词表（键 = 英文原文）的键。
  *
  * 不做 TS 解析：词表是扁平的「键: 值」列表，且 prettier 保证每个键都独占一行，
- * 因此按行匹配「缩进两格 + 键 + 冒号」即可。键有三种写法：汉字标识符（合法的 JS
- * 标识符，无引号）、双引号、单引号；注释行以 `/` 开头，不会被误判。
+ * 因此按行匹配「缩进两格 + 键 + 冒号」即可。键一律是英文双引号字符串；注释行以
+ * `/` 开头，不会被误判。
  */
-function enKeys(text) {
-  const start = text.indexOf("const EN: Record<string, string> = {");
+function zhKeys(text) {
+  const start = text.indexOf("const ZH: Record<string, string> = {");
   const end = text.indexOf("\n};", start);
-  if (start < 0 || end < 0) throw new Error("i18n.ts 里找不到 EN 词表");
+  if (start < 0 || end < 0) throw new Error("i18n.ts 里找不到 ZH 词表");
   const body = text.slice(start, end);
   const keys = new Set();
   const re =
@@ -72,7 +72,7 @@ function usedKeys(text) {
   return keys;
 }
 
-const en = enKeys(readFileSync(join(srcDir, "lib", "i18n.ts"), "utf8"));
+const zh = zhKeys(readFileSync(join(srcDir, "lib", "i18n.ts"), "utf8"));
 
 /** 键 → 首次出现的文件（仅用于报告，方便定位） */
 const used = new Map();
@@ -83,10 +83,10 @@ for (const file of walk(srcDir)) {
   }
 }
 
-const missing = [...used.keys()].filter((k) => !en.has(k));
-const unused = [...en].filter((k) => !used.has(k));
+const missing = [...used.keys()].filter((k) => !zh.has(k));
+const unused = [...zh].filter((k) => !used.has(k));
 
-console.log(`EN 词条：${en.size} 条；源码中出现的 t() 字面量键：${used.size} 条`);
+console.log(`ZH 词条：${zh.size} 条；源码中出现的 t() 字面量键：${used.size} 条`);
 console.log(`\n未收录英文的键（${missing.length} 条）：`);
 for (const k of missing) console.log(`  ${used.get(k)}  ${JSON.stringify(k)}`);
 

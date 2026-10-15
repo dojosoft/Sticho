@@ -46,6 +46,35 @@
 >
 > 两者均无传染性、允许闭源商用；`ring`（`rustls` 加密后端）为 Apache-2.0 AND ISC，在白名单内。
 
+## 内置第三方引擎（随 Vditor 发行包内嵌于 `public/vditor/dist/js`）
+
+> 这些引擎不是 npm / Cargo 依赖，而是随 `vditor` 发行包一同落进 `public/vditor/dist/js` 的运行时资源，
+> 由 Vditor 在渲染 mermaid / echarts / 数学公式等代码块时按需从本地目录懒加载
+> （见 `src/lib/editor.ts` 的 `CDN_PATH`），全程不联网。下表列全并逐项确认「可商用 + 可闭源 + 无传染性」。
+
+| 引擎 | 目录 | 许可证 | 用途 |
+|---|---|---|---|
+| Lute | `lute/` | MIT | Markdown 解析/渲染内核（Vditor 自带） |
+| Mermaid | `mermaid/` | MIT | mermaid 代码块：流程图 / 时序图 |
+| KaTeX（含 mhchem） | `katex/`（含 `fonts/`） | MIT | `$…$` 数学公式与化学式 |
+| ECharts | `echarts/` | Apache-2.0 | echarts 代码块：图表 |
+| abcjs | `abcjs/` | MIT | abc 代码块：乐谱 |
+| flowchart.js | `flowchart.js/` | MIT | flowchart 代码块：流程图 |
+| WaveDrom | `wavedrom/` | MIT | wavedrom 代码块：时序波形 |
+| plantuml-encoder | `plantuml/` | MIT | PlantUML 源码编码 |
+| markmap | `markmap/` | MIT | markmap 代码块：思维导图 |
+| highlight.js | `highlight.js/`（含 `styles/`） | BSD-3-Clause | 代码块语法高亮 |
+| smiles-drawer | `smiles-drawer/` | MIT | smiles 代码块：化学结构式 |
+| Vditor 图标 / 语言包 / emoji | `icons/`、`i18n/`、`../images/emoji/` | MIT | 工具栏图标、界面文案、emoji 素材 |
+
+> 许可原始文件：`highlight.js/LICENSE`（BSD-3-Clause）、`wavedrom/LICENSE.WaveDrom`（MIT）；
+> 其余引擎的许可随各自上游发行包声明，均为上表所列宽松许可。
+>
+> **已移除**：Graphviz（`graphviz/viz.js` + `full.render.js`）为 **EPL-1.0**（Eclipse Public License，
+> 具弱传染性的互惠许可，不在本项目白名单内）。编辑器工具栏未提供 Graphviz 入口（见 `editor.ts`），
+> 故按「移除未使用能力」原则整目录删除，避免白名单外许可随包分发。
+> 删除后 graphviz / dot 代码块不再渲染（与其余未启用引擎表现一致）。
+
 ## 例外条款：Pandoc（阶段 5 引入时生效）
 
 - **Pandoc**（GPL-2.0）：以独立 `pandoc.exe` 可执行文件形式存在，通过子进程（`std::process::Command`）调用，
@@ -55,4 +84,4 @@
 
 ---
 
-*最后更新：阶段 1（项目骨架）*
+*最后更新：审查改进批次 2（安全加固——资产作用域收窄、远程资源默认不加载、内置第三方引擎许可清单，并移除 EPL 系 Graphviz）*

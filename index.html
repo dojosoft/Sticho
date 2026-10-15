@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/sticho-icon.png" />
+    <!-- 编辑器运行时预取：Vditor 在 init 时才按 cdn 相对路径注入这几个本地脚本，
+         lute（约 3.7MB）与 highlight（约 1MB）体积最大。这里在页面解析阶段就发起预取，
+         与主包解析、启动期目录 IPC 并行，编辑器就绪时直接用预热好的响应。
+         末尾的 ?v= 查询串必须与 Vditor 注入时一致（见 node_modules/vditor/dist/index.js
+         addScript 处的版本号），否则 URL 不同、预取不会被复用。 -->
+    <link rel="preload" as="script" href="/vditor/dist/js/lute/lute.min.js" />
+    <link rel="preload" as="script" href="/vditor/dist/js/highlight.js/highlight.min.js?v=11.7.0" />
+    <link rel="preload" as="script" href="/vditor/dist/js/highlight.js/third-languages.js?v=1.0.1" />
     <title>Sticho</title>
   </head>
   <body>

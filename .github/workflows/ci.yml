@@ -2,8 +2,8 @@ name: CI
 
 # 持续集成底座：把「前端构建 + 前端单测 + Rust 静态检查 + Rust 单测」串成一条流水线。
 #
-# 前提说明：当前项目目录尚未纳入 git，本工作流需在以下条件满足后才会生效——
-#   1. 以 **md-studio** 目录为仓库根初始化 git 并推送到 GitHub；
+# 前提说明：本工作流需在以下条件满足后才会生效——
+#   1. 以 **Sticho** 目录为仓库根初始化 git 并推送到 GitHub；
 #   2. 仓库默认分支为 main / master（或改下面的 branches 列表）。
 #
 # 之所以选 windows-latest：应用是 Windows 桌面程序，Rust 侧依赖
@@ -49,11 +49,17 @@ jobs:
       - name: 前端静态检查（ESLint）
         run: npm run lint
 
+      - name: 国际化词条一致性（i18n-missing）
+        run: npm run i18n-missing
+
       - name: 前端构建
         run: npm run build
 
-      - name: Rust 静态检查
-        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: Rust 格式检查（rustfmt）
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Rust 静态检查（clippy，警告即错误）
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Rust 单元测试
         run: cargo test --manifest-path src-tauri/Cargo.toml

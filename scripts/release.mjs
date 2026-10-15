@@ -7,10 +7,11 @@
  *   node scripts/release.mjs --no-build    跳过构建，用现有产物跑后续步骤
  *   node scripts/release.mjs --no-desktop  不往桌面复制
  *   node scripts/release.mjs --desktop D:\some\dir   指定桌面替代目录
+ *   node scripts/release.mjs --strict-desktop        复制桌面失败时以非零码退出（默认只告警）
  *
  * 为什么要脚本化：发布链路上只要有一两步靠手做，就会出现「编译明明成功、桌面上的却还是
  * 旧版本」这类假故障——三步分离之后，任何一步被跳过都不再显眼。本脚本把三步绑在一起，
- * 任一步失败即以非零码退出。
+ * 任一步失败即以非零码退出（唯一例外：复制桌面失败默认只告警，见下方 --strict-desktop）。
  *
  * 步骤：
  *   1. 三处版本号必须一致（package.json / tauri.conf.json / Cargo.toml），不一致立刻退出
@@ -64,6 +65,16 @@ function runExec(command, commandArgs) {
     console.error(`\n失败：${command} ${commandArgs.join(" ")}`);
     process.exit(result.status ?? 1);
   }
+}
+
+/**
+ * PowerShell 单引号字符串字面量：内部的 `'` 必须写成 `''`。
+ *
+ * 直接把路径塞进单引号里，路径含 `'`（合法文件名字符）时会提前闭合字符串，
+ * 后面的内容被当成命令解析——轻则压缩失败，重则执行到意外命令。
+ */
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
 }
 
 /** 展开 Windows 的 %VAR% 写法（注册表里存的是 REG_EXPAND_SZ） */
@@ -142,9 +153,13 @@ if (installers.length === 0) {
 
 const outDir = join(root, "release");
 mkdirSync(outDir, { recursive: true });
-// 清掉上一次的可分发产物，避免新旧版本混在一起看不出用了哪个
+// 清掉上一次的可分发产物，避免新旧版本混在一起看不出用了哪个。
+// 只删本脚本自己产出的（Sticho_ 前缀的安装包 / 绿色版、Sticho-Portable-*.zip），
+// 不动用户或其它工具放在 release/ 里的无关文件。
+const isOurArtifact = (name) =>
+  /^Sticho[_.-]/i.test(name) && (name.endsWith(".exe") || name.endsWith(".zip"));
 for (const name of readdirSync(outDir)) {
-  if (name.endsWith(".exe") || name.endsWith(".zip")) rmSync(join(outDir, name));
+  if (isOurArtifact(name)) rmSync(join(outDir, name));
 }
 
 const greenName = `Sticho_${version}_x64-portable.exe`;
@@ -166,7 +181,7 @@ if (process.platform === "win32") {
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    `Compress-Archive -Path '${join(staging, "Sticho.exe")}' -DestinationPath '${join(outDir, zipName)}' -Force`,
+    `Compress-Archive -Path ${psQuote(join(staging, "Sticho.exe"))} -DestinationPath ${psQuote(join(outDir, zipName))} -Force`,
   ]);
   rmSync(staging, { recursive: true, force: true });
 } else {
@@ -195,20 +210,48 @@ if (args.includes("--no-desktop")) {
   process.exit(0);
 }
 
+// 复制桌面是「交付便利」而非发布本体：构建与归档已经成功，此处失败（最常见是绿色版
+// 正被运行中的程序占用）不该让整条命令报「失败」，否则会被误读成编译失败。
+// 默认只告警并以 0 退出；需要严格门禁时加 --strict-desktop。
+const strictDesktop = args.includes("--strict-desktop");
+function desktopFailure(message) {
+  console.error(message);
+  process.exit(strictDesktop ? 1 : 0);
+}
+
 const desktop = desktopDir();
 if (!existsSync(desktop)) {
-  console.error(`\n桌面目录不存在：${desktop}（可用 --desktop 指定，或加 --no-desktop 跳过）`);
-  process.exit(1);
+  desktopFailure(`\n桌面目录不存在：${desktop}（可用 --desktop 指定，或加 --no-desktop 跳过）`);
 }
 const desktopExe = join(desktop, "Sticho.exe");
+const freshExe = join(outDir, greenName);
+// 覆盖前先校验：内容一致就不必写（省一次 IO，也不改动桌面文件的修改时间）
+if (existsSync(desktopExe) && sha256(desktopExe) === sha256(freshExe)) {
+  console.log(`\n桌面上的绿色版已是最新（SHA256 一致），无需复制：${desktopExe}`);
+  process.exit(0);
+}
+// 内容不同才会被覆盖：先留一份备份到 release/（不往桌面堆 .prev 文件）。
+// 万一桌面上的同名文件不是本程序产出的，也不会被无声抹掉。
+if (existsSync(desktopExe)) {
+  const backup = join(outDir, "desktop-Sticho.exe.prev");
+  try {
+    copyFileSync(desktopExe, backup);
+    console.log(`已备份桌面旧文件到：${backup}`);
+  } catch (err) {
+    desktopFailure(
+      `\n备份桌面旧文件失败：${backup}\n${err instanceof Error ? err.message : String(err)}` +
+        `\n为避免覆盖丢失数据，已中止桌面复制。`,
+    );
+  }
+}
 try {
-  copyFileSync(join(outDir, greenName), desktopExe);
+  copyFileSync(freshExe, desktopExe);
 } catch (err) {
-  console.error(
+  desktopFailure(
     `\n复制到桌面失败：${desktopExe}\n${err instanceof Error ? err.message : String(err)}` +
-      `\n若程序正在运行，请先退出再重试。安装包与绿色版已归档在 release/，只差这一步。`,
+      `\n若程序正在运行，请先退出再重试。安装包与绿色版已归档在 release/，只差这一步。` +
+      `\n（构建与归档均已成功，故默认不视为失败；希望失败即报错请加 --strict-desktop）`,
   );
-  process.exit(1);
 }
 console.log(`\n绿色版已复制到桌面：${desktopExe}`);
 console.log(`（${basename(greenName)} → Sticho.exe，SHA256 与 release/ 中的产物一致）`);
