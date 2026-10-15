@@ -81,9 +81,12 @@ export type AutoSaveContext = {
 export async function runAutoSave(ctx: AutoSaveContext): Promise<void> {
   if (!ctx.enabled || ctx.busy || !ctx.ready) return;
   ctx.captureActiveTab(); // 活跃标签的最新内容先回到快照，下面统一按快照落盘
-  try {
-    for (const tab of ctx.tabs) {
-      if (!tab.dirty) continue;
+  for (const tab of ctx.tabs) {
+    if (!tab.dirty) continue;
+    // 逐个标签各自兜错：某个标签持续写不进去时（典型是它的内容含当前编码表示不了的字符，
+    // 这类失败每轮都会重演），不能让它掐断整轮循环——否则排在它后面的脏标签永远拿不到
+    // 草稿，异常退出即丢内容。失败一律静默：草稿是兜底机制，不能打断编辑。
+    try {
       const payload = tab.content;
       const hash = recoveryFingerprint(payload);
       if (hash === tab.draftHash) continue; // 内容没变，省一次写盘
@@ -103,10 +106,9 @@ export async function runAutoSave(ctx: AutoSaveContext): Promise<void> {
         content: payload,
       });
       tab.draftHash = hash;
+    } catch {
+      // 同上：静默吞掉，交给下一轮重试
     }
-  } catch {
-    // 静默：恢复草稿属兜底机制，失败不能打断编辑。
-    // （write_text_file 的「编码不可表示」这类错误也必须吞掉，否则每 30 秒弹一次框）
   }
   // 会话落盘同样静默：原先这里裸调用，失败会变成未处理的 Promise 拒绝，
   // 而调用方多为 `void runAutoSave(...)`，没人接这个 reject。

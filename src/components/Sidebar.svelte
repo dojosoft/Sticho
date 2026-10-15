@@ -6,7 +6,7 @@
    * 目录树按需加载（展开时才读目录），大纲、文件属性与搜索结果的数据由 App 侧提供，
    * 本组件只负责渲染与交互，避免把文件状态逻辑散落到两个文件里。
    */
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { listDir, type DavConfig, type DirEntry } from "../lib/tauri-api";
   import type { OutlineItem, SidebarView } from "../lib/sidebar";
   import { highlightSegments, highlightRegexSegments, type SearchGroup, type SearchHit, type TextSegment } from "../lib/fileSearch";
@@ -88,6 +88,13 @@
   let caseSensitive = $state(false);
   let regexMode = $state(false); // 按正则解释查询词（粗筛在后端，二次匹配在前端）
   let debounce = 0;
+
+  // 本组件是条件渲染的（关掉侧栏即销毁）：挂起的防抖定时器必须随组件一起撤掉，
+  // 否则关闭侧栏后它仍会触发一次 onSearch，对已不可见的输入跑一遍整目录扫描
+  onDestroy(() => {
+    if (debounce !== 0) clearTimeout(debounce);
+    debounce = 0;
+  });
 
   /** 输入防抖：停顿后再发起遍历，避免逐字触发整目录扫描 */
   function scheduleSearch(): void {

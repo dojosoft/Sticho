@@ -215,7 +215,12 @@ function insertLocalImages(files: File[]): Promise<null> {
     }
     const marks: string[] = [];
     const failed: string[] = [];
+    // 每张图都要过一次 IPC 落盘，期间用户可能切走标签。捕获本次的文档身份，
+    // 一旦变了就整体中止：否则后面的图片会存到新文档的 assets 目录，而标记写进新文档
+    // 后会指向错误目录（旧文档的图仍留在它自己的 assets 里，不丢）
+    const ownerPath = currentDocPath;
     for (const file of files) {
+      if (ownerPath !== currentDocPath) return null;
       if (file.size > MAX_IMAGE_BYTES) {
         failed.push(`${file.name}${editorText("imageTooLarge", { n: MAX_IMAGE_BYTES / 1024 / 1024 })}`);
         continue;
@@ -306,14 +311,16 @@ function resolveImagesIn(root: HTMLElement): void {
       continue;
     }
     if (/^(data:|asset:|blob:)/i.test(src)) continue;
-    if (!docDir) continue; // 未保存文档没有落盘目录，相对路径无从换算
     let decoded = src;
     try {
       decoded = decodeURI(src);
     } catch {
       /* 不是合法的百分号编码：按原样当文件路径处理 */
     }
-    const abs = isAbsolutePath(decoded) ? decoded : normalizeJoin(docDir, decoded);
+    // 绝对路径（盘符 / UNC / 以 / 开头）不需要落盘目录换算，未保存文档里也该能显示；
+    // 只有相对路径才依赖 docDir，没有 docDir 时无从换算、跳过
+    const abs = isAbsolutePath(decoded) ? decoded : docDir ? normalizeJoin(docDir, decoded) : null;
+    if (abs === null) continue;
     img.src = convertFileSrc(abs);
   }
 }
@@ -1302,7 +1309,10 @@ export async function renderMermaidInto(
   block.appendChild(codeEl);
   host.appendChild(block);
 
-  ctor.mermaidRender(host, CDN_PATH, vditor?.vditor.options.theme ?? "classic");
+  // 固定用浅色（classic）主题渲染：这条通路的产物是给「导出 Word」用的 PNG，而
+  // mermaidImage 会把画布垫成纯白。若跟随编辑器深色主题渲染，mermaid dark 主题的
+  // 浅色连线与文字画在白底上几乎不可见（编辑器里的预览仍走 v.options.theme，不受影响）
+  ctor.mermaidRender(host, CDN_PATH, "classic");
 
   const deadline = Date.now() + MERMAID_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -1949,7 +1959,14 @@ export function scrollToHeading(index: number, text: string): void {
   if (!root) return;
 
   const normalize = (value: string | null) => (value ?? "").replace(/\s+/g, " ").trim();
-  const headings = Array.from(root.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6"));
+  // SV（分屏预览）与「不渲染」模式下，正文根是左侧的源码（只有被语法标记包裹的纯文本，
+  // 没有任何 h1~h6），渲染好的标题在右侧的 .vditor-preview 里——按根节点找必然为空，
+  // 表现为点大纲毫无反应。找不到标题时改用预览作为查找范围（IR / WYSIWYG 不受影响）。
+  const scope =
+    root.querySelector("h1,h2,h3,h4,h5,h6") !== null
+      ? root
+      : (root.parentElement?.querySelector<HTMLElement>(".vditor-preview") ?? root);
+  const headings = Array.from(scope.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6"));
 
   let target = headings[index];
   if (!target || normalize(target.textContent) !== normalize(text)) {
