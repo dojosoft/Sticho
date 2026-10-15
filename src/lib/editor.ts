@@ -979,8 +979,10 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
       "link", "upload", "table", "emoji", "|",
       { name: "insert-math", tip: editorText("insert-math"), tipPosition: "se", icon: MATH_ICON, click: insertMathBlock },
       { name: "insert-mermaid", tip: editorText("insert-mermaid"), tipPosition: "se", icon: MERMAID_ICON, click: insertMermaidBlock },
-      "|",
-      // 撤销 / 重做 / 全屏不再放进排版工具栏：改由「皮肤设置 → 工具栏」按需显示在顶栏右侧，
+      // 渲染模式按钮不再放进排版工具栏（改由状态栏的渲染模式按钮切换）。工具栏项本身仍保留：
+      // 模式切换（setEditorMode）、模式监听（attachModeWatcher）与只读态刷新都依赖它，
+      // 仅由 App.svelte 把该按钮隐藏（见 :global([data-type="edit-mode"]) 规则）。
+      // 撤销 / 重做 / 全屏同样不放这里：改由「皮肤设置 → 工具栏」按需显示在顶栏右侧，
       // 与查找 / 保存同处一排（见 App.svelte 的工具栏自定义按钮）。
       "edit-mode",
     ].map((item) =>
@@ -1000,7 +1002,7 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
       attachLineNumbers();
       attachCodeLanguagePicker();
       attachModeWatcher();
-      // 用本文件的自绘文案覆盖 Vditor 自带按钮提示（如排版工具栏末位的「切换渲染模式」）
+      // 用本文件的自绘文案覆盖 Vditor 自带按钮提示（如已隐藏的「切换渲染模式」按钮的提示）
       refreshToolbarTips();
       // 启动前读到的用户设置此刻才有正文元素可用（打字机模式要设选项、聚光灯要挂遮罩）
       setTypewriterMode(typewriterMode);
@@ -1592,13 +1594,20 @@ function scrollTargetOf(content: HTMLElement): HTMLElement {
  * 锚点记录同一段内容在两栏滚动内容里的 y 偏移（见 buildSvAnchors），滚动时在夹住当前
  * 位置的两锚点之间插值；锚点不足时退回比例换算。
  *
- * 给 scrollTop 赋值会再触发一次该元素的 scroll 事件，用 svSyncing 吃掉这一次回弹——
- * 只在目标位置确实变化时才置位，否则目标没动、事件不来，这个标记就会把用户的下一次
- * 真实滚动误吞。
+ * 滚动同步的两处卡顿 / 抖动来源与对策：
+ * 1. 一帧内浏览器会派发多枚 scroll 事件，逐枚做完整映射（含强制布局的 scrollHeight 读数）
+ *    既费又抖，故把映射收进 requestAnimationFrame 按帧合并，一帧最多做一次；
+ * 2. 给 scrollTop 赋值会（因小数取整 / 钳制）派发**多枚** scroll 事件，早期的布尔标记只能
+ *    吃一枚，第二枚不再被吃就反向映射回来，两栏互相纠正 → 抖动。故改为按侧记录「预期落值」
+ *    （赋值后读回浏览器实际落值），该侧的 scroll 事件只要落在该值附近就丢弃——多枚回声
+ *    一次性收干净，且两侧各记各的，不会互相顶掉对方的待收回声。
  */
 let svSyncSv: HTMLElement | null = null;
 let svSyncPreview: HTMLElement | null = null;
-let svSyncing = false;
+let svRaf: number | null = null;
+let svPending: "sv" | "preview" | null = null;
+/** 上一次同步写入各侧的「预期落值」：用于识别（可能多枚的）回声 scroll 事件 */
+let svEcho: { sv?: number; preview?: number } = {};
 
 /** 左右对齐锚点（按 sv 严格递增）；内容 / 尺寸变化时经 scheduleSvAnchors 重建 */
 let svAnchors: SvAnchor[] = [];
@@ -1620,16 +1629,29 @@ function syncSvScroll(from: HTMLElement, to: HTMLElement): void {
   );
   const next = Number.isNaN(mapped) ? (from.scrollTop / fromMax) * toMax : mapped;
   if (Math.abs(next - to.scrollTop) < 1) return;
-  svSyncing = true;
   to.scrollTop = next;
+  // 读回浏览器实际落值（小数取整 / 钳制后与 next 可能差一点），作为识别回声的依据
+  svEcho[to === svSyncSv ? "sv" : "preview"] = to.scrollTop;
 }
 
 function onSvPaneScroll(which: "sv" | "preview"): void {
   if (!svSyncSv || !svSyncPreview) return;
-  if (svSyncing) {
-    svSyncing = false; // 这一发是自己赋值引起的回声，丢掉
-    return;
+  const expected = svEcho[which];
+  if (expected !== undefined) {
+    delete svEcho[which];
+    const el = (which === "sv" ? svSyncSv : svSyncPreview)!;
+    if (Math.abs(el.scrollTop - expected) <= 1) return; // 自己赋值引起的回声（可能多枚），丢弃
   }
+  svPending = which;
+  if (svRaf === null) svRaf = requestAnimationFrame(flushSvSync);
+}
+
+/** 按帧合并后的实际映射：一帧内无论收到多少枚 scroll 事件，只对齐一次 */
+function flushSvSync(): void {
+  svRaf = null;
+  const which = svPending;
+  svPending = null;
+  if (!which || !svSyncSv || !svSyncPreview) return;
   if (which === "sv") syncSvScroll(svSyncSv, svSyncPreview);
   else syncSvScroll(svSyncPreview, svSyncSv);
 }
@@ -1762,10 +1784,15 @@ function detachSvScrollSync(): void {
     clearTimeout(svAnchorTimer);
     svAnchorTimer = null;
   }
+  if (svRaf !== null) {
+    cancelAnimationFrame(svRaf);
+    svRaf = null;
+  }
+  svPending = null;
+  svEcho = {};
   svAnchors = [];
   svSyncSv = null;
   svSyncPreview = null;
-  svSyncing = false;
 }
 
 /** 聚焦编辑器 */

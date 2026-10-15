@@ -206,6 +206,17 @@ body {
 }
 
 /**
+ * 排版工具栏最右侧的「渲染模式」按钮已去除：渲染模式改由状态栏的按钮切换（见 StatusBar.svelte）。
+ *
+ * 该工具栏项（data-type="edit-mode" 的外层 .vditor-toolbar__item）同时是模式切换与模式监听的
+ * 入口（setEditorMode / attachModeWatcher 都点它），所以 DOM 仍需保留，这里只做视觉隐藏；
+ * 其前面的分隔线已从 editor.ts 的 toolbar 数组里移除，避免尾部留下一条悬空分隔线。
+ */
+[data-type="edit-mode"] {
+  display: none;
+}
+
+/**
  * 阅读模式下正文要能选中（复制、以及后续右键菜单处理选中文本都以此为前提）。
  *
  * body 上那条 user-select: none 是为了点工具栏 / 标签栏 / 状态栏时不出现误选的蓝色高亮，

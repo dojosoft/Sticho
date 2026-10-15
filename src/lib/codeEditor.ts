@@ -54,17 +54,23 @@ type ViewUpdateT = import("@codemirror/view").ViewUpdate;
  */
 type MatchCursor = { next(): { done: boolean }; readonly value: { from: number; to: number } };
 
-/** 与 `ReaderStyle` 对齐的阅读排版：代码视图只消费字号与行距，字体固定等宽栈 */
+/** 与 `ReaderStyle` 对齐的阅读排版：代码视图消费字号 / 行距 / 背景 / 字体 / 文字色 */
 export type CodeReaderStyle = {
   fontSize?: string;
   lineHeight?: string;
   /**
    * 正文区底色（护眼背景）。
-   *
-   * 代码视图只认「字号 / 行距 / 背景」三项：字体固定为等宽、文字色由语法高亮决定，
-   * 用户设的「文字颜色」在代码视图里不生效（见应用层 applyCodeReaderStyle 的取舍）。
    */
   background?: string;
+  /** 正文字体（阅读排版 → 字体）；缺省时沿用内置等宽栈 CODE_FONT */
+  fontFamily?: string;
+  /**
+   * 正文文字色（阅读排版 → 文字颜色）。
+   *
+   * 只在语法高亮的生效语言为「纯文本」时由应用层下发；切到某个程序语言后文字色交给
+   * 语法高亮配色，应用层不会传这一项（见 App.svelte 的 applyCodeReaderStyle）。
+   */
+  textColor?: string;
 };
 
 export interface CodeEditorOptions {
@@ -194,7 +200,7 @@ function buildTheme(modules: CmModules, dark: boolean): Ext {
       },
       ".cm-scroller": {
         overflow: "auto",
-        fontFamily: CODE_FONT,
+        fontFamily: `var(--cm-font-family, ${CODE_FONT})`,
         fontSize: `var(--cm-font-size, 13px)`,
         lineHeight: `var(--cm-line-height, 1.6)`,
       },
@@ -886,13 +892,18 @@ export function setCodeParagraphFocus(on: boolean): void {
   view.dispatch({ effects: cFocus.reconfigure(on ? focusExt(cm) : []) });
 }
 
-/** 阅读排版：消费字号 / 行距 / 背景，作用在容器上（CM 的 theme 用 var() 读它们） */
+/** 阅读排版：消费字号 / 行距 / 背景 / 字体 / 文字色，作用在容器上（CM 的 theme 用 var() 读它们） */
 export function setCodeReaderStyle(style: CodeReaderStyle): void {
   if (!hostEl) return;
   if (style.fontSize) hostEl.style.setProperty("--cm-font-size", style.fontSize);
   else hostEl.style.removeProperty("--cm-font-size");
   if (style.lineHeight) hostEl.style.setProperty("--cm-line-height", style.lineHeight);
   else hostEl.style.removeProperty("--cm-line-height");
+  if (style.fontFamily) hostEl.style.setProperty("--cm-font-family", style.fontFamily);
+  else hostEl.style.removeProperty("--cm-font-family");
+  // 文字色走 --cm-fg：theme 里正文 / 光标 / 提示都读它；语法高亮 token 有显式 color，不受影响
+  if (style.textColor) hostEl.style.setProperty("--cm-fg", style.textColor);
+  else hostEl.style.removeProperty("--cm-fg");
   // 背景要同时覆盖正文与行号槽：只改正文会让左侧一条仍是默认色，看着像没生效
   if (style.background) {
     hostEl.style.setProperty("--cm-bg", style.background);

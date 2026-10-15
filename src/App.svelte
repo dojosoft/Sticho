@@ -917,13 +917,18 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     await switchTab((activeIndex + step + tabs.length) % tabs.length);
   }
 
-  /** 新建标签（Ctrl+N）：当前文档留在原标签里，不丢不改 */
-  async function newTab(): Promise<void> {
+  /**
+   * 新建指定格式的空白文档（「文件 → 新建标签」的展开子菜单：新建纯文本 / 新建 Markdown 文件，
+   * 以及 Ctrl+N）。正文为空；kind 决定进入哪条编辑通路（纯文本走 CodeMirror）。
+   */
+  async function newBlankTab(kind: "code" | "markdown"): Promise<void> {
     if (busy) return;
     captureActiveTab();
-    tabs.push(createTab());
+    const tab = newDocTab(++tabSeq, "");
+    tab.kind = kind;
+    tabs.push(tab);
     await activateTab(tabs.length - 1);
-    resetToBrowseMode(); // 新建的空文档同样从阅读模式起步
+    resetToBrowseMode();
   }
 
   /**
@@ -1959,16 +1964,20 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   }
 
   /**
-   * 阅读排版落到代码视图：只取字号 / 行距 / 背景。
+   * 阅读排版落到代码视图：字号 / 行距 / 背景 / 字体，以及「纯文本」语法高亮下的文字色。
    *
-   * 字体固定等宽栈、文字色由语法高亮决定，所以用户设的「字体」「文字颜色」在代码视图
-   * 里不生效（需求约定）；「页面背景」则与 Markdown / 纯文本一致地生效。
+   * 字体固定等宽栈已放开：用户可在阅读排版里选字体（见 setCodeReaderStyle 的 --cm-font-family）。
+   * 「文字颜色」只在语法高亮的生效语言为「纯文本」（effectiveCodeLangId 返回 null）时生效——
+   * 切到某个程序语言后文字色交给语法高亮配色（需求约定），「页面背景」则始终生效。
    */
   function applyCodeReaderStyle(): void {
     const style: CodeReaderStyle = {};
     if (readerStyle.fontSize) style.fontSize = readerStyle.fontSize;
     if (readerStyle.lineHeight) style.lineHeight = readerStyle.lineHeight;
     if (readerStyle.background) style.background = readerStyle.background;
+    if (readerStyle.fontFamily) style.fontFamily = readerStyle.fontFamily;
+    // 文字颜色只在「纯文本」语法高亮下生效；程序语言交给语法高亮配色
+    if (codeLangPlain && readerStyle.textColor) style.textColor = readerStyle.textColor;
     setCodeReaderStyle(style);
   }
 
@@ -3935,13 +3944,18 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
    * 阅读排版各项对「当前文档模式」是否生效（不生效的在面板里置灰，与菜单按模式自适应同一原则）。
    * 分流依据是下面那个 $effect（阅读排版分流的真源）：
    * - Markdown：全项生效；
-   * - 纯文本 / 代码：字体与文字色不生效（字体固定等宽栈、文字色交给语法高亮），其余生效；
+   * - 纯文本 / 代码：字体、字号、行距、背景一律生效；文字颜色只在语法高亮落到「纯文本」
+   *   （生效语言 id 为 null）时可用——切到某个程序语言后文字色交给语法高亮，故置灰；
    * - HTML：文档自带样式，全项都不生效。
    */
-  const readerFontEnabled = $derived(docKind !== "code" && docKind !== "html");
+  /** 当前代码文档的语法高亮是否落到「纯文本」（生效语言 id 为 null）：决定「文字颜色」是否可用 */
+  const codeLangPlain = $derived(effectiveCodeLangId(codeExt, currentPath) === null);
+
+  /** 上表落到各项的置灰判定 */
+  const readerFontEnabled = $derived(docKind !== "html"); // 纯文本模式也支持改字体
   const readerSizeEnabled = $derived(docKind !== "html");
   const readerLineEnabled = $derived(docKind !== "html");
-  const readerColorEnabled = $derived(docKind !== "code" && docKind !== "html");
+  const readerColorEnabled = $derived(docKind === "markdown" || (docKind === "code" && codeLangPlain));
   const readerBgEnabled = $derived(docKind !== "html");
 
   /** 写入一项阅读排版设置；value 为空串 = 清除该项，回到默认样式 */
@@ -3956,6 +3970,20 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   async function resetReaderStyle(): Promise<void> {
     readerStyle = {};
     await saveSetting("readerStyle", {});
+  }
+
+  /** 下拉档位当前下标；值不在档位表里（含「默认」空串）时以 anchor 档为锚点 */
+  function readerOptionIndex(list: string[], value: string | undefined, anchor: string): number {
+    const i = value ? list.indexOf(value) : -1;
+    return i >= 0 ? i : Math.max(0, list.indexOf(anchor));
+  }
+
+  /** 按档位表步进一项阅读排版设置（delta = -1 减、+1 增）；到达两端时不动 */
+  function stepReaderOption(key: keyof ReaderStyle, list: string[], value: string | undefined, anchor: string, delta: number): void {
+    const i = readerOptionIndex(list, value, anchor);
+    const next = Math.min(list.length - 1, Math.max(0, i + delta));
+    if (next === i) return;
+    void setReaderOption(key, list[next]);
   }
 
   // ---- 自定义 CSS 主题（批次八）----
@@ -5539,8 +5567,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   });
 
   // 阅读排版按文档模式分流（需求约定）：
-  // - Markdown / 纯文本：字体、字号、行距、文字颜色、页面背景全部生效；
-  // - 代码视图：只字号、行距、页面背景生效（文字色交给语法高亮，字体固定等宽栈）；
+  // - Markdown：字体、字号、行距、文字颜色、页面背景全部生效；
+  // - 纯文本 / 代码：字体、字号、行距、页面背景生效，文字颜色仅当语法高亮为「纯文本」时生效
+  //   （切到某个程序语言后文字色交给语法高亮配色，见 applyCodeReaderStyle）；
   // - HTML：自带样式，全部不生效（显式传空设置，等价于移除样式节点）。
   $effect(() => {
     if (docKind === "markdown") setReaderStyle(readerStyle);
@@ -5779,7 +5808,14 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       label: t("File"),
       key: "f",
       items: [
-        { label: t("New Tab"), shortcut: "Ctrl+N", disabled: () => busy, action: newTab },
+        {
+          label: t("New Tab"),
+          disabled: () => busy,
+          sub: [
+            { label: t("New Plain Text File"), action: () => void newBlankTab("code") },
+            { label: t("New Markdown File"), shortcut: "Ctrl+N", action: () => void newBlankTab("markdown") },
+          ],
+        },
         { label: t("Open…"), shortcut: "Ctrl+O", disabled: () => busy, action: openFile },
         // 命令面板对齐 Typora 的「快速打开」（Ctrl+P）：同一处肌肉记忆，也顺手挡住 WebView2 的打印弹窗
         { label: t("Command Palette…"), shortcut: "Ctrl+P", action: openCommandPalette },
@@ -6505,7 +6541,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
 
     if (key === "n" && !e.shiftKey) {
       e.preventDefault();
-      void newTab();
+      void newBlankTab("markdown");
     } else if (key === "tab") {
       // Ctrl+Tab / Ctrl+Shift+Tab：标签间循环。Vditor 在 IR 里也用 Tab 缩进，
       // 但带 Ctrl 的组合键不是编辑动作，拦下来不会影响正文输入
@@ -7218,10 +7254,10 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
               </div>
             </section>
 
-            <!-- 阅读排版：Markdown/纯文本全量生效，代码视图仅字号/行距/背景，HTML 不受影响 -->
+            <!-- 阅读排版：Markdown/纯文本全量生效（文字色在代码视图下仅当语法高亮为纯文本时可用），HTML 不受影响 -->
             <section class="set-group">
               <div class="set-head">
-                <h3 data-tip={t("Scope: font and text color apply to Markdown / plain text only (the code view uses a fixed monospace stack and syntax-highlight colors); font size, line height and page background apply to both Markdown / plain text and the code view; HTML documents keep their own styles and are unaffected. Settings that do not apply to the current document mode are greyed out.")}>{t("Reading Typography")}</h3>
+                <h3 data-tip={t("Scope: font, font size, line height and page background apply to Markdown / plain text; text color applies to Markdown / plain text too, but in the code view it is available only when syntax highlighting is set to plain text — with a programming language the colors come from the syntax highlighting); HTML documents keep their own styles and are unaffected. Settings that do not apply to the current document mode are greyed out.")}>{t("Reading Typography")}</h3>
                 <button class="set-action" onclick={() => void openFontsFolder()}>{t("Open Fonts Folder")}</button>
               </div>
 
@@ -7240,30 +7276,64 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
 
               <label class="set-row" class:is-off={!readerSizeEnabled}>
                 <span class="set-label">{t("Font Size")}</span>
-                <select
-                  class="set-select"
-                  value={readerStyle.fontSize ?? ""}
-                  onchange={(e) => void setReaderOption("fontSize", e.currentTarget.value)}
-                >
-                  <option value="">{t("Default")}</option>
-                  {#each READER_SIZES as size (size)}
-                    <option value={size}>{size}</option>
-                  {/each}
-                </select>
+                <div class="set-stepper">
+                  <select
+                    class="set-select"
+                    value={readerStyle.fontSize ?? ""}
+                    onchange={(e) => void setReaderOption("fontSize", e.currentTarget.value)}
+                  >
+                    <option value="">{t("Default")}</option>
+                    {#each READER_SIZES as size (size)}
+                      <option value={size}>{size}</option>
+                    {/each}
+                  </select>
+                  <button
+                    class="step-btn"
+                    title={t("Decrease")}
+                    aria-label={t("Decrease")}
+                    disabled={!readerSizeEnabled || readerOptionIndex(READER_SIZES, readerStyle.fontSize, "16px") <= 0}
+                    onclick={() => stepReaderOption("fontSize", READER_SIZES, readerStyle.fontSize, "16px", -1)}
+                  >−</button>
+                  <button
+                    class="step-btn"
+                    title={t("Increase")}
+                    aria-label={t("Increase")}
+                    disabled={!readerSizeEnabled ||
+                      readerOptionIndex(READER_SIZES, readerStyle.fontSize, "16px") >= READER_SIZES.length - 1}
+                    onclick={() => stepReaderOption("fontSize", READER_SIZES, readerStyle.fontSize, "16px", 1)}
+                  >+</button>
+                </div>
               </label>
 
               <label class="set-row" class:is-off={!readerLineEnabled}>
                 <span class="set-label">{t("Line Height")}</span>
-                <select
-                  class="set-select"
-                  value={readerStyle.lineHeight ?? ""}
-                  onchange={(e) => void setReaderOption("lineHeight", e.currentTarget.value)}
-                >
-                  <option value="">{t("Default")}</option>
-                  {#each READER_LINES as lh (lh)}
-                    <option value={lh}>{lh}</option>
-                  {/each}
-                </select>
+                <div class="set-stepper">
+                  <select
+                    class="set-select"
+                    value={readerStyle.lineHeight ?? ""}
+                    onchange={(e) => void setReaderOption("lineHeight", e.currentTarget.value)}
+                  >
+                    <option value="">{t("Default")}</option>
+                    {#each READER_LINES as lh (lh)}
+                      <option value={lh}>{lh}</option>
+                    {/each}
+                  </select>
+                  <button
+                    class="step-btn"
+                    title={t("Decrease")}
+                    aria-label={t("Decrease")}
+                    disabled={!readerLineEnabled || readerOptionIndex(READER_LINES, readerStyle.lineHeight, "1.6") <= 0}
+                    onclick={() => stepReaderOption("lineHeight", READER_LINES, readerStyle.lineHeight, "1.6", -1)}
+                  >−</button>
+                  <button
+                    class="step-btn"
+                    title={t("Increase")}
+                    aria-label={t("Increase")}
+                    disabled={!readerLineEnabled ||
+                      readerOptionIndex(READER_LINES, readerStyle.lineHeight, "1.6") >= READER_LINES.length - 1}
+                    onclick={() => stepReaderOption("lineHeight", READER_LINES, readerStyle.lineHeight, "1.6", 1)}
+                  >+</button>
+                </div>
               </label>
 
               <div class="set-row set-row--stack" class:is-off={!readerColorEnabled}>
@@ -8488,6 +8558,42 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     border: 1px solid var(--border, #ddd);
     border-radius: 6px;
     outline: none;
+  }
+
+  /* 字号 / 行距：下拉框 + −/+ 步进按钮同行 */
+  .set-stepper {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .step-btn {
+    flex-shrink: 0;
+    width: 1.9rem;
+    height: 1.9rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font: inherit;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0;
+    color: inherit;
+    background: transparent;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .step-btn:hover:not(:disabled) {
+    background: var(--hover, rgba(0, 0, 0, 0.07));
+  }
+
+  .step-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 
   .reader-swatches {
