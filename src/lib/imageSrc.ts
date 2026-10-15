@@ -52,6 +52,18 @@ function stripFileScheme(src: string): string {
 }
 
 /**
+ * 只裁 ASCII 空白（空格 / 制表 / 换行 / 换页）。
+ *
+ * 不能用 `trim()`：它按 JS 空白语义连 U+3000（全角空格）与 U+00A0（不换行空格）一起吃掉，
+ * 而这两个字符在 Windows 上是**合法文件名字符**，URL 层（markdown-it 的百分号编码、
+ * decodeURIComponent）也不会替你裁掉。裁掉之后拿到的路径与磁盘上的文件对不上，
+ * 图片会静默回落成占位文字（`![x](图.png　)` 这种名字尾部带全角空格的图就是如此）。
+ */
+function trimAsciiSpace(text: string): string {
+  return text.replace(/^[\t\r\n\f ]+/, "").replace(/[\t\r\n\f ]+$/, "");
+}
+
+/**
  * 把 src 解析成本机绝对路径；相对路径必须给出 baseDir（当前文档所在目录）。
  *
  * 不校验文件是否存在。相对路径里的 `..` 段一律拒收：文档可能来自 WebDAV 等不可信来源，
@@ -59,7 +71,7 @@ function stripFileScheme(src: string): string {
  */
 export function resolveLocalImagePath(src: string, baseDir: string | null): string | null {
   const kind = classifyImageSrc(src);
-  const value = src.trim();
+  const value = trimAsciiSpace(src);
 
   if (kind === "absolute") {
     return stripFileScheme(value).replace(/\//g, "\\");

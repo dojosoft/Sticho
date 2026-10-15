@@ -22,6 +22,8 @@
     charCount: number;
     lineCount: number;
     currentPath: string | null;
+    /** 绑定的云端（WebDAV）远端路径：云端文档没有本地路径，状态栏据此才判得出「已保存」 */
+    currentRemote: string | null;
     dirty: boolean;
 
     docKind: "markdown" | "html" | "code";
@@ -84,6 +86,7 @@
     charCount,
     lineCount,
     currentPath,
+    currentRemote,
     dirty,
     docKind,
     onSetDocKind,
@@ -378,7 +381,7 @@
     </button>
   {/if}
 
-  <span class="state">{dirty ? t("Unsaved") : currentPath ? t("Saved") : t("New Document")}</span>
+  <span class="state">{dirty ? t("Unsaved") : currentPath || currentRemote ? t("Saved") : t("New Document")}</span>
 </footer>
 
 <style>
