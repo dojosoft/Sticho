@@ -44,6 +44,9 @@ html.light {
   --danger-contrast: #ffffff;
   /* 阅读模式标签的强调色（与编辑模式的蓝区分开） */
   --read-accent: #2f9e44;
+  /* 状态栏「编辑」开关激活时的底色（绿）与其中的文字色 */
+  --edit-accent: #2f9e44;
+  --edit-contrast: #ffffff;
   /* 段落聚焦时压在非当前块上的暗色（浅色主题下用浅一点的遮罩就够） */
   --spotlight-dim: rgba(0, 0, 0, 0.18);
   /* 查找命中高亮（批次五）：普通命中用暖黄，当前命中用橙红以区分 */
@@ -74,6 +77,9 @@ html.dark {
   --danger-soft: rgba(244, 135, 113, 0.18);
   --danger-contrast: #ffffff;
   --read-accent: #4ade80;
+  /* 状态栏「编辑」开关激活时的底色（绿）与其中的文字色（亮绿底配深字） */
+  --edit-accent: #4ade80;
+  --edit-contrast: #12301a;
   --spotlight-dim: rgba(0, 0, 0, 0.45);
   /* 深色下用低饱和的黄/橙，避免整片文字反而看不清 */
   --find-hl: #6b5c1e;

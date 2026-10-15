@@ -354,13 +354,13 @@
     </span>
   {/if}
 
-  <!-- 阅读 / 编辑模式切换：放在编码切换右侧；阅读态只读，编辑态高亮 -->
+  <!-- 阅读 / 编辑模式切换：放在编码切换右侧；阅读态（只读）红底、编辑态（可改）绿底 -->
   <span
     class="mode-switch"
     title={browseMode ? t("Reading mode: the document is read-only. Click to switch to edit mode (Ctrl+E)") : t("Edit mode: the document can be modified. Click to return to reading mode (Ctrl+E)")}
   >
-    <button class:active={browseMode} onclick={() => onSetBrowseMode(true)}>{t("Read")}</button>
-    <button class:active={!browseMode} onclick={() => onSetBrowseMode(false)}>{t("Edit")}</button>
+    <button class:active={browseMode} class:on-read={browseMode} onclick={() => onSetBrowseMode(true)}>{t("Read")}</button>
+    <button class:active={!browseMode} class:on-edit={!browseMode} onclick={() => onSetBrowseMode(false)}>{t("Edit")}</button>
   </span>
 
   {#if davEnabled}
@@ -580,6 +580,18 @@
     background: var(--hover, rgba(0, 0, 0, 0.07));
     opacity: 1;
     font-weight: 600;
+  }
+
+  /* 阅读 / 编辑开关按语义着色：阅读（只读）红底、编辑（可改）绿底。
+     写在 .active 之后，同优先级下靠后者胜出，用来覆盖上面那条中性底色。 */
+  .mode-switch button.on-read {
+    background: var(--danger, #c0392b);
+    color: var(--danger-contrast, #ffffff);
+  }
+
+  .mode-switch button.on-edit {
+    background: var(--edit-accent, #2f9e44);
+    color: var(--edit-contrast, #ffffff);
   }
 
   /* 文档模式按钮（状态栏最左）：与右侧编码下拉同款外观——无可见边框、圆角 5px，

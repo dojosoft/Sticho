@@ -197,7 +197,7 @@
   import { loadSetting, loadAllSettings, saveSetting, deleteSetting } from "./lib/settings";
   import { diffLines, type DiffLine } from "./lib/diff";
   import { ZH, LOCALES, makeTFrom, vditorLang, type Locale } from "./lib/i18n";
-  import { DEFAULT_PACK_FILES, DARK_THEME_FILE, LEGACY_DARK_THEME_FILE } from "./lib/defaultPacks";
+  import { DEFAULT_PACK_FILES, DARK_THEME_FILE, LEGACY_DARK_THEME_FILES } from "./lib/defaultPacks";
   import { loadWelcomeDocs, welcomeFor } from "./lib/welcome";
   import {
     compileFindRegex,
@@ -3983,12 +3983,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
 
   /**
    * 读取主题目录并把选中主题应用到界面；已选主题文件被删掉时回落「自动切换」并清掉设置。
-   * 旧版内置深色主题（「内置主题·暗墨.css」）改名后不会被自动删除（内置包只在缺失时释放），
-   * 这里把它从列表里滤掉，免得下拉框多出一条重名选项。
+   * 内置深色主题改过几次名（「内置主题·暗墨.css」→「内置主题·深色.css」→「深色.css」），
+   * 旧文件名不会被自动删除（内置包只在缺失时释放），这里把它们从列表里滤掉，免得下拉框多出重名选项。
    */
   async function refreshThemes(): Promise<void> {
     try {
-      themeFiles = (await loadThemes()).filter((f) => f.name !== LEGACY_DARK_THEME_FILE);
+      themeFiles = (await loadThemes()).filter((f) => !LEGACY_DARK_THEME_FILES.includes(f.name));
     } catch {
       themeFiles = [];
     }
@@ -5400,6 +5400,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     tabs = built;
     tabsReady = true;
     await activateTab(Math.max(0, Math.min(session?.active ?? 0, built.length - 1)));
+    // 恢复出来的文档沿用「设置 → 默认打开模式」，和真正打开文档时一致。
+    // 唯一的例外是恢复成的那篇恰好是欢迎文档（未命名、未改过、无云端绑定）：那是程序自己的
+    // 初始文档，启动时固定给编辑态（见 boot 段），不该被这条设置拽回阅读模式。
+    const restored = tabs[activeIndex];
+    const isWelcomeDoc = !!restored && restored.path === null && !restored.dirty && restored.remote === null;
+    if (!isWelcomeDoc) resetToBrowseMode();
     return true;
   }
 
@@ -6634,13 +6640,14 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 外观已并入「主题」：真正的选择由 refreshThemes → applyThemeChoice 落地；
       // 这里先落浅色底，避免首帧闪一下没着色的界面。
       // 主题选择：键不存在、或存过 null（两者都等于「没选过自定义主题」）= 新的默认值
-      // 「自动切换」（跟随 Windows 深浅）。旧版内置深色主题「内置主题·暗墨.css」已改名为
-      // 「内置主题·深色.css」，选过它的老配置在这里换名，免得下次启动按找不到的文件回落。
+      // 「自动切换」（跟随 Windows 深浅）。内置深色主题改过几次名（「内置主题·暗墨.css」→
+      // 「内置主题·深色.css」→「深色.css」），选过旧文件名的老配置在这里换名，
+      // 免得下次启动按找不到的文件回落。（「自动切换」档不认文件名，改名与它无关。）
       const savedTheme = s["userTheme"] as string | null | undefined;
       themeChoice =
         savedTheme == null
           ? AUTO_THEME
-          : savedTheme === LEGACY_DARK_THEME_FILE
+          : LEGACY_DARK_THEME_FILES.includes(savedTheme)
             ? DARK_THEME_FILE
             : savedTheme;
       // 旧键 theme（「外观三选」遗留）为 dark 的，迁到内置深色主题而不是让它跟着系统走，
@@ -6650,7 +6657,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         void saveSetting("userTheme", themeChoice);
         void deleteSetting("theme");
       }
-      if (savedTheme === LEGACY_DARK_THEME_FILE) void saveSetting("userTheme", DARK_THEME_FILE);
+      if (savedTheme != null && LEGACY_DARK_THEME_FILES.includes(savedTheme)) {
+        void saveSetting("userTheme", DARK_THEME_FILE);
+      }
       applyAppTheme(false);
       // 界面语言（批次八；批次十五起默认中文）：先读设置再初始化编辑器，让 Vditor 一次就用对语言
       locale = (s["locale"] as Locale | undefined) ?? "zh-CN";
@@ -6748,9 +6757,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       await refreshThemes();
 
       const host = document.getElementById("editor-host")!;
-      // 打开即阅读模式：先把只读意图写进编辑器层（此时正文元素还没建好，
-      // 真正的 disabled() 由 editor.ts 在就绪回调里补一次）
-      setEditorReadonly(true);
+      // 启动即编辑模式：首屏是欢迎文档，正文写着「Type to start」，理应能直接开敲。
+      // 先把可编辑意图写进编辑器层（此时正文元素还没建好，真正的 disabled() 由 editor.ts
+      // 在就绪回调里补一次）。这里不受「设置 → 默认打开模式」影响——那条设置管的是之后
+      // 打开 / 新建 / 导入的文档，欢迎页是程序自己铺的初始文档，固定给编辑态。
+      browseMode = false;
+      setEditorReadonly(false);
       // 欢迎正文在 initPacks 之后才拿得到（要等 docs/Welcome.<locale>.md 释放并读回），
       // 而初始标签是脚本顶层用内置文案建的：这里把还没被动过的初始标签正文对齐成最终内容，
       // 否则它和编辑器里显示的内容会不一致（后续同步会把旧文案写回去）。
