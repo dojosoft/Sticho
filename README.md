@@ -6,7 +6,8 @@ LaTeX / Epub，导入 Word / PDF / HTML 转 Markdown 继续编辑；内置代码
 WebDAV 云同步与本地版本历史。所有格式转换在本机完成，全程离线，适合涉密文档环境。
 
 - 版本变化见 [CHANGELOG.md](./CHANGELOG.md)
-- 许可证合规见 [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md)
+- 本项目以 [MIT 许可证](./LICENSE) 开源
+- 第三方许可证合规见 [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md)
 
 ## 安装
 
@@ -185,6 +186,9 @@ Windows SmartScreen 会显示「Windows 已保护你的电脑 / 未知发布者�
 
 ## 开发
 
+环境要求：Node.js 20+、Rust stable 工具链（`rustup` + `cargo`）、Windows 10 1809+ 与 WebView2 运行时。
+NSIS 由 Tauri 自动准备，无需手工安装。
+
 ```powershell
 npm install
 npm run tauri dev        # 开发调试
@@ -197,4 +201,20 @@ npm run test             # Vitest 单元测试
 npm run i18n-missing     # 列出未收录英文的界面文案
 ```
 
+Vditor 的运行时资源（公式 / 图表 / 代码高亮配色 / 表情图片等，约 12MB）不入库：`predev` / `prebuild`
+会先跑 `scripts/sync-vditor-assets.mjs`，从 `node_modules/vditor` 同步到 `public/vditor/`，所以
+`npm run tauri build` 开箱可用，不必手工拷贝。
+
+提交前请让下面这些门禁全部通过（与 CI 的 [.github/workflows/ci.yml](./.github/workflows/ci.yml) 一致）：
+`check-version`、`test`、`check`、`lint`、`i18n-missing`、`build`，以及
+`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`。
+
 技术栈：Tauri 2（Rust）+ Svelte 5 + Vite + Vditor 3 + CodeMirror 6 + markdown-it + TypeScript strict。
+
+## 许可证
+
+本项目以 [MIT 许可证](./LICENSE) 开源，可自由使用、修改与再分发，保留版权声明即可。
+
+第三方依赖的许可证清单见 [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md)。其中需要单独说明的是
+**Pandoc**：它是 GPL-2.0 程序，Sticho 只在用户首次使用「导入 Word / 导出 LaTeX / Epub」时按需下载，
+以独立子进程调用，不随本程序分发、也不链接进编译产物，因此不影响本项目的 MIT 授权。

@@ -3,6 +3,7 @@ name = "sticho"
 version = "0.1.0"
 description = "Sticho - 轻量级 Markdown / 纯文本 / 代码 / HTML 文档编辑器"
 authors = ["Marvin"]
+license = "MIT"
 edition = "2021"
 
 # 依赖全部为 MIT / Apache-2.0，符合许可证白名单（任务书 2.2）

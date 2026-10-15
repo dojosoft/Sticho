@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Sticho - 轻量级 Markdown / 纯文本 / 代码 / HTML 文档编辑器",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "predev": "node scripts/sync-vditor-assets.mjs",
