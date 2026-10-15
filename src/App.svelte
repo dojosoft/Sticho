@@ -1657,6 +1657,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       } else {
         setEditorValue(content);
       }
+      // 历史正文按其原文件的行尾解码返回，而 Markdown 经 Vditor 取值一律是 LF：
+      // 必须把行尾风格同步过来，否则保存时会用「恢复前」的风格把这份版本写回去。
+      docEol = detectEol(content);
       dirty = true; // 恢复结果需要保存才写回磁盘，避免误覆盖
       // 重置外部变更比对基准：留档 / 读取历史版本会触碰磁盘，若不刷新基准，
       // 5 秒轮询会把这次恢复当成「文件被外部修改」立刻误报（且此时 dirty=true 会弹三选框）。
@@ -1711,6 +1714,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     kind: string;
     path: string | null;
     encoding?: string;
+    /** 历史版本正文的原始行尾（草稿不带：草稿正文来自编辑器，行尾未知） */
+    eol?: Eol;
   }): Promise<void> {
     const { content, kind, path } = payload;
     // 取回草稿前先查一次原文件：若它在本草稿保存之后又被外部改过，明确提示一次，
@@ -1735,6 +1740,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       setDocumentPath(path);
       dirty = true; // 恢复出来的是历史内容，必须手动保存才写回磁盘
       encoding = payload.encoding || "utf-8";
+      // 历史版本正文保留着它的原始行尾；草稿不带 eol（正文来自编辑器），保持当前风格不变
+      if (payload.eol === "\r\n" || payload.eol === "\n") docEol = payload.eol;
       diskMtime = null;
       if (docKind === "html") {
         htmlSource = content;
@@ -4478,6 +4485,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       tabs,
       captureActiveTab,
       writeRecovery,
+      deleteRecovery,
       saveSession,
       fileNameOf: fileName,
       unnamedLabel: t("Untitled document"),

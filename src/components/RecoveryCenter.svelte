@@ -10,6 +10,7 @@
    * 样式自成一体：Svelte 样式按组件作用域隔离，颜色仍走全局 CSS 变量以跟随主题。
    */
   import { onMount } from "svelte";
+  import { detectEol, type Eol } from "../lib/docState";
   import { confirm as confirmDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { makeT, type Locale } from "../lib/i18n";
   import { isCodePath } from "../lib/codeLang";
@@ -29,18 +30,22 @@
 
   interface Props {
     locale: Locale;
+    /** 语言包合并词表（内置 + locales/ 下的语言包）：由 App 注入，缺省时回落内置词表 */
+    i18nEntries?: Record<string, string>;
     /** 恢复：把内容载入编辑器（应用层负责新建标签、标记未保存、不直接写盘） */
     onRestore: (payload: {
       content: string;
       kind: string;
       path: string | null;
       encoding?: string;
+      /** 历史版本正文的原始行尾（供应用层同步 docEol；草稿不带该字段） */
+      eol?: Eol;
     }) => void;
     onClose: () => void;
   }
-  let { locale, onRestore, onClose }: Props = $props();
+  let { locale, i18nEntries, onRestore, onClose }: Props = $props();
 
-  const t = $derived(makeT(locale));
+  const t = $derived(makeT(locale, i18nEntries));
 
   let tab = $state<"draft" | "history">("draft");
   let drafts = $state<RecoveryMeta[]>([]);
@@ -49,9 +54,33 @@
   let error = $state("");
   let busyKey = $state(""); // 正在处理的行标识，防重复点击
   let expanded = $state(""); // 展开的历史文档路径（一次只展开一个）
+  let query = $state(""); // 搜索关键词：同时过滤两个标签页（标题 / 路径）
 
   // 预览：null = 未打开。内容只读展示，不参与编辑。
   let preview = $state<{ title: string; content: string } | null>(null);
+
+  // 关键词过滤：为空时原样返回，命中标题或路径即可
+  const shownDrafts = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return drafts;
+    return drafts.filter(
+      (m) =>
+        (m.title || "").toLowerCase().includes(q) || (m.path || "").toLowerCase().includes(q),
+    );
+  });
+  const shownDocs = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return docs;
+    return docs.filter(
+      (d) => d.name.toLowerCase().includes(q) || d.path.toLowerCase().includes(q),
+    );
+  });
+
+  // 底部统计：版本总数与总占用
+  const totalVersions = $derived(docs.reduce((n, d) => n + d.entries.length, 0));
+  const totalSize = $derived(
+    docs.reduce((n, d) => n + d.entries.reduce((s, e) => s + (e.size || 0), 0), 0),
+  );
 
   async function reload(): Promise<void> {
     loading = true;
@@ -70,6 +99,17 @@
   function timeText(sec: number): string {
     if (!sec) return "-";
     return new Date(sec * 1000).toLocaleString();
+  }
+
+  /** 相对时间：更直观（刚刚 / N 分钟前 / N 小时前 / N 天前）；过久或异常则回落日期 */
+  function relTime(sec: number): string {
+    if (!sec) return "-";
+    const diff = Math.floor(Date.now() / 1000) - sec;
+    if (diff < 60) return t("just now");
+    if (diff < 3600) return t("{n} min ago", { n: Math.floor(diff / 60) });
+    if (diff < 86400) return t("{n} h ago", { n: Math.floor(diff / 3600) });
+    if (diff < 86400 * 30) return t("{n} d ago", { n: Math.floor(diff / 86400) });
+    return new Date(sec * 1000).toLocaleDateString();
   }
 
   function sizeText(n: number): string {
@@ -93,8 +133,8 @@
     error = "";
     try {
       const content = await readRecovery(m.id);
-      if (content === null) throw new Error(t("草稿正文已不存在"));
-      preview = { title: m.title || t("未命名文档"), content };
+      if (content === null) throw new Error(t("The draft content no longer exists"));
+      preview = { title: m.title || t("Untitled document"), content };
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -124,7 +164,7 @@
     error = "";
     try {
       const content = await readRecovery(m.id);
-      if (content === null) throw new Error(t("草稿正文已不存在"));
+      if (content === null) throw new Error(t("The draft content no longer exists"));
       onRestore({ content, kind: m.kind, path: m.path, encoding: m.encoding });
       onClose();
     } catch (e) {
@@ -140,7 +180,9 @@
     try {
       // restoreHistory 会先把当前磁盘内容再留一份档，保证这次恢复可撤销
       const content = await restoreHistory(d.path, e.file);
-      onRestore({ content, kind: kindOf(d.path), path: d.path });
+      // 历史正文按原文件编码解码、行尾保留原样：把行尾一并交给应用层同步，
+      // 否则保存时会按恢复前的风格写回，悄悄改掉这份版本的行尾。
+      onRestore({ content, kind: kindOf(d.path), path: d.path, eol: detectEol(content) });
       onClose();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -152,7 +194,7 @@
   // ---- 另存为 ----
 
   async function saveAs(defaultPath: string, content: string, encoding: string): Promise<void> {
-    const path = await saveDialog({ title: t("另存为…"), defaultPath });
+    const path = await saveDialog({ title: t("Save As…"), defaultPath });
     if (!path) return; // 用户取消
     await writeTextFile(path, content, encoding);
   }
@@ -162,7 +204,7 @@
     error = "";
     try {
       const content = await readRecovery(m.id);
-      if (content === null) throw new Error(t("草稿正文已不存在"));
+      if (content === null) throw new Error(t("The draft content no longer exists"));
       await saveAs(m.path ?? m.title, content, m.encoding || "utf-8");
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -187,11 +229,11 @@
   // ---- 删除 ----
 
   async function removeDraft(m: RecoveryMeta): Promise<void> {
-    const ok = await confirmDialog(t("确认删除草稿「{title}」？删除后无法恢复。", { title: m.title }), {
+    const ok = await confirmDialog(t("Delete the draft “{title}”? This cannot be undone.", { title: m.title }), {
       title: "Sticho",
       kind: "warning",
-      okLabel: t("删除"),
-      cancelLabel: t("取消"),
+      okLabel: t("Delete"),
+      cancelLabel: t("Cancel"),
     });
     if (!ok) return;
     error = "";
@@ -204,11 +246,11 @@
   }
 
   async function removeHist(d: HistoryDoc, e: HistoryEntry): Promise<void> {
-    const ok = await confirmDialog(t("确认删除该历史版本？删除后无法恢复。"), {
+    const ok = await confirmDialog(t("Delete this version? This cannot be undone."), {
       title: "Sticho",
       kind: "warning",
-      okLabel: t("删除"),
-      cancelLabel: t("取消"),
+      okLabel: t("Delete"),
+      cancelLabel: t("Cancel"),
     });
     if (!ok) return;
     error = "";
@@ -225,6 +267,31 @@
     }
   }
 
+  /** 一次清空某个文档的全部历史版本（逐份删除后整组移除） */
+  async function clearDocHist(d: HistoryDoc): Promise<void> {
+    const ok = await confirmDialog(
+      t("Delete all {n} versions of “{name}”? This cannot be undone.", {
+        n: d.entries.length,
+        name: d.name,
+      }),
+      { title: "Sticho", kind: "warning", okLabel: t("Delete"), cancelLabel: t("Cancel") },
+    );
+    if (!ok) return;
+    busyKey = `H:${d.path}`;
+    error = "";
+    try {
+      for (const e of d.entries) {
+        await deleteHistory(d.path, e.file);
+      }
+      docs = docs.filter((x) => x.path !== d.path);
+      if (expanded === d.path) expanded = "";
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      busyKey = "";
+    }
+  }
+
   onMount(() => {
     void reload();
   });
@@ -237,20 +304,26 @@
     if (e.target === e.currentTarget) onClose();
   }}
 >
-  <div class="rc-modal" role="dialog" aria-label={t("恢复中心")}>
+  <div class="rc-modal" role="dialog" aria-label={t("Recovery Center")}>
     <div class="rc-head">
-      <span>{t("恢复中心")}</span>
-      <button class="rc-x" title={t("关闭（Esc）")} aria-label={t("关闭")} onclick={onClose}>✕</button>
+      <span>{t("Recovery Center")}</span>
+      <button class="rc-x" title={t("Close (Esc)")} aria-label={t("Close")} onclick={onClose}>✕</button>
     </div>
 
     <div class="rc-tabs">
       <button class:active={tab === "draft"} onclick={() => (tab = "draft")}>
-        {t("恢复草稿")}{drafts.length ? ` (${drafts.length})` : ""}
+        {t("Recovery Drafts")}{drafts.length ? ` (${drafts.length})` : ""}
       </button>
       <button class:active={tab === "history"} onclick={() => (tab = "history")}>
-        {t("本地版本历史")}{docs.length ? ` (${docs.length})` : ""}
+        {t("Local Version History")}{docs.length ? ` (${docs.length})` : ""}
       </button>
-      <button class="rc-refresh" disabled={loading} onclick={() => void reload()}>{t("刷新")}</button>
+      <input
+        class="rc-search"
+        type="search"
+        placeholder={t("Search drafts and history…")}
+        bind:value={query}
+      />
+      <button class="rc-refresh" disabled={loading} onclick={() => void reload()}>{t("Refresh")}</button>
     </div>
 
     <div class="rc-body">
@@ -260,30 +333,32 @@
         <div class="rc-preview">
           <div class="rc-preview-head">
             <span class="rc-preview-title" title={preview.title}>{preview.title}</span>
-            <button class="rc-mini" onclick={() => (preview = null)}>{t("关闭预览")}</button>
+            <button class="rc-mini" onclick={() => (preview = null)}>{t("Close Preview")}</button>
           </div>
           <pre class="rc-pre">{preview.content}</pre>
         </div>
       {:else if loading}
-        <p class="rc-hint">{t("读取中…")}</p>
+        <p class="rc-hint">{t("Loading…")}</p>
       {:else if tab === "draft"}
         {#if drafts.length === 0}
-          <p class="rc-hint">{t("暂无恢复草稿")}</p>
+          <p class="rc-hint">{t("No recovery drafts")}</p>
+        {:else if shownDrafts.length === 0}
+          <p class="rc-hint">{t("No matching results")}</p>
         {:else}
           <ul class="rc-list">
-            {#each drafts as m (m.id)}
+            {#each shownDrafts as m (m.id)}
               <li class="rc-item">
                 <div class="rc-row">
                   <div class="rc-main">
-                    <span class="rc-name">{m.title || t("未命名文档")}</span>
-                    <span class="rc-sub">{timeText(m.saved_at)} · {t("{n} 字", { n: m.chars })}</span>
+                    <span class="rc-name">{m.title || t("Untitled document")}</span>
+                    <span class="rc-sub" title={timeText(m.saved_at)}>{relTime(m.saved_at)} · {t("{n} characters", { n: m.chars })}</span>
                     {#if m.path}<span class="rc-path" title={m.path}>{m.path}</span>{/if}
                   </div>
                   <div class="rc-acts">
-                    <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void previewDraft(m)}>{t("预览")}</button>
-                    <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void restoreDraft(m)}>{t("恢复")}</button>
-                    <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void saveDraftAs(m)}>{t("另存为…")}</button>
-                    <button class="rc-mini danger" onclick={() => void removeDraft(m)}>{t("删除")}</button>
+                    <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void previewDraft(m)}>{t("Preview")}</button>
+                    <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void restoreDraft(m)}>{t("Restore")}</button>
+                    <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void saveDraftAs(m)}>{t("Save As…")}</button>
+                    <button class="rc-mini danger" disabled={busyKey !== ""} onclick={() => void removeDraft(m)}>{t("Delete")}</button>
                   </div>
                 </div>
               </li>
@@ -291,10 +366,12 @@
           </ul>
         {/if}
       {:else if docs.length === 0}
-        <p class="rc-hint">{t("暂无本地版本历史")}</p>
+        <p class="rc-hint">{t("No local version history")}</p>
+      {:else if shownDocs.length === 0}
+        <p class="rc-hint">{t("No matching results")}</p>
       {:else}
         <ul class="rc-list">
-          {#each docs as d (d.path)}
+          {#each shownDocs as d (d.path)}
             <li class="rc-item">
               <div class="rc-row">
                 <button
@@ -304,20 +381,23 @@
                 >
                   {expanded === d.path ? "▾" : "▸"} {d.name}
                 </button>
-                <span class="rc-sub">{t("{n} 个版本", { n: d.entries.length })}</span>
+                <span class="rc-sub">{t("{n} versions", { n: d.entries.length })}</span>
+                <div class="rc-acts">
+                  <button class="rc-mini danger" disabled={busyKey !== ""} onclick={() => void clearDocHist(d)}>{t("Clear All Versions")}</button>
+                </div>
               </div>
               {#if expanded === d.path}
                 <div class="rc-versions">
                   {#each d.entries as e (e.file)}
                     <div class="rc-row rc-vrow">
                       <div class="rc-main">
-                        <span class="rc-sub">{timeText(e.saved_at)} · {sizeText(e.size)}</span>
+                        <span class="rc-sub" title={timeText(e.saved_at)}>{relTime(e.saved_at)} · {sizeText(e.size)}</span>
                       </div>
                       <div class="rc-acts">
-                        <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void previewHist(d, e)}>{t("预览")}</button>
-                        <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void restoreHist(d, e)}>{t("恢复")}</button>
-                        <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void saveHistAs(d, e)}>{t("另存为…")}</button>
-                        <button class="rc-mini danger" onclick={() => void removeHist(d, e)}>{t("删除")}</button>
+                        <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void previewHist(d, e)}>{t("Preview")}</button>
+                        <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void restoreHist(d, e)}>{t("Restore")}</button>
+                        <button class="rc-mini" disabled={busyKey !== ""} onclick={() => void saveHistAs(d, e)}>{t("Save As…")}</button>
+                        <button class="rc-mini danger" disabled={busyKey !== ""} onclick={() => void removeHist(d, e)}>{t("Delete")}</button>
                       </div>
                     </div>
                   {/each}
@@ -330,7 +410,12 @@
     </div>
 
     <div class="rc-foot">
-      {t("草稿与版本历史都存放在本机数据目录，离线可用；恢复后以未保存的新文档打开，需手动保存。")}
+      <div class="rc-stats">
+        {t("{n} draft(s)", { n: drafts.length })} · {t("{n} document(s)", { n: docs.length })} · {t("{n} versions", { n: totalVersions })}{totalSize ? ` · ${sizeText(totalSize)}` : ""}
+      </div>
+      <div class="rc-note">
+        {t("Drafts and version history are stored locally in the app's data folder and work offline; restoring opens them as an unsaved document that you must save manually.")}
+      </div>
     </div>
   </div>
 </div>
@@ -416,8 +501,22 @@
     cursor: default;
   }
 
-  .rc-refresh {
+  .rc-search {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 220px;
     margin-left: auto;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+    font-size: 0.75rem;
+  }
+
+  .rc-search:focus {
+    outline: none;
+    border-color: var(--accent, #3b82f6);
   }
 
   .rc-body {
@@ -582,9 +681,20 @@
   }
 
   .rc-foot {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
     padding: 0.5rem 0.8rem;
     border-top: 1px solid var(--border, #ddd);
     font-size: 0.72rem;
-    opacity: 0.6;
+  }
+
+  .rc-stats {
+    font-weight: 600;
+    opacity: 0.8;
+  }
+
+  .rc-note {
+    opacity: 0.55;
   }
 </style>
