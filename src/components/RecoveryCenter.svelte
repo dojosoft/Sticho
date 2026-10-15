@@ -148,7 +148,7 @@
     try {
       preview = {
         title: `${d.name} · ${timeText(e.saved_at)}`,
-        content: await readHistory(d.path, e.file),
+        content: (await readHistory(d.path, e.file)).content,
       };
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -179,10 +179,16 @@
     error = "";
     try {
       // restoreHistory 会先把当前磁盘内容再留一份档，保证这次恢复可撤销
-      const content = await restoreHistory(d.path, e.file);
-      // 历史正文按原文件编码解码、行尾保留原样：把行尾一并交给应用层同步，
-      // 否则保存时会按恢复前的风格写回，悄悄改掉这份版本的行尾。
-      onRestore({ content, kind: kindOf(d.path), path: d.path, eol: detectEol(content) });
+      const { content, encoding: histEncoding } = await restoreHistory(d.path, e.file);
+      // 历史正文按原文件编码解码、行尾保留原样：把编码与行尾一并交给应用层同步，
+      // 否则保存时会按恢复前的编码 / 风格写回，悄悄改掉这份版本。
+      onRestore({
+        content,
+        kind: kindOf(d.path),
+        path: d.path,
+        encoding: histEncoding,
+        eol: detectEol(content),
+      });
       onClose();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -218,7 +224,7 @@
     error = "";
     try {
       // 历史版本回来的是解码后的文本，统一按 UTF-8 另存
-      await saveAs(d.name || "untitled", await readHistory(d.path, e.file), "utf-8");
+      await saveAs(d.name || "untitled", (await readHistory(d.path, e.file)).content, "utf-8");
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {

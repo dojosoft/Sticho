@@ -17,6 +17,12 @@ use tauri::AppHandle;
 /// 默认保留的历史版本份数
 const DEFAULT_KEEP: usize = 20;
 
+/// 默认的容量上限（MB，每份文档的版本总体积）
+const DEFAULT_MAX_MB: u64 = 100;
+
+/// 默认的时长上限（天，版本的最长保留时长）
+const DEFAULT_MAX_AGE_DAYS: u64 = 30;
+
 /// 每个文档的历史目录内固定写入的元信息文件名
 const META_FILE: &str = "meta.json";
 
@@ -29,6 +35,17 @@ pub struct HistoryEntry {
     pub saved_at: u64,
     /// 字节数
     pub size: u64,
+}
+
+/// 历史版本正文 + 其原始编码 id。
+///
+/// 编码必须一并返回：快照存的是**原始字节**，正文是按原编码解码出来的；
+/// 前端若不同步这个编码，保存时会按「恢复前」的编码写回，把这份版本的编码悄悄改掉。
+#[derive(serde::Serialize)]
+pub struct HistoryContent {
+    pub content: String,
+    /// 与 `decode_auto` 一致的编码 id（utf-8 / utf-8-bom / utf-16le / gbk …）
+    pub encoding: String,
 }
 
 // ---------------------------------------------------------------- 路径与哈希
@@ -60,8 +77,12 @@ fn doc_dir(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
 /// 快照文件名的合法性校验：只允许 `[A-Za-z0-9._-]`，且不得是 meta.json。
 ///
 /// 这是安全边界——文件名来自前端，必须挡住 `..\..\` 之类的路径穿越。
+/// 注意 `.` / `..` 本身也满足「只含 `.` 字符」的条件，必须单独拒绝：
+/// `dir.join("..")` 会指向上级目录，配合删除 / 读取就是目录穿越。
 fn is_valid_entry(name: &str) -> bool {
     !name.is_empty()
+        && name != "."
+        && name != ".."
         && name != META_FILE
         && name
             .chars()
@@ -86,11 +107,14 @@ pub fn snapshot_if_changed(app: &AppHandle, path: &str, new_bytes: &[u8]) {
 /// 把一段字节存为该文档的一个历史版本，并按保留份数裁剪旧版本。
 fn save_snapshot(app: &AppHandle, path: &str, bytes: &[u8]) -> Result<(), String> {
     let dir = doc_dir(app, path)?;
-    fs::create_dir_all(&dir).map_err(|e| format!("无法创建历史目录：{e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create history directory: {e}"))?;
 
     // 去重：与最新一份内容完全相同则跳过（例如连续恢复同一版本）
     if let Some(newest) = newest_entry(&dir) {
-        if fs::read(dir.join(&newest)).map(|b| b == bytes).unwrap_or(false) {
+        if fs::read(dir.join(&newest))
+            .map(|b| b == bytes)
+            .unwrap_or(false)
+        {
             return Ok(());
         }
     }
@@ -102,7 +126,7 @@ fn save_snapshot(app: &AppHandle, path: &str, bytes: &[u8]) -> Result<(), String
     super::file_io::atomic_write(&target.to_string_lossy(), bytes)?;
 
     write_meta(&dir, path);
-    prune(&dir, history_keep(app));
+    prune(&dir, &history_limits(app));
     Ok(())
 }
 
@@ -144,19 +168,30 @@ fn write_meta(dir: &Path, path: &str) {
 
 /// 目录内最新的快照文件名（按名字字典序，等同于按时间序）
 fn newest_entry(dir: &Path) -> Option<String> {
-    list_entries(dir)
-        .ok()?
-        .first()
-        .map(|e| e.file.clone())
+    list_entries(dir).ok()?.first().map(|e| e.file.clone())
 }
 
-/// 保留最新 `keep` 份，删除其余。
-fn prune(dir: &Path, keep: usize) {
+/// 按启用的上限裁剪历史版本（`entries` 已按时间降序，最新在前）。
+///
+/// 从最新往最旧扫：某一项一旦超限，该版本与它之后更旧的版本一并删除——
+/// 效果就是「从最老的开始删」。三类上限（数量 / 容量 / 时长）各自独立开关。
+fn prune(dir: &Path, limits: &HistoryLimits) {
     let Ok(entries) = list_entries(dir) else {
         return;
     };
-    for e in entries.into_iter().skip(keep) {
-        let _ = fs::remove_file(dir.join(&e.file));
+    let now = crate::logging::now_secs();
+    let mut kept = 0usize;
+    let mut bytes = 0u64;
+    for e in entries {
+        let too_old = limits.age_on && now.saturating_sub(e.saved_at) > limits.max_age_secs;
+        let too_many = limits.count_on && kept >= limits.keep;
+        let too_big = limits.size_on && bytes + e.size > limits.max_bytes;
+        if too_old || too_many || too_big {
+            let _ = fs::remove_file(dir.join(&e.file));
+            continue;
+        }
+        kept += 1;
+        bytes += e.size;
     }
 }
 
@@ -187,7 +222,11 @@ fn list_entries(dir: &Path) -> Result<Vec<HistoryEntry>, String> {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        out.push(HistoryEntry { file: name, saved_at, size: meta.len() });
+        out.push(HistoryEntry {
+            file: name,
+            saved_at,
+            size: meta.len(),
+        });
     }
     out.sort_by(|a, b| b.file.cmp(&a.file));
     Ok(out)
@@ -195,32 +234,66 @@ fn list_entries(dir: &Path) -> Result<Vec<HistoryEntry>, String> {
 
 /// 列出某文档的全部历史版本（降序）。
 #[tauri::command]
-pub fn list_history(app: AppHandle, path: String) -> Result<Vec<HistoryEntry>, String> {
-    let dir = doc_dir(&app, &path)?;
+pub async fn list_history(app: AppHandle, path: String) -> Result<Vec<HistoryEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_history_blocking(&app, &path))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn list_history_blocking(app: &AppHandle, path: &str) -> Result<Vec<HistoryEntry>, String> {
+    let dir = doc_dir(app, path)?;
     list_entries(&dir)
 }
 
-/// 读取某个历史版本的正文（按原文件编码自动检测解码）。
+/// 读取某个历史版本的正文（按原文件编码自动检测解码），连同编码一并返回。
 #[tauri::command]
-pub fn read_history(app: AppHandle, path: String, file: String) -> Result<String, String> {
-    if !is_valid_entry(&file) {
-        return Err("历史版本标识非法".into());
+pub async fn read_history(
+    app: AppHandle,
+    path: String,
+    file: String,
+) -> Result<HistoryContent, String> {
+    tauri::async_runtime::spawn_blocking(move || read_history_blocking(&app, &path, &file))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn read_history_blocking(
+    app: &AppHandle,
+    path: &str,
+    file: &str,
+) -> Result<HistoryContent, String> {
+    if !is_valid_entry(file) {
+        return Err("Invalid history version identifier".into());
     }
-    let target = doc_dir(&app, &path)?.join(&file);
-    let bytes = fs::read(&target).map_err(|e| format!("读取历史版本失败：{e}"))?;
-    let (content, _encoding) = super::file_io::decode_auto(&bytes);
-    Ok(content)
+    let target = doc_dir(app, path)?.join(file);
+    let bytes = fs::read(&target).map_err(|e| format!("Failed to read history version: {e}"))?;
+    let (content, encoding) = super::file_io::decode_auto(&bytes);
+    Ok(HistoryContent { content, encoding })
 }
 
 /// 恢复某个历史版本：先把**当前磁盘内容**再留一份档（保证「恢复」本身可撤销），
-/// 然后返回历史正文，由前端载入编辑器。
+/// 然后返回历史正文（连同其原始编码），由前端载入编辑器。
 #[tauri::command]
-pub fn restore_history(app: AppHandle, path: String, file: String) -> Result<String, String> {
-    let content = read_history(app.clone(), path.clone(), file)?;
-    if let Ok(current) = fs::read(&path) {
-        let _ = save_snapshot(&app, &path, &current);
+pub async fn restore_history(
+    app: AppHandle,
+    path: String,
+    file: String,
+) -> Result<HistoryContent, String> {
+    tauri::async_runtime::spawn_blocking(move || restore_history_blocking(&app, &path, &file))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn restore_history_blocking(
+    app: &AppHandle,
+    path: &str,
+    file: &str,
+) -> Result<HistoryContent, String> {
+    let restored = read_history_blocking(app, path, file)?;
+    if let Ok(current) = fs::read(path) {
+        let _ = save_snapshot(app, path, &current);
     }
-    Ok(content)
+    Ok(restored)
 }
 
 /// 某个文档的历史版本分组（恢复中心用，见 `list_all_history`）
@@ -260,8 +333,14 @@ fn read_meta(dir: &Path) -> Option<(String, String)> {
 /// 与 `list_history` 的区别：那条只认单个路径（文件菜单 →「文件历史」），
 /// 这条遍历整个 `history/` 目录，供「恢复中心」一次性呈现所有留档。
 #[tauri::command]
-pub fn list_all_history(app: AppHandle) -> Result<Vec<HistoryDoc>, String> {
-    let root = history_root(&app)?;
+pub async fn list_all_history(app: AppHandle) -> Result<Vec<HistoryDoc>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_all_history_blocking(&app))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn list_all_history_blocking(app: &AppHandle) -> Result<Vec<HistoryDoc>, String> {
+    let root = history_root(app)?;
     let read = match fs::read_dir(&root) {
         Ok(r) => r,
         Err(_) => return Ok(Vec::new()), // 还没有任何历史，不算错误
@@ -273,12 +352,18 @@ pub fn list_all_history(app: AppHandle) -> Result<Vec<HistoryDoc>, String> {
         if !dir.is_dir() {
             continue;
         }
-        let Some((path, name)) = read_meta(&dir) else { continue };
+        let Some((path, name)) = read_meta(&dir) else {
+            continue;
+        };
         let entries = list_entries(&dir)?;
         if entries.is_empty() {
             continue;
         }
-        docs.push(HistoryDoc { path, name, entries });
+        docs.push(HistoryDoc {
+            path,
+            name,
+            entries,
+        });
     }
 
     // 最近有改动的文档排前面（entries 已降序，取首条时间即可）
@@ -292,27 +377,95 @@ pub fn list_all_history(app: AppHandle) -> Result<Vec<HistoryDoc>, String> {
 
 /// 删除某个历史版本（幂等：文件本就不存在时返回 `Ok(())`）。
 #[tauri::command]
-pub fn delete_history(app: AppHandle, path: String, file: String) -> Result<(), String> {
-    if !is_valid_entry(&file) {
-        return Err("历史版本标识非法".into());
+pub async fn delete_history(app: AppHandle, path: String, file: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_history_blocking(&app, &path, &file))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn delete_history_blocking(app: &AppHandle, path: &str, file: &str) -> Result<(), String> {
+    if !is_valid_entry(file) {
+        return Err("Invalid history version identifier".into());
     }
-    let target = doc_dir(&app, &path)?.join(&file);
+    let target = doc_dir(app, path)?.join(file);
     match fs::remove_file(&target) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("删除历史版本失败：{e}")),
+        Err(e) => Err(format!("Failed to delete history version: {e}")),
     }
 }
 
-/// 保留份数：读设置项 `historyKeep`，缺失或非法时用默认值（并夹在 1..=200）。
-fn history_keep(app: &AppHandle) -> usize {
-    super::config::get_settings_path(app.clone())
+/// 多版本控制的三类上限（数量 / 容量 / 时长）。
+///
+/// 三者各有独立开关（设置面板里对应三个复选框）：只有开启的那一项参与裁剪。
+struct HistoryLimits {
+    /// 数量上限是否启用
+    count_on: bool,
+    /// 每个文档最多保留的版本数
+    keep: usize,
+    /// 容量上限是否启用
+    size_on: bool,
+    /// 每个文档的版本总体积上限（字节）
+    max_bytes: u64,
+    /// 时长上限是否启用
+    age_on: bool,
+    /// 版本的最长保留时长（秒）
+    max_age_secs: u64,
+}
+
+/// 读取设置里的三类上限；缺失或非法一律用默认值（数量 20 / 容量 100MB / 时长 30 天）。
+fn history_limits(app: &AppHandle) -> HistoryLimits {
+    let v = super::config::get_settings_path(app.clone())
         .ok()
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("historyKeep").and_then(|n| n.as_u64()))
-        .map(|n| n.clamp(1, 200) as usize)
-        .unwrap_or(DEFAULT_KEEP)
+        .unwrap_or(serde_json::Value::Null);
+    let mb = v
+        .get("historyMaxSizeMb")
+        .and_then(|n| n.as_u64())
+        .map(|n| n.clamp(1, 10_240))
+        .unwrap_or(DEFAULT_MAX_MB);
+    let days = v
+        .get("historyMaxAgeDays")
+        .and_then(|n| n.as_u64())
+        .map(|n| n.clamp(1, 3_650))
+        .unwrap_or(DEFAULT_MAX_AGE_DAYS);
+    HistoryLimits {
+        count_on: v.get("historyCountLimitOn").and_then(|b| b.as_bool()).unwrap_or(true),
+        keep: v
+            .get("historyKeep")
+            .and_then(|n| n.as_u64())
+            .map(|n| n.clamp(1, 200) as usize)
+            .unwrap_or(DEFAULT_KEEP),
+        size_on: v.get("historySizeLimitOn").and_then(|b| b.as_bool()).unwrap_or(false),
+        max_bytes: mb * 1024 * 1024,
+        age_on: v.get("historyAgeLimitOn").and_then(|b| b.as_bool()).unwrap_or(false),
+        max_age_secs: days * 86_400,
+    }
+}
+
+/// 按当前设置上限裁剪**全部文档**的历史版本。
+///
+/// 设置面板调整上限后调用一次：让「调小上限」立即释放空间，而不是等下次保存才生效。
+#[tauri::command]
+pub async fn prune_history(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || prune_history_blocking(&app))
+        .await
+        .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+fn prune_history_blocking(app: &AppHandle) -> Result<(), String> {
+    let limits = history_limits(app);
+    let Ok(read) = fs::read_dir(history_root(app)?) else {
+        return Ok(()); // 还没有任何历史，不算错误
+    };
+    for item in read.flatten() {
+        let dir = item.path();
+        if dir.is_dir() {
+            prune(&dir, &limits);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -341,6 +494,9 @@ mod tests {
         assert!(!is_valid_entry(r"..\..\windows\system32"));
         assert!(!is_valid_entry("a/b.md"));
         assert!(!is_valid_entry(""));
+        // `.` / `..` 也满足「只含 . - _ 字母数字」，必须显式拒绝（join 后会指向上级目录）
+        assert!(!is_valid_entry("."));
+        assert!(!is_valid_entry(".."));
     }
 
     #[test]
@@ -357,14 +513,43 @@ mod tests {
 
         assert!(read_meta(&dir).is_none(), "没有 meta.json 时应返回 None");
 
-        fs::write(dir.join(META_FILE), r#"{"path":"D:\\Docs\\A.md","name":"A.md"}"#).unwrap();
-        assert_eq!(read_meta(&dir), Some((r"D:\Docs\A.md".to_string(), "A.md".to_string())));
+        fs::write(
+            dir.join(META_FILE),
+            r#"{"path":"D:\\Docs\\A.md","name":"A.md"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_meta(&dir),
+            Some((r"D:\Docs\A.md".to_string(), "A.md".to_string()))
+        );
 
         // name 缺失 / 为空时用文件名兜底
         fs::write(dir.join(META_FILE), r#"{"path":"D:\\Docs\\B.md"}"#).unwrap();
-        assert_eq!(read_meta(&dir), Some((r"D:\Docs\B.md".to_string(), "B.md".to_string())));
+        assert_eq!(
+            read_meta(&dir),
+            Some((r"D:\Docs\B.md".to_string(), "B.md".to_string()))
+        );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 只开数量上限的裁剪参数；容量 / 时长视为不启用
+    fn count_only(keep: usize) -> HistoryLimits {
+        HistoryLimits {
+            count_on: true,
+            keep,
+            size_on: false,
+            max_bytes: u64::MAX,
+            age_on: false,
+            max_age_secs: u64::MAX,
+        }
+    }
+
+    /// 造 n 份历史文件（名字字典序即时间序）
+    fn seed(dir: &Path, stamps: &[&str]) {
+        for stamp in stamps {
+            fs::write(dir.join(format!("{stamp}.md")), stamp.as_bytes()).unwrap();
+        }
     }
 
     #[test]
@@ -373,16 +558,63 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        // 名字字典序即时间序：造 5 份
-        for stamp in ["20260101-000001", "20260101-000002", "20260101-000003", "20260101-000004", "20260101-000005"] {
-            fs::write(dir.join(format!("{stamp}.md")), stamp.as_bytes()).unwrap();
-        }
-        prune(&dir, 3);
+        seed(
+            &dir,
+            &[
+                "20260101-000001",
+                "20260101-000002",
+                "20260101-000003",
+                "20260101-000004",
+                "20260101-000005",
+            ],
+        );
+        prune(&dir, &count_only(3));
 
         let left = list_entries(&dir).unwrap();
         assert_eq!(left.len(), 3);
         assert_eq!(left[0].file, "20260101-000005.md", "最新的保留在最前");
         assert_eq!(left[2].file, "20260101-000003.md");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 关闭数量上限则不按份数裁剪() {
+        let dir = std::env::temp_dir().join(format!("sticho-hist-off-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        seed(&dir, &["20260101-000001", "20260101-000002", "20260101-000003"]);
+
+        let limits = HistoryLimits {
+            count_on: false,
+            ..count_only(1)
+        };
+        prune(&dir, &limits);
+        assert_eq!(list_entries(&dir).unwrap().len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 容量上限从最老的开始删() {
+        let dir = std::env::temp_dir().join(format!("sticho-hist-size-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 每份 15 字节（内容即文件名戳）；上限 32 字节 → 只能留下最新 2 份（共 30 字节）
+        seed(&dir, &["20260101-000001", "20260101-000002", "20260101-000003"]);
+
+        let limits = HistoryLimits {
+            count_on: false,
+            size_on: true,
+            max_bytes: 32,
+            ..count_only(1)
+        };
+        prune(&dir, &limits);
+
+        let left = list_entries(&dir).unwrap();
+        assert_eq!(left.len(), 2, "超出容量时从最老的开始删");
+        assert_eq!(left[0].file, "20260101-000003.md");
+        assert_eq!(left[1].file, "20260101-000002.md");
 
         let _ = fs::remove_dir_all(&dir);
     }

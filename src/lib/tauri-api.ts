@@ -48,6 +48,16 @@ export function saveImageAsset(path: string, name: string, data: string): Promis
 }
 
 /**
+ * 把某文档所在目录（含子目录）放行给 asset 协议（批次「安全加固」）。
+ *
+ * 静态 scope 已收窄为空，打开 / 另存文档时必须先调用它，正文里的本地相对
+ * 路径图片才能经 asset 协议加载。目录为空串时后端直接返回成功。
+ */
+export function allowAssetDir(dir: string): Promise<void> {
+  return invoke<void>("allow_asset_dir", { dir });
+}
+
+/**
  * 导出为 Pandoc 支持的格式（批次八）：
  * kind = "latex"（.tex）/ "epub"（.epub）；content 为 Markdown 正文；
  * base 为源文档所在目录（解析正文里的相对路径图片），未保存文档传 null。
@@ -75,6 +85,53 @@ export function loadThemes(): Promise<ThemeFile[]> {
 /** 在资源管理器中打开主题目录，返回其绝对路径 */
 export function openThemeDir(): Promise<string> {
   return invoke<string>("open_theme_dir");
+}
+
+/** 语言包（批次十二）：locales/*.json 的解析结果；entries 为「英文原文 → 译文」 */
+export type LocalePack = {
+  id: string;
+  label: string;
+  entries: Record<string, string>;
+};
+
+/** 字体包（批次十二）：fonts/ 下的一个字体文件 */
+export type FontPack = {
+  /** 文件名主干，同时用作 @font-face 的 family 名 */
+  name: string;
+  /** 字体文件绝对路径（前端经 convertFileSrc 转成 asset URL） */
+  path: string;
+};
+
+/** 待释放的默认包文件 */
+export type DefaultPackFile = {
+  dir: "locales" | "themes" | "fonts" | "docs";
+  name: string;
+  content: string;
+  /**
+   * 自带语言包的版本（= 软件主体版本号）：文件已存在但其中 `_version` 低于该值时覆盖重写；
+   * 省略则「已存在即跳过」，绝不覆盖用户改动（主题 / 字体 / 说明文件即走这条）。
+   */
+  version?: string;
+};
+
+/** 释放默认包文件（不存在则写入；带 version 的内置包在版本更旧时覆盖），返回实际写入的文件名 */
+export function ensurePacks(files: DefaultPackFile[]): Promise<string[]> {
+  return invoke<string[]>("ensure_packs", { files });
+}
+
+/** 列出 locales/ 下的语言包（按 id 排序） */
+export function loadLocales(): Promise<LocalePack[]> {
+  return invoke<LocalePack[]>("load_locales");
+}
+
+/** 列出 fonts/ 下的字体文件（同时把该目录放行给 asset 协议） */
+export function loadFonts(): Promise<FontPack[]> {
+  return invoke<FontPack[]>("load_fonts");
+}
+
+/** 在资源管理器中打开某个包目录（locales | themes | fonts | docs），返回其绝对路径 */
+export function openPackDir(kind: "locales" | "themes" | "fonts" | "docs"): Promise<string> {
+  return invoke<string>("open_pack_dir", { kind });
 }
 
 /** 目录项（阶段 11：侧边栏文件目录树） */
@@ -124,6 +181,11 @@ export function getStartupFile(): Promise<string | null> {
   return invoke<string | null>("get_startup_file");
 }
 
+/** 在资源管理器中定位并选中某个文件（标签右键「打开文件位置」） */
+export function revealFile(path: string): Promise<void> {
+  return invoke<void>("reveal_in_explorer", { path });
+}
+
 /** 查询扩展名是否已关联到本程序（ext 不含点号：md / html / txt） */
 export function getFileAssociation(ext: string): Promise<boolean> {
   return invoke<boolean>("get_file_association", { ext });
@@ -158,14 +220,25 @@ export function getContextMenu(): Promise<boolean> {
   return invoke<boolean>("get_context_menu");
 }
 
-/** 打开 / 关闭「用本软件打开」右键菜单项 */
-export function setContextMenu(enable: boolean): Promise<void> {
-  return invoke<void>("set_context_menu", { enable });
+/**
+ * 打开 / 关闭「用本软件打开」右键菜单项。
+ * `locale` 为 Sticho 当前界面语言，仅在操作系统语言取不到时用于决定菜单文案的中/英。
+ */
+export function setContextMenu(enable: boolean, locale: string): Promise<void> {
+  return invoke<void>("set_context_menu", { enable, locale });
 }
 
 /** 打开系统「默认应用」设置页（把记事本改成本软件的最终确认交给系统界面） */
 export function openDefaultAppsSettings(): Promise<void> {
   return invoke<void>("open_default_apps_settings");
+}
+
+/**
+ * 清理对系统的全部写入：撤销所有扩展名关联、删除右键菜单项，使程序恢复便携状态。
+ * 返回未能清理干净的项目（如个别注册表键删除失败）；为空数组即已完全恢复。
+ */
+export function clearSystemIntegration(): Promise<string[]> {
+  return invoke<string[]>("clear_system_integration");
 }
 
 // ---- 恢复草稿（批次四：自动保存与崩溃恢复）----
@@ -233,16 +306,6 @@ export type WebdavEntry = {
   size: number;
 };
 
-/** 历史版本项 */
-export type VersionEntry = {
-  n: number;
-  /** 版本文件的远端路径 */
-  path: string;
-  size: number;
-  /** Unix 秒；服务器没给可解析的 Last-Modified 时为 0 */
-  saved_at: number;
-};
-
 /** 上传结果：`conflict` 表示检测到云端被别的设备改过、已另存冲突副本 */
 export type UploadResult = {
   status: "ok" | "conflict";
@@ -265,8 +328,7 @@ export function webdavTest(cfg: DavConfig): Promise<string> {
 }
 
 /**
- * 上传单个本地文档。`keep > 0` 时顺带记一份历史版本。
- * 正文由 Rust 侧直接读刚落盘的本地文件，保证与磁盘内容一致。
+ * 上传单个本地文档。正文由 Rust 侧直接读刚落盘的本地文件，保证与磁盘内容一致。
  *
  * `policy` 决定云端被别的设备改过时怎么办：`copy` 另存冲突副本（默认，绝不丢数据）、
  * `overwrite` 直接覆盖。`prev` 是上次上传后记录的远端状态（用于冲突判定），首次上传传 `null`。
@@ -274,21 +336,57 @@ export function webdavTest(cfg: DavConfig): Promise<string> {
 export function webdavUpload(
   cfg: DavConfig,
   local: string,
-  keep: number,
   policy: "copy" | "overwrite",
   prev: { size: number; modified: number } | null,
 ): Promise<UploadResult> {
   return invoke<UploadResult>("webdav_upload", {
     ...cfg,
     local,
-    keep,
     policy,
     prevSize: prev ? prev.size : null,
     prevModified: prev ? prev.modified : null,
   });
 }
 
-/** 列出远端某目录下的内容（path 为相对 base 的远端路径） */
+/**
+ * 把正文直接写到指定远端路径（云端文档「就地编辑」保存）。
+ *
+ * 与 `webdavUpload` 的区别：没有本地文件，`remote` 由前端给出（打开云端文档时记下的路径）。
+ * `policy`/`prev` 语义与 `webdavUpload` 完全一致。
+ */
+export function webdavPut(
+  cfg: DavConfig,
+  remote: string,
+  content: string,
+  policy: "copy" | "overwrite",
+  prev: { size: number; modified: number } | null,
+): Promise<UploadResult> {
+  return invoke<UploadResult>("webdav_put", {
+    ...cfg,
+    remote,
+    content,
+    policy,
+    prevSize: prev ? prev.size : null,
+    prevModified: prev ? prev.modified : null,
+  });
+}
+
+/** 远端文件状态（云端变更检测用）：`exists` 为 false 时 size / modified 均为 0 */
+export type RemoteStat = {
+  exists: boolean;
+  size: number;
+  modified: number;
+};
+
+/**
+ * 探测某个远端文件的当前状态（PROPFIND Depth:0）。
+ * 与本机上次同步记录比对即可判断「云端是否被别的设备改过」。
+ */
+export function webdavStat(cfg: Omit<DavConfig, "root">, path: string): Promise<RemoteStat> {
+  return invoke<RemoteStat>("webdav_stat", { ...cfg, path });
+}
+
+/** 列出远端某个目录下的内容（`path` 为相对 base 的远端路径） */
 export function webdavList(cfg: Omit<DavConfig, "root">, path: string): Promise<WebdavEntry[]> {
   return invoke<WebdavEntry[]>("webdav_list", { ...cfg, path });
 }
@@ -296,24 +394,6 @@ export function webdavList(cfg: Omit<DavConfig, "root">, path: string): Promise<
 /** 读取远端文件正文（按 UTF-8 解析；非 UTF-8 会以错误驳回） */
 export function webdavDownload(cfg: Omit<DavConfig, "root">, path: string): Promise<string> {
   return invoke<string>("webdav_download", { ...cfg, path });
-}
-
-/** 列出某文档的历史版本（按版本号降序）。remote 为文档的远端路径。 */
-export function webdavVersions(
-  cfg: DavConfig,
-  remote: string,
-): Promise<VersionEntry[]> {
-  return invoke<VersionEntry[]>("webdav_versions", { ...cfg, remote });
-}
-
-/** 取回某个历史版本的正文 */
-export function webdavFetchVersion(cfg: DavConfig, remote: string, n: number): Promise<string> {
-  return invoke<string>("webdav_fetch_version", { ...cfg, remote, n });
-}
-
-/** 删除某个历史版本 */
-export function webdavDeleteVersion(cfg: DavConfig, remote: string, n: number): Promise<void> {
-  return invoke<void>("webdav_delete_version", { ...cfg, remote, n });
 }
 
 /**
@@ -329,10 +409,13 @@ export function loadDavPassword(): Promise<string | null> {
   return invoke<string | null>("load_dav_password");
 }
 
-// ---- 配置数据保存位置（批次十）----
+// ---- 配置数据保存位置（批次十 / 位置自动探测）----
 
-/** 数据位置模式：系统目录 / 指定目录 / 当前程序目录 */
-export type DataLocationMode = "user" | "portable" | "custom";
+/** 数据位置模式：系统目录 / 当前程序目录（便携） */
+export type DataLocationMode = "user" | "portable";
+
+/** 启动时的配置位置状态："unset" 表示两处均未初始化，需引导用户选择 */
+export type ConfigState = DataLocationMode | "unset";
 
 /** settings.json 的绝对路径（plugin-store 据此定位） */
 export function getSettingsPath(): Promise<string> {
@@ -350,16 +433,32 @@ export function getDataRoot(): Promise<string> {
 }
 
 /**
+ * 启动时探测配置位置状态。
+ *
+ * - "portable"：程序当前目录已有配置（便携运行，不写宿主）；
+ * - "user"：系统目录已有配置；
+ * - "unset"：两处均无配置 → 首次运行，前端应引导用户选择保存位置。
+ */
+export function getConfigState(): Promise<ConfigState> {
+  return invoke<ConfigState>("get_config_state");
+}
+
+/**
+ * 首次运行：写入用户选定的配置位置（位置标记 + 初始 settings.json）并立即生效。
+ * 返回新数据根目录绝对路径；已初始化时 reject（防误改）。
+ */
+export function setupConfigLocation(mode: DataLocationMode): Promise<string> {
+  return invoke<string>("setup_config_location", { mode });
+}
+
+/**
  * 预检目标位置是否可读写，成功时 resolve 出该位置的数据根目录绝对路径。
  *
  * 失败（无权限 / 只读盘 / 被安全软件保护）会 reject 出中文原因；
- * 预检不落任何文件、不改引导文件，前端据此提示并回退。
+ * 预检不落任何文件、不改位置标记，前端据此提示并回退。
  */
-export function checkDataLocation(
-  mode: DataLocationMode,
-  path?: string | null,
-): Promise<string> {
-  return invoke<string>("check_data_location", { mode, path: path ?? null });
+export function checkDataLocation(mode: DataLocationMode): Promise<string> {
+  return invoke<string>("check_data_location", { mode });
 }
 
 /** 切换数据位置的结果 */
@@ -378,21 +477,27 @@ export type SetLocationResult = {
 
 /**
  * 切换数据保存位置，resolve 出结构化结果（含新根目录）。
- * `mode === "custom"` 时必须给出 `path`（绝对路径）。
  * `migrate` 为 true 时把旧位置数据复制到新位置并在完整迁移后清理旧目录。
  * 目标不可读写时 reject 出中文原因（不落任何文件、不改设置）。
  */
 export function setDataLocation(
   mode: DataLocationMode,
-  path: string | null,
   migrate: boolean,
 ): Promise<SetLocationResult> {
-  return invoke<SetLocationResult>("set_data_location", { mode, path, migrate });
+  return invoke<SetLocationResult>("set_data_location", { mode, migrate });
 }
 
 /** 立即重启应用（新的配置位置需要重启才完全生效） */
 export function restartApp(): Promise<void> {
   return invoke<void>("restart_app");
+}
+
+/**
+ * 一键清理配置根目录下的**全部用户数据**（位置标记保留，位置选择不丢）。
+ * 返回逐项删除的告警；内置包会在下次启动时自动重新释放。调用前应做两次确认。
+ */
+export function clearAllData(): Promise<string[]> {
+  return invoke<string[]>("clear_all_data");
 }
 
 /**
@@ -422,14 +527,21 @@ export function listHistory(path: string): Promise<HistoryEntry[]> {
   return invoke<HistoryEntry[]>("list_history", { path });
 }
 
-/** 读取某个历史版本的正文 */
-export function readHistory(path: string, file: string): Promise<string> {
-  return invoke<string>("read_history", { path, file });
+/** 历史版本正文 + 其原始编码 id（快照存的是原始字节，编码需一并同步给前端） */
+export type HistoryContent = {
+  content: string;
+  /** 与后端 `decode_auto` 一致的编码 id（utf-8 / utf-8-bom / utf-16le / gbk …） */
+  encoding: string;
+};
+
+/** 读取某个历史版本的正文（连同其原始编码） */
+export function readHistory(path: string, file: string): Promise<HistoryContent> {
+  return invoke<HistoryContent>("read_history", { path, file });
 }
 
-/** 恢复某个历史版本：返回正文，并先把当前磁盘内容留档（保证「恢复」可撤销） */
-export function restoreHistory(path: string, file: string): Promise<string> {
-  return invoke<string>("restore_history", { path, file });
+/** 恢复某个历史版本：返回正文与编码，并先把当前磁盘内容留档（保证「恢复」可撤销） */
+export function restoreHistory(path: string, file: string): Promise<HistoryContent> {
+  return invoke<HistoryContent>("restore_history", { path, file });
 }
 
 // ---- 恢复中心：全局列出所有文档的本地历史版本 ----
@@ -452,6 +564,34 @@ export function listAllHistory(): Promise<HistoryDoc[]> {
 /** 删除某个历史版本（幂等：文件本就不存在也算成功） */
 export function deleteHistory(path: string, file: string): Promise<void> {
   return invoke<void>("delete_history", { path, file });
+}
+
+/**
+ * 按设置里的三类上限（数量 / 容量 / 时长）全量裁剪本地历史版本，
+ * 超限的从最老的开始删。设置一改动即调用，让「调小上限」立即释放空间。
+ */
+export function pruneHistory(): Promise<void> {
+  return invoke<void>("prune_history");
+}
+
+// ---- 书签持久化（存到配置目录下的 bookmarks 文件夹）----
+
+/**
+ * 保存某文档的书签。`owner` 是文档身份（本地路径或未命名文档的草稿 id），
+ * `data` 是前端序列化好的 JSON，后端原样写盘。
+ */
+export function bookmarksSave(owner: string, data: string): Promise<void> {
+  return invoke<void>("bookmarks_save", { owner, data });
+}
+
+/** 读取某文档的书签；没有则返回 null */
+export function bookmarksLoad(owner: string): Promise<string | null> {
+  return invoke<string | null>("bookmarks_load", { owner });
+}
+
+/** 删除某文档的书签文件（清空全部书签时调用） */
+export function bookmarksDelete(owner: string): Promise<void> {
+  return invoke<void>("bookmarks_delete", { owner });
 }
 
 // ---- 诊断（帮助菜单 →「导出诊断信息」）----

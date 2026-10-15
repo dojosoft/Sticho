@@ -1646,7 +1646,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     );
     if (!ok) return;
     try {
-      const content = await restoreHistory(currentPath, file);
+      const { content, encoding: histEncoding } = await restoreHistory(currentPath, file);
       if (docKind === "html") {
         htmlSource = content;
         previewDoc = content;
@@ -1660,6 +1660,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 历史正文按其原文件的行尾解码返回，而 Markdown 经 Vditor 取值一律是 LF：
       // 必须把行尾风格同步过来，否则保存时会用「恢复前」的风格把这份版本写回去。
       docEol = detectEol(content);
+      // 同理，编码也要同步：快照存的是原始字节，不刷新编码，保存时会按恢复前的编码写回。
+      encoding = histEncoding || "utf-8";
       dirty = true; // 恢复结果需要保存才写回磁盘，避免误覆盖
       // 重置外部变更比对基准：留档 / 读取历史版本会触碰磁盘，若不刷新基准，
       // 5 秒轮询会把这次恢复当成「文件被外部修改」立刻误报（且此时 dirty=true 会弹三选框）。
@@ -1690,7 +1692,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   async function openHistoryDiff(file: string): Promise<void> {
     if (!currentPath) return;
     try {
-      const oldText = await readHistory(currentPath, file);
+      const { content: oldText } = await readHistory(currentPath, file);
       const newText = currentText();
       diffView = {
         title: t("Version Comparison"),
