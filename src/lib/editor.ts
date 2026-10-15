@@ -11,7 +11,7 @@
 import type Vditor from "vditor";
 import "vditor/dist/index.css";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { saveImageAsset, allowAssetDir, logEvent } from "./tauri-api";
+import { saveImageAsset, allowAssetDir } from "./tauri-api";
 import { LargeReader, LARGE_DOC_BYTES, type MountedSection } from "./largeReader";
 import { interpolateAnchors, type SvAnchor } from "./svScrollAnchor";
 
@@ -996,8 +996,6 @@ export async function initEditor(el: HTMLElement, initialValue: string, dark: bo
       ready = true;
       readyResolve?.();
       readyResolve = null;
-      // 启动计时：窗口是前端在前文里 show() 的，「感知启动时间」= 从页面开始到这一刻
-      void logEvent("INFO", `[startup] editor ready +${Math.round(performance.now())}ms`).catch(() => {});
       expandEmojiSet();
       attachLineNumbers();
       attachCodeLanguagePicker();
