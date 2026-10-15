@@ -197,7 +197,13 @@
   import { loadSetting, loadAllSettings, saveSetting, deleteSetting } from "./lib/settings";
   import { diffLines, type DiffLine } from "./lib/diff";
   import { ZH, LOCALES, makeTFrom, vditorLang, type Locale } from "./lib/i18n";
-  import { DEFAULT_PACK_FILES, DARK_THEME_FILE, LEGACY_DARK_THEME_FILES } from "./lib/defaultPacks";
+  import {
+    BUILTIN_THEME_ORDER,
+    DARK_THEME_FILE,
+    DEFAULT_PACK_FILES,
+    LEGACY_THEME_FILES,
+    LEGACY_THEME_RENAMES,
+  } from "./lib/defaultPacks";
   import { loadWelcomeDocs, welcomeFor } from "./lib/welcome";
   import {
     compileFindRegex,
@@ -3982,13 +3988,27 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   }
 
   /**
+   * 主题下拉框里主题文件的先后：内置三份按「深色 → 温酒 → 暖夜」排在前，自建主题按目录读到的
+   * 原顺序跟在其后（sort 是稳定的）。配合下拉框里靠前的「自动切换（默认）」「浅色」两个档位，
+   * 整体即：自动切换 / 浅色 / 深色 / 温酒 / 暖夜 / 自建主题。
+   */
+  function sortThemes(list: ThemeFile[]): ThemeFile[] {
+    const rank = (f: ThemeFile): number => {
+      const i = BUILTIN_THEME_ORDER.indexOf(f.name);
+      return i < 0 ? BUILTIN_THEME_ORDER.length : i;
+    };
+    return [...list].sort((a, b) => rank(a) - rank(b));
+  }
+
+  /**
    * 读取主题目录并把选中主题应用到界面；已选主题文件被删掉时回落「自动切换」并清掉设置。
-   * 内置深色主题改过几次名（「内置主题·暗墨.css」→「内置主题·深色.css」→「深色.css」），
+   * 内置主题改过几次名（「内置主题·暗墨.css」→「深色.css」，暖夜 / 温酒 去掉「内置主题·」前缀），
    * 旧文件名不会被自动删除（内置包只在缺失时释放），这里把它们从列表里滤掉，免得下拉框多出重名选项。
    */
   async function refreshThemes(): Promise<void> {
     try {
-      themeFiles = (await loadThemes()).filter((f) => !LEGACY_DARK_THEME_FILES.includes(f.name));
+      const list = (await loadThemes()).filter((f) => !LEGACY_THEME_FILES.includes(f.name));
+      themeFiles = sortThemes(list);
     } catch {
       themeFiles = [];
     }
@@ -6110,11 +6130,23 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   }
 
   /**
-   * 整菜单是否整体置灰：只读浏览锁（readonlyLocked）+ 按当前文档模式的锁（lockWhen）。
-   * 顶栏项与面板内各项共用它，保证「段落 / 格式」在非 Markdown 模式下从外到内一起灰掉。
+   * 面板里的项是否置灰：只读浏览锁（readonlyLocked）+ 按当前文档模式的锁（lockWhen）。
+   * 顶栏按钮参考 menuTitleLocked，面板内各项（含子菜单父项与孙项）一律用它，
+   * 保证「段落 / 格式」在非 Markdown 模式下从内到外一起灰掉。
    */
   function menuLocked(menu: MenuDef): boolean {
     return (menu.readonlyLocked === true && browseMode) || menu.lockWhen?.() === true;
+  }
+
+  /**
+   * 顶栏按钮本身是否置灰：只认只读浏览锁。
+   *
+   * 按文档模式的锁（lockWhen，如「段落 / 格式」在纯文本 / HTML 下无效）只灰面板里的项，
+   * 按钮保持常态——用户仍能点开面板看清哪些项不可用，而不是连入口都灰着点不动。
+   * 带 lockWhen 的菜单由此天然不灰顶栏（「编辑」只有 readonlyLocked，仍照旧在阅读模式下灰）。
+   */
+  function menuTitleLocked(menu: MenuDef): boolean {
+    return menu.lockWhen === undefined && menu.readonlyLocked === true && browseMode;
   }
 
   function runMenuItem(item: MenuItem): void {
@@ -6640,16 +6672,13 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 外观已并入「主题」：真正的选择由 refreshThemes → applyThemeChoice 落地；
       // 这里先落浅色底，避免首帧闪一下没着色的界面。
       // 主题选择：键不存在、或存过 null（两者都等于「没选过自定义主题」）= 新的默认值
-      // 「自动切换」（跟随 Windows 深浅）。内置深色主题改过几次名（「内置主题·暗墨.css」→
-      // 「内置主题·深色.css」→「深色.css」），选过旧文件名的老配置在这里换名，
-      // 免得下次启动按找不到的文件回落。（「自动切换」档不认文件名，改名与它无关。）
+      // 「自动切换」（跟随 Windows 深浅）。内置主题改过几次名（去掉「内置主题·」前缀：
+      // 暗墨 → 深色，暖夜 / 温酒 同名去前缀），选过旧文件名的老配置在这里按
+      // LEGACY_THEME_RENAMES 换成现名字，免得下次启动按找不到的文件回落。
+      // （「自动切换」档不认文件名，改名与它无关。）
       const savedTheme = s["userTheme"] as string | null | undefined;
-      themeChoice =
-        savedTheme == null
-          ? AUTO_THEME
-          : LEGACY_DARK_THEME_FILES.includes(savedTheme)
-            ? DARK_THEME_FILE
-            : savedTheme;
+      const renamedTo = savedTheme == null ? undefined : LEGACY_THEME_RENAMES[savedTheme];
+      themeChoice = savedTheme == null ? AUTO_THEME : (renamedTo ?? savedTheme);
       // 旧键 theme（「外观三选」遗留）为 dark 的，迁到内置深色主题而不是让它跟着系统走，
       // 避免升级后莫名变浅色；迁完必须删掉旧键，否则用户改成自动/浅色后下次启动又被拉回深色。
       if (themeChoice === AUTO_THEME && (s["theme"] as string | undefined) === "dark") {
@@ -6657,9 +6686,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         void saveSetting("userTheme", themeChoice);
         void deleteSetting("theme");
       }
-      if (savedTheme != null && LEGACY_DARK_THEME_FILES.includes(savedTheme)) {
-        void saveSetting("userTheme", DARK_THEME_FILE);
-      }
+      if (renamedTo !== undefined) void saveSetting("userTheme", themeChoice);
       applyAppTheme(false);
       // 界面语言（批次八；批次十五起默认中文）：先读设置再初始化编辑器，让 Vditor 一次就用对语言
       locale = (s["locale"] as Locale | undefined) ?? "zh-CN";
@@ -6935,7 +6962,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         <button
           class="menu-title"
           class:open={menuOpen === menu.id}
-          class:is-off={menuLocked(menu)}
+          class:is-off={menuTitleLocked(menu)}
           onclick={() => toggleMenu(menu.id)}
           onmouseenter={() => {
             if (menuOpen) menuOpen = menu.id;

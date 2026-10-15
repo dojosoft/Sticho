@@ -85,8 +85,9 @@ const THEMES_README = `Sticho 主题包文件夹
 因此「外观」只需选主题即可，不再单独切明 / 暗档位。
 
 说明：
-- 本目录里的「深色.css」「内置主题·暖夜.css」「内置主题·温酒.css」是三份整套界面的
-  示例（深色=中性深色，暖夜=偏暖深色，温酒=暖黄浅色），照着改就行。
+- 本目录里的「深色.css」「温酒.css」「暖夜.css」是三份整套界面的
+  示例（深色=中性深色，温酒=暖黄浅色，暖夜=偏暖深色），照着改就行。
+- 主题下拉框的顺序是「自动切换（默认）/ 浅色 / 深色 / 温酒 / 暖夜」，之后才轮到你放的主题。
 - 主题默认「自动切换」：跟随 Windows 的深浅在内置浅色 / 深色之间切换；也可以显式指定某份主题。
 - 不需要时把 .css 文件删掉即可，程序不会重新生成它。
 `;
@@ -200,8 +201,8 @@ html .md-large-reader__body {
 }
 `;
 
-/** 内置主题文件名（同样不带 version：用户在旧机器上不会被动升级覆盖，改名即可重新释放） */
-const WARM_NIGHT_THEME_FILE = "内置主题·暖夜.css";
+/** 内置暖夜（偏暖深色）主题文件名（同样不带 version：用户在旧机器上不会被动升级覆盖，改名即可重新释放） */
+export const WARM_NIGHT_THEME_FILE = "暖夜.css";
 
 /**
  * 内置主题：暖黄浅色（温酒）——与「暖夜」对应的浅色整套主题。
@@ -300,8 +301,8 @@ html .md-large-reader__body {
 }
 `;
 
-/** 内置暖黄浅色主题文件名（不带 version，缺失时才释放） */
-const WARM_WINE_THEME_FILE = "内置主题·温酒.css";
+/** 内置温酒（暖黄浅色）主题文件名（不带 version，缺失时才释放） */
+export const WARM_WINE_THEME_FILE = "温酒.css";
 
 /**
  * 内置主题：深色——即原「外观 → 深色」档位，现转为一等内置主题。
@@ -399,16 +400,31 @@ html .md-large-reader__body {
 }
 `;
 
-/** 内置深色主题文件名（不带 version，缺失时才释放）；下拉框里显示为「深色」 */
+/** 内置深色（中性深色）主题文件名（不带 version，缺失时才释放） */
 export const DARK_THEME_FILE = "深色.css";
 
 /**
- * 内置深色主题用过的旧文件名（改名前的残留，按出现先后排列）。
- *
- * 内置包只在文件缺失时释放、不会主动删掉改名前的旧文件，所以主题下拉框要把它们滤掉，
- * 否则老用户会多看到一条重名选项。选中过旧文件名的老配置由 App 侧迁移成新名字。
+ * 主题下拉框里内置主题文件的先后：深色 → 温酒 → 暖夜。
+ * 下拉框整体顺序即：自动切换（默认）/ 浅色（内置档位，不是文件）/ 深色 / 温酒 / 暖夜 / 用户自建主题。
+ * 自建主题不参与排序，按目录读到的原顺序跟在内置三份之后。
  */
-export const LEGACY_DARK_THEME_FILES = ["内置主题·暗墨.css", "内置主题·深色.css"];
+export const BUILTIN_THEME_ORDER = [DARK_THEME_FILE, WARM_WINE_THEME_FILE, WARM_NIGHT_THEME_FILE];
+
+/**
+ * 内置主题改名前的旧文件名 → 现文件名（按出现先后排列）。
+ *
+ * 内置包只在文件缺失时释放、不会主动删掉改名前的旧文件，所以主题下拉框要把这些旧名字滤掉，
+ * 否则老用户会多看到一条同名选项；老配置里选中过旧文件名的，启动时按这张表换成新名字。
+ */
+export const LEGACY_THEME_RENAMES: Record<string, string> = {
+  "内置主题·暗墨.css": DARK_THEME_FILE,
+  "内置主题·深色.css": DARK_THEME_FILE,
+  "内置主题·暖夜.css": WARM_NIGHT_THEME_FILE,
+  "内置主题·温酒.css": WARM_WINE_THEME_FILE,
+};
+
+/** 内置主题用过的旧文件名：刷新主题列表时要把它们滤掉 */
+export const LEGACY_THEME_FILES: string[] = Object.keys(LEGACY_THEME_RENAMES);
 
 /** 简体中文语言包：由内置 ZH 词表直接导出，保证与界面文案同源（键 = 英文原文，值 = 中文译文） */
 const ZH_CN_PACK = JSON.stringify({ _label: "简体中文", _version: PACK_VERSION, ...ZH }, null, 2);

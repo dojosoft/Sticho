@@ -47,6 +47,9 @@ html.light {
   /* 状态栏「编辑」开关激活时的底色（绿）与其中的文字色 */
   --edit-accent: #2f9e44;
   --edit-contrast: #ffffff;
+  /* 状态栏渲染模式 / 打字机 / 段落聚焦图标按钮按下时的底色（深灰）与图标色（白） */
+  --render-active-bg: #3f4650;
+  --render-active-fg: #ffffff;
   /* 段落聚焦时压在非当前块上的暗色（浅色主题下用浅一点的遮罩就够） */
   --spotlight-dim: rgba(0, 0, 0, 0.18);
   /* 查找命中高亮（批次五）：普通命中用暖黄，当前命中用橙红以区分 */
@@ -80,6 +83,9 @@ html.dark {
   /* 状态栏「编辑」开关激活时的底色（绿）与其中的文字色（亮绿底配深字） */
   --edit-accent: #4ade80;
   --edit-contrast: #12301a;
+  /* 状态栏图标按钮按下时的底色：深色档位下用略亮的灰，免得与顶栏底糊成一片 */
+  --render-active-bg: #4b5361;
+  --render-active-fg: #ffffff;
   --spotlight-dim: rgba(0, 0, 0, 0.45);
   /* 深色下用低饱和的黄/橙，避免整片文字反而看不清 */
   --find-hl: #6b5c1e;

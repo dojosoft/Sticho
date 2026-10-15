@@ -196,6 +196,57 @@
       </div>
     {/if}
   </span>
+  <!-- 语法高亮方案切换：紧随编码切换右侧（本轮从右端移来），仅纯文本（代码）模式下出现；
+       超大文件的只读分节视图没有高亮，故不显示 -->
+  {#if docKind === "code" && codeLargeText === null}
+    <span class="lang-wrap">
+      <button
+        class="encoding"
+        onclick={(e) => {
+          e.stopPropagation();
+          codeLangOpen = !codeLangOpen;
+        }}
+        title={t("Syntax highlighting scheme: auto-detected by extension by default; can be set manually")}
+      >{codeLangLabel} ▾</button>
+      {#if codeLangOpen}
+        <div class="encoding-pop">
+          <button
+            class="enc-item"
+            onclick={() => {
+              onSetCodeLang(undefined);
+              codeLangOpen = false;
+            }}
+          >
+            <span class="mark">{codeLangOverride === undefined ? "✓" : ""}</span>
+            <span class="label">{t("Auto (by Extension)")}</span>
+          </button>
+          <button
+            class="enc-item"
+            onclick={() => {
+              onSetCodeLang(null);
+              codeLangOpen = false;
+            }}
+          >
+            <span class="mark">{codeLangOverride === null ? "✓" : ""}</span>
+            <span class="label">{t("Plain Text")}</span>
+          </button>
+          <div class="menu-sep"></div>
+          {#each LANG_LIST as lang (lang.id)}
+            <button
+              class="enc-item"
+              onclick={() => {
+                onSetCodeLang(lang.id);
+                codeLangOpen = false;
+              }}
+            >
+              <span class="mark">{codeLangOverride === lang.id ? "✓" : ""}</span>
+              <span class="label">{lang.name}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </span>
+  {/if}
   <!-- 实时统计（批次七）：随输入 400ms 防抖刷新，口径与侧栏「文件属性」一致 -->
   <span class="count">{t("{w} words · {c} characters · {l} lines", { w: fmt(wordCount), c: fmt(charCount), l: fmt(lineCount) })}</span>
   <!-- 占位撑开：把右侧控件推到状态栏右端（原先由已移除的路径文本承担） -->
@@ -218,63 +269,12 @@
         <!-- 超大代码文件走只读分节纯文本：没有语言下拉按钮，语言名在这里显示一次 -->
         {codeLangLabel} · {t("Read-only sections")}
       {:else}
-        <!-- 普通代码文件：语言名已由右侧「语法高亮方案」下拉显示，这里不再重复，只报位置 -->
+        <!-- 普通代码文件：语言名已由左端「语法高亮方案」下拉显示，这里不再重复，只报位置 -->
         {t("Ln {r}, Col {c}", { r: codeCursor.line, c: codeCursor.column })}{codeMatch >= 2
           ? ` · ${t("{n} matches", { n: codeMatch })}`
           : ""}{browseMode ? t(" (read-only)") : ""}
       {/if}
     </span>
-
-    <!-- 语法高亮方案切换（本轮新增）：与编码切换同构，仅普通代码文件可用（超大文件无高亮） -->
-    {#if codeLargeText === null}
-      <span class="lang-wrap">
-        <button
-          class="encoding"
-          onclick={(e) => {
-            e.stopPropagation();
-            codeLangOpen = !codeLangOpen;
-          }}
-          title={t("Syntax highlighting scheme: auto-detected by extension by default; can be set manually")}
-        >{codeLangLabel} ▾</button>
-        {#if codeLangOpen}
-          <div class="encoding-pop">
-            <button
-              class="enc-item"
-              onclick={() => {
-                onSetCodeLang(undefined);
-                codeLangOpen = false;
-              }}
-            >
-              <span class="mark">{codeLangOverride === undefined ? "✓" : ""}</span>
-              <span class="label">{t("Auto (by Extension)")}</span>
-            </button>
-            <button
-              class="enc-item"
-              onclick={() => {
-                onSetCodeLang(null);
-                codeLangOpen = false;
-              }}
-            >
-              <span class="mark">{codeLangOverride === null ? "✓" : ""}</span>
-              <span class="label">{t("Plain Text")}</span>
-            </button>
-            <div class="menu-sep"></div>
-            {#each LANG_LIST as lang (lang.id)}
-              <button
-                class="enc-item"
-                onclick={() => {
-                  onSetCodeLang(lang.id);
-                  codeLangOpen = false;
-                }}
-              >
-                <span class="mark">{codeLangOverride === lang.id ? "✓" : ""}</span>
-                <span class="label">{lang.name}</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </span>
-    {/if}
   {/if}
 
   <!-- 打字机模式 / 段落聚焦：图标按钮，点击即开关（HTML 文档下不适用） -->
@@ -452,6 +452,13 @@
     flex-shrink: 0;
   }
 
+  /* 语法高亮下拉已移到状态栏左端（编码切换右侧），面板改为向右展开；
+     沿用默认的「右对齐向左展开」会顶出窗口左边界。 */
+  .lang-wrap .encoding-pop {
+    right: auto;
+    left: 0;
+  }
+
   .encoding {
     font: inherit;
     font-size: 0.75rem;
@@ -558,9 +565,19 @@
     opacity: 1;
   }
 
+  /* 渲染模式 / 打字机 / 段落聚焦的图标按钮：按下时转「深灰底 + 白图标」，并把图标描边加粗一档。
+     SVG 的 stroke-width 是表现属性，任何 CSS 规则都能盖过它（故这里直接对 子元素 赋值，
+     在 svg 上赋值会被子元素自己的属性挡住）。比原来的淡底色醒目得多。 */
   .render-switch button.active {
-    background: var(--hover, rgba(0, 0, 0, 0.07));
+    background: var(--render-active-bg, #3f4650);
+    color: var(--render-active-fg, #ffffff);
     opacity: 1;
+  }
+
+  .render-switch button.active :global(svg path),
+  .render-switch button.active :global(svg circle),
+  .render-switch button.active :global(svg rect) {
+    stroke-width: 2.8;
   }
 
   .html-switch button,
