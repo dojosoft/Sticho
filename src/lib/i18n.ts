@@ -663,8 +663,6 @@ export const ZH: Record<string, string> = {
   "Code File": "代码文件",
   "Save Code File": "保存代码文件",
   "All Supported Documents": "所有支持的文档",
-  "The tree only supports opening Markdown / HTML / plain-text / code files (a .{ext} file must be converted first).": "目录树中仅支持打开 Markdown / HTML / 纯文本 / 代码文件（.{ext} 需要先转换）。",
-  "Unsupported file type (.{ext}); only md / html / docx / pdf / code files are supported.": "暂不支持该文件类型（.{ext}），仅支持 md / html / docx / pdf / 代码文件。",
 
   // ---- 导出图片嵌入报告 ----
   "\n…and {n} more": "\n…另有 {n} 张",

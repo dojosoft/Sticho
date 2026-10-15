@@ -10,6 +10,7 @@
 
 import type { StreamParser } from "@codemirror/language";
 import type { Extension } from "@codemirror/state";
+import type { DocKind } from "./docState";
 
 /** 一种代码语言：状态栏显示名、缩进单位、以及懒加载的 CodeMirror 扩展 */
 export interface CodeLangSpec {
@@ -194,10 +195,25 @@ const EXT_LANG: Record<string, string> = {
 };
 
 /**
- * .html / .htm 仍走原有的 HTML 文档通路（iframe 预览 + 源码编辑），
- * 不能被当成代码文件，否则会改坏既有行为。
+ * 明确的 Markdown 文档后缀：打开时直接进 Markdown 模式。
+ *
+ * 打开对话框的筛选器与 `docKindForPath` 共读同一份清单，避免「筛选器里能选、
+ * 点开却不是 Markdown」这类走样。
  */
-const HTML_DOC_EXTS = new Set(["html", "htm"]);
+export const MD_DOC_EXTS: readonly string[] = ["md", "markdown", "mdx"];
+
+/**
+ * 明确的网页文档后缀：仍走原有的 HTML 文档通路（iframe 预览 + 源码编辑），
+ * 不能被当成代码文件，否则会改坏既有行为（.html / .htm 本来就带在 EXT_LANG 里）。
+ */
+export const HTML_DOC_EXTS: readonly string[] = ["html", "htm", "xhtml"];
+
+/** 纯文本（无语法高亮）的常用后缀：只用于打开对话框的筛选器清单 */
+export const PLAIN_TEXT_EXTS: readonly string[] = ["txt", "text", "log"];
+
+/** 集合视图，供逐次判断用 O(1) */
+const MD_DOC_SET = new Set(MD_DOC_EXTS);
+const HTML_DOC_SET = new Set(HTML_DOC_EXTS);
 
 /**
  * 代码文件白名单。
@@ -209,7 +225,7 @@ const HTML_DOC_EXTS = new Set(["html", "htm"]);
  * 手动选语言），不再走 Markdown 渲染——.txt 里放几行 Python 是常见用法。
  */
 export const CODEX_EXTS: ReadonlySet<string> = new Set([
-  ...Object.keys(EXT_LANG).filter((ext) => !HTML_DOC_EXTS.has(ext)),
+  ...Object.keys(EXT_LANG).filter((ext) => !HTML_DOC_SET.has(ext)),
   "",
   "txt",
 ]);
@@ -238,6 +254,28 @@ export function extOf(path: string): string {
 /** 该扩展名是否按代码文件打开 */
 export function isCodeExt(ext: string): boolean {
   return CODEX_EXTS.has(ext.toLowerCase());
+}
+
+/**
+ * 按文件后缀决定「打开时用哪种文档模式」——所有打开入口的唯一规则。
+ *
+ * - 明确的 Markdown 后缀（.md / .markdown / .mdx）→ markdown
+ * - 明确的网页后缀（.html / .htm / .xhtml）→ html
+ * - 其余一律走代码通路：命中 EXT_LANG 的后缀自动带语法高亮，未收录的后缀即「纯文本」
+ *   （`effectiveCodeLangId` 对未知后缀返回 null，正好落到无高亮的纯文本视图）。
+ *
+ * 之所以集中在这里：打开对话框、最近文件、目录树、搜索结果、拖拽 / 单实例转发、启动参数
+ * 六条入口原先各写一份「html → 代码文件 → 否则 Markdown」的判断，很容易彼此走样
+ * （.xhtml 就被当成 Markdown 渲染过）。
+ *
+ * 注意：本函数只回答「用哪种模式」，不回答「能不能打开」。二进制文件由读取侧
+ * （read_text_file 的文本判据）挡下，避免把 .png / .zip 当文本打开。
+ */
+export function docKindForPath(path: string): DocKind {
+  const ext = extOf(path);
+  if (MD_DOC_SET.has(ext)) return "markdown";
+  if (HTML_DOC_SET.has(ext)) return "html";
+  return "code";
 }
 
 /** 该路径是否按代码文件打开 */

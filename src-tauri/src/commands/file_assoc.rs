@@ -22,6 +22,11 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 支持关联的扩展名清单：`(扩展名, 分组)`。
 ///
+/// 收录标准：**本程序真能处理**的后缀——打开时能落到某个文档模式或某套语法高亮的那些。
+/// 前端 `src/lib/codeLang.ts` 是这份支持范围的另一份表述（`EXT_LANG` 决定哪些后缀有
+/// 代码高亮），两处要一起改：只在这里留下会把文件打开成无高亮的纯文本的后缀，
+/// 等于让用户把该格式关联到一个只能当记事本用的程序。
+///
 /// 分组只用于注册表的「类型」显示名，以及设置面板里的分块展示；
 /// 顺序即界面顺序，刻意把常用格式排在前面。
 const SUPPORTED_EXTS: &[(&str, &str)] = &[
@@ -29,7 +34,6 @@ const SUPPORTED_EXTS: &[(&str, &str)] = &[
     ("md", "doc"),
     ("markdown", "doc"),
     ("mdx", "doc"),
-    ("tex", "doc"),
     // 网页
     ("html", "web"),
     ("htm", "web"),
@@ -54,7 +58,7 @@ const SUPPORTED_EXTS: &[(&str, &str)] = &[
     ("jsonc", "config"),
     ("xml", "config"),
     ("plist", "config"),
-    // 源代码
+    // 源代码（只列有对应语法高亮的语言，见 codeLang.ts 的 EXT_LANG）
     ("py", "code"),
     ("pyw", "code"),
     ("js", "code"),
@@ -66,8 +70,6 @@ const SUPPORTED_EXTS: &[(&str, &str)] = &[
     ("cts", "code"),
     ("tsx", "code"),
     ("css", "code"),
-    ("scss", "code"),
-    ("less", "code"),
     ("c", "code"),
     ("h", "code"),
     ("cpp", "code"),
@@ -76,20 +78,10 @@ const SUPPORTED_EXTS: &[(&str, &str)] = &[
     ("hpp", "code"),
     ("hh", "code"),
     ("hxx", "code"),
-    ("cs", "code"),
     ("java", "code"),
-    ("kt", "code"),
-    ("kts", "code"),
     ("go", "code"),
     ("rs", "code"),
-    ("php", "code"),
-    ("rb", "code"),
-    ("swift", "code"),
-    ("lua", "code"),
-    ("pl", "code"),
     ("sql", "code"),
-    ("vue", "code"),
-    ("svelte", "code"),
     // 脚本
     ("bat", "script"),
     ("cmd", "script"),
@@ -102,6 +94,14 @@ const SUPPORTED_EXTS: &[(&str, &str)] = &[
     ("zsh", "script"),
     ("ksh", "script"),
     ("dash", "script"),
+];
+
+/// 曾经可关联、现已从菜单下架的后缀（本程序没有对应的高亮 / 模式，只能是纯文本）。
+///
+/// 只用于「清理系统集成」时撤销历史遗留的关联：早先版本可能已把它们写进注册表，
+/// 现在菜单里不再列出，撤销时若只遍历 SUPPORTED_EXTS 就会把它们留在系统里。
+const LEGACY_EXTS: &[&str] = &[
+    "tex", "scss", "less", "cs", "kt", "kts", "php", "rb", "swift", "lua", "pl", "vue", "svelte",
 ];
 
 /// 「替代系统记事本」覆盖的扩展名：都是 Windows 记事本的典型默认处理对象。
@@ -448,6 +448,10 @@ pub fn clear_system_integration() -> Result<Vec<String>, String> {
 
     let classes = classes()?;
     for (ext, _) in SUPPORTED_EXTS {
+        unbind(&classes, ext);
+    }
+    // 下架的后缀也要一并撤销：早先版本可能已把它们写进注册表，不清理会留下指向本程序的残留
+    for ext in LEGACY_EXTS {
         unbind(&classes, ext);
     }
 

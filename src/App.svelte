@@ -153,12 +153,15 @@
   import {
     CODE_EXTS_SORTED,
     CODE_LARGE_BYTES,
+    HTML_DOC_EXTS,
     LANG_LIST,
+    MD_DOC_EXTS,
+    PLAIN_TEXT_EXTS,
     PLAIN_TEXT_NAME,
     codeLangIdForExt,
     codeLangNameById,
+    docKindForPath,
     extOf,
-    isCodePath,
   } from "./lib/codeLang";
   import {
     minifyCss,
@@ -1875,11 +1878,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (busy) return;
     busy = true;
     try {
-      // 最近列表里可能有代码 / HTML 文件，必须按扩展名分派，不能一律当 Markdown 打开
+      // 最近列表里可能有各种后缀，统一按后缀决定模式（见 docKindForPath）
       await loadIntoFreshTab(async () => {
-        const ext = extOf(path);
-        if (ext === "html" || ext === "htm") await openHtmlPath(path);
-        else if (isCodePath(path)) await openCodePath(path);
+        const kind = docKindForPath(path);
+        if (kind === "html") await openHtmlPath(path);
+        else if (kind === "code") await openCodePath(path);
         else await openPath(path);
       });
     } catch (e) {
@@ -2383,20 +2386,23 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         multiple: false,
         title: t("Open Document"),
         filters: [
-          // 默认筛选器要能看见所有能打开的文件，代码扩展名统一读 codeLang 的白名单，
+          // 默认筛选器要能看见所有能打开的文件：Markdown / HTML / 纯文本三份清单与
+          // docKindForPath 同源（都在 codeLang 里），代码扩展名读同一份白名单，
           // 免得出现「能拖进来但在这个对话框里选不到」
-          // .txt 已归入代码白名单、按代码视图打开，所以这里不再单列
-          { name: t("All Supported Documents"), extensions: ["md", "markdown", "html", "htm", ...CODE_EXTS_SORTED] },
-          { name: "Markdown", extensions: ["md", "markdown"] },
-          { name: "HTML", extensions: ["html", "htm"] },
+          {
+            name: t("All Supported Documents"),
+            extensions: [...MD_DOC_EXTS, ...HTML_DOC_EXTS, ...PLAIN_TEXT_EXTS, ...CODE_EXTS_SORTED],
+          },
+          { name: "Markdown", extensions: [...MD_DOC_EXTS] },
+          { name: "HTML", extensions: [...HTML_DOC_EXTS] },
           { name: t("Code File"), extensions: [...CODE_EXTS_SORTED] },
         ],
       });
       if (typeof picked !== "string") return; // 用户取消
-      const ext = extOf(picked);
       await loadIntoFreshTab(async () => {
-        if (ext === "html" || ext === "htm") await openHtmlPath(picked);
-        else if (isCodePath(picked)) await openCodePath(picked);
+        const kind = docKindForPath(picked);
+        if (kind === "html") await openHtmlPath(picked);
+        else if (kind === "code") await openCodePath(picked);
         else await openPath(picked);
       });
     } catch (e) {
@@ -2752,20 +2758,15 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     else void setSidebarView(enabledSidebarViews[0]!, false);
   });
 
-  /** 目录树点击文件 → 复用打开管道（按扩展名分派） */
+  /** 目录树点击文件 → 复用打开管道（按后缀决定模式，见 docKindForPath） */
   async function openFromTree(path: string): Promise<void> {
     if (busy) return;
     busy = true;
     try {
-      const ext = extOf(path);
-      if (ext === "html" || ext === "htm") await loadIntoFreshTab(() => openHtmlPath(path));
-      else if (ext === "md" || ext === "markdown") await loadIntoFreshTab(() => openPath(path));
-      else if (isCodePath(path)) await loadIntoFreshTab(() => openCodePath(path));
-      else
-        await messageDialog(t("The tree only supports opening Markdown / HTML / plain-text / code files (a .{ext} file must be converted first).", { ext }), {
-          title: "Sticho",
-          kind: "info",
-        });
+      const kind = docKindForPath(path);
+      if (kind === "html") await loadIntoFreshTab(() => openHtmlPath(path));
+      else if (kind === "code") await loadIntoFreshTab(() => openCodePath(path));
+      else await loadIntoFreshTab(() => openPath(path));
     } catch (e) {
       await showError(t("Failed to open: "), e);
     } finally {
@@ -5222,7 +5223,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
    *   用户保存时走既有「另存为」流程落回本地，绝不误写云端。
    */
   async function openCloudContent(remote: string, content: string, bind: boolean): Promise<void> {
-    const isHtml = /\.html?$/i.test(remote);
+    const kind = docKindForPath(remote);
     await loadIntoFreshTab(async () => {
       currentPath = null;
       currentRemote = bind ? remote : null; // 未绑定时置空：避免沿用上一个文档的云端路径
@@ -5230,14 +5231,14 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       dirty = false;
       encoding = "utf-8"; // 云端正文按 UTF-8 取回（非 UTF-8 已由 Rust 侧挡下）
       docEol = detectEol(content); // 云端原文的行尾风格一并保留
-      if (isHtml) {
+      if (kind === "html") {
         docKind = "html";
         htmlSource = content;
         previewDoc = content;
         htmlView = "preview";
         setCurrentHtmlScripts(false);
         rebuildPreview(content);
-      } else if (isCodePath(remote)) {
+      } else if (kind === "code") {
         htmlSource = "";
         previewDoc = "";
         previewMutated = false;
@@ -6029,7 +6030,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       key: "v",
       items: [
         // 文档模式：纯文本 / Markdown / HTML，三选一（二级项）；各自的下级菜单（三级）
-        // 承载该模式特有的渲染/高亮选项。默认由后缀决定（见 openPath/openHtmlPath/openCodePath）；
+        // 承载该模式特有的渲染/高亮选项。默认由后缀决定（见 codeLang 的 docKindForPath）；
         // 超大代码文件是只读分节视图，无可切换的渲染器，整组置灰。
         {
           label: t("Plain Text Mode"),
@@ -6342,9 +6343,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (busy) return;
     busy = true;
     try {
-      const ext = extOf(hit.path);
-      if (ext === "html" || ext === "htm") await loadIntoFreshTab(() => openHtmlPath(hit.path));
-      else if (isCodePath(hit.path)) await loadIntoFreshTab(() => openCodePath(hit.path));
+      const kind = docKindForPath(hit.path);
+      if (kind === "html") await loadIntoFreshTab(() => openHtmlPath(hit.path));
+      else if (kind === "code") await loadIntoFreshTab(() => openCodePath(hit.path));
       else await loadIntoFreshTab(() => openPath(hit.path));
       await revealSearchHit(hit);
     } catch (e) {
@@ -6657,33 +6658,29 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     }
   }
 
-  // ---- 拖拽导入（阶段 7）：md/html 直接打开，docx/pdf 走导入管道 ----
+  // ---- 拖拽导入（阶段 7）：docx/pdf 走导入管道，其余按后缀决定模式 ----
   async function handleDroppedFiles(paths: string[]): Promise<void> {
     if (busy || paths.length === 0) return;
     busy = true;
     try {
       // 逐个打开全部路径：拖拽多个文件、以及单实例转发（open-file 回调）传来一批路径时，
       // 此前只处理 paths[0]，其余被静默丢弃。
-      // 每个文件各自 try/catch：某个不支持 / 打开失败不会中断其余文件。
+      // 每个文件各自 try/catch：某个文件打不开不会中断其余文件。
       for (const path of paths) {
         const ext = extOf(path);
         try {
-          if (ext === "md" || ext === "markdown") {
-            await loadIntoFreshTab(() => openPath(path));
-          } else if (ext === "html" || ext === "htm") {
-            await loadIntoFreshTab(() => openHtmlPath(path));
-          } else if (isCodePath(path)) {
-            await loadIntoFreshTab(() => openCodePath(path));
-          } else if (ext === "docx") {
+          if (ext === "docx") {
             await importWordPath(path);
           } else if (ext === "pdf") {
             // 拖拽即意图明确：跳过「继续吗」确认，仅保留结果/错误提示
             await importPdfPath(path);
           } else {
-            await messageDialog(t("Unsupported file type (.{ext}); only md / html / docx / pdf / code files are supported.", { ext }), {
-              title: "Sticho",
-              kind: "info",
-            });
+            // 其余一律按后缀决定模式（见 docKindForPath）：未收录的后缀即纯文本视图；
+            // 二进制文件由读取侧（read_text_file）挡下，不会把 .png / .zip 当文本打开
+            const kind = docKindForPath(path);
+            if (kind === "html") await loadIntoFreshTab(() => openHtmlPath(path));
+            else if (kind === "code") await loadIntoFreshTab(() => openCodePath(path));
+            else await loadIntoFreshTab(() => openPath(path));
           }
         } catch (e) {
           await showError(t("Failed to open: "), e);
@@ -6863,14 +6860,14 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       tabsReady = true; // 此刻起才允许把编辑器正文搬进标签快照
       refreshSideNow();
 
-      // 文件关联后双击文档启动：命令行带进来的文件直接打开
+      // 文件关联后双击文档启动：命令行带进来的文件直接打开（按后缀决定模式）
       const startup = await getStartupFile();
       if (startup) {
-        const ext = extOf(startup);
         try {
           await loadIntoFreshTab(async () => {
-            if (ext === "html" || ext === "htm") await openHtmlPath(startup);
-            else if (isCodePath(startup)) await openCodePath(startup);
+            const kind = docKindForPath(startup);
+            if (kind === "html") await openHtmlPath(startup);
+            else if (kind === "code") await openCodePath(startup);
             else await openPath(startup);
           });
         } catch (e) {

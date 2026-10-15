@@ -241,20 +241,26 @@ fn read_text_file_blocking(path: &str, encoding: Option<&str>) -> Result<TextFil
 
     let bytes = fs::read(p).map_err(|e| format!("Read failed: {e}"))?;
 
-    if let Some(id) = encoding {
+    let file = if let Some(id) = encoding {
         let enc = encoding_from_id(id).ok_or_else(|| format!("Unsupported encoding: {id}"))?;
         let text = enc.decode_without_bom_handling(strip_bom(&bytes, id)).0;
-        return Ok(TextFile {
+        TextFile {
             content: text.into_owned(),
             encoding: id.to_string(),
-        });
-    }
+        }
+    } else {
+        let (content, id) = decode_auto(&bytes);
+        TextFile { content, encoding: id }
+    };
 
-    let (content, id) = decode_auto(&bytes);
-    Ok(TextFile {
-        content,
-        encoding: id,
-    })
+    // 二进制兜底：打开文档时「未收录的后缀一律按纯文本打开」（见 codeLang.ts 的
+    // docKindForPath），所以「是不是文本」必须由内容本身判，不能只靠扩展名白名单。
+    // 判据是解码结果里出现 NUL——文本文件不会有它，二进制（.png / .zip / .exe …）几乎必有；
+    // 放在解码之后是为了不误伤 UTF-16 文本（其原始字节本来就隔字节带 0x00）。
+    if file.content.contains('\0') {
+        return Err(format!("Not a text file (binary content): {path}"));
+    }
+    Ok(file)
 }
 
 /// 原子写：先写同目录临时文件，再 rename 覆盖目标。

@@ -13,7 +13,7 @@
   import { detectEol, type Eol } from "../lib/docState";
   import { confirm as confirmDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { makeT, type Locale } from "../lib/i18n";
-  import { isCodePath } from "../lib/codeLang";
+  import { docKindForPath } from "../lib/codeLang";
   import {
     deleteHistory,
     deleteRecovery,
@@ -118,12 +118,9 @@
     return `${n} B`;
   }
 
-  /** 由原文档路径推断文档类型（决定恢复时用哪种视图打开） */
+  /** 由原文档路径推断文档类型（决定恢复时用哪种视图打开）；规则与打开文档同源 */
   function kindOf(path: string): string {
-    const dot = path.lastIndexOf(".");
-    const ext = dot >= 0 ? path.slice(dot + 1).toLowerCase() : "";
-    if (ext === "html" || ext === "htm") return "html";
-    return isCodePath(path) ? "code" : "markdown";
+    return docKindForPath(path);
   }
 
   // ---- 预览 ----
