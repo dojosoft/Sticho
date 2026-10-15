@@ -163,12 +163,18 @@ pub(crate) fn decode_auto(bytes: &[u8]) -> (String, String) {
         // 嗅探只会给 utf-16le / utf-16be，正常必然命中；生产路径不该有 expect，
         // 万一将来嗅探名单变了，这里直接放行给后面的 chardetng，而不是 panic
         if let Some(enc) = encoding_from_id(id) {
-            return (enc.decode_without_bom_handling(bytes).0.into_owned(), id.to_string());
+            return (
+                enc.decode_without_bom_handling(bytes).0.into_owned(),
+                id.to_string(),
+            );
         }
     }
     // 纯 ASCII 一律按 UTF-8：ASCII 是各编码的公共子集，按 UTF-8 保存兼容性最好
     if bytes.is_ascii() {
-        return (String::from_utf8_lossy(bytes).into_owned(), "utf-8".to_string());
+        return (
+            String::from_utf8_lossy(bytes).into_owned(),
+            "utf-8".to_string(),
+        );
     }
     let mut detector = chardetng::EncodingDetector::new();
     detector.feed(bytes, true);
@@ -245,7 +251,10 @@ fn read_text_file_blocking(path: &str, encoding: Option<&str>) -> Result<TextFil
     }
 
     let (content, id) = decode_auto(&bytes);
-    Ok(TextFile { content, encoding: id })
+    Ok(TextFile {
+        content,
+        encoding: id,
+    })
 }
 
 /// 原子写：先写同目录临时文件，再 rename 覆盖目标。
@@ -889,7 +898,13 @@ mod tests {
         let (bytes, _, _) = w1251.encode("Привет");
         assert_eq!(w1251.decode_without_bom_handling(&bytes).0, "Привет");
         // 其余 chardetng 可能返回的编码经 for_label 兜底，都能还原
-        for id in ["windows-1253", "windows-1255", "euc-jp", "iso-8859-2", "koi8-r"] {
+        for id in [
+            "windows-1253",
+            "windows-1255",
+            "euc-jp",
+            "iso-8859-2",
+            "koi8-r",
+        ] {
             let enc = encoding_from_id(id).unwrap_or_else(|| panic!("{id} 应可还原"));
             assert_eq!(id_from_encoding(enc), id, "编码 id 往返应保持一致：{id}");
         }

@@ -187,7 +187,8 @@ fn prune(dir: &Path, limits: &HistoryLimits) {
     let mut bytes = 0u64;
     for (index, e) in entries.into_iter().enumerate() {
         // 最新一份（index 0）无条件保留；超龄也保住它——删掉它历史就整体作废了
-        let too_old = index > 0 && limits.age_on && now.saturating_sub(e.saved_at) > limits.max_age_secs;
+        let too_old =
+            index > 0 && limits.age_on && now.saturating_sub(e.saved_at) > limits.max_age_secs;
         let too_many = index > 0 && limits.count_on && kept >= limits.keep;
         let too_big = index > 0 && limits.size_on && bytes + e.size > limits.max_bytes;
         if too_old || too_many || too_big {
@@ -435,15 +436,24 @@ fn history_limits(app: &AppHandle) -> HistoryLimits {
         .map(|n| n.clamp(1, 3_650))
         .unwrap_or(DEFAULT_MAX_AGE_DAYS);
     HistoryLimits {
-        count_on: v.get("historyCountLimitOn").and_then(|b| b.as_bool()).unwrap_or(true),
+        count_on: v
+            .get("historyCountLimitOn")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(true),
         keep: v
             .get("historyKeep")
             .and_then(|n| n.as_u64())
             .map(|n| n.clamp(1, 200) as usize)
             .unwrap_or(DEFAULT_KEEP),
-        size_on: v.get("historySizeLimitOn").and_then(|b| b.as_bool()).unwrap_or(false),
+        size_on: v
+            .get("historySizeLimitOn")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
         max_bytes: mb * 1024 * 1024,
-        age_on: v.get("historyAgeLimitOn").and_then(|b| b.as_bool()).unwrap_or(false),
+        age_on: v
+            .get("historyAgeLimitOn")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
         max_age_secs: days * 86_400,
     }
 }
@@ -587,7 +597,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sticho-hist-off-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        seed(&dir, &["20260101-000001", "20260101-000002", "20260101-000003"]);
+        seed(
+            &dir,
+            &["20260101-000001", "20260101-000002", "20260101-000003"],
+        );
 
         let limits = HistoryLimits {
             count_on: false,
@@ -605,7 +618,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // 每份 15 字节（内容即文件名戳）；上限 32 字节 → 只能留下最新 2 份（共 30 字节）
-        seed(&dir, &["20260101-000001", "20260101-000002", "20260101-000003"]);
+        seed(
+            &dir,
+            &["20260101-000001", "20260101-000002", "20260101-000003"],
+        );
 
         let limits = HistoryLimits {
             count_on: false,

@@ -179,7 +179,10 @@ fn is_forbidden_asset_dir(dir: &Path) -> bool {
     if dir.parent().is_none() {
         return true;
     }
-    let lower = dir.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let lower = dir
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
     let windir = std::env::var("SystemRoot")
         .unwrap_or_else(|_| "C:\\Windows".to_string())
         .replace('/', "\\")

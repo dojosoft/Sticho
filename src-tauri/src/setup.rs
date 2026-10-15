@@ -251,7 +251,10 @@ fn read_reg_string(
 #[cfg(windows)]
 fn install_webview2() -> Result<(), String> {
     // 固定文件名在多实例并发时会互相覆盖下载结果，用进程号区分
-    let setup = std::env::temp_dir().join(format!("MicrosoftEdgeWebview2Setup-{}.exe", std::process::id()));
+    let setup = std::env::temp_dir().join(format!(
+        "MicrosoftEdgeWebview2Setup-{}.exe",
+        std::process::id()
+    ));
     download(WEBVIEW2_BOOTSTRAPPER_URL, &setup)?;
 
     // /silent /install 是微软文档给出的静默安装参数；需要提权时系统会自行弹 UAC。

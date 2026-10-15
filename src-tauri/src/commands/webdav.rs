@@ -868,7 +868,9 @@ pub async fn webdav_upload(
             (Some(s), Some(m)) => Some((s, m)),
             _ => None,
         };
-        upload_to_remote(&agent, &url, &user, &password, &remote, &bytes, &policy, prev)
+        upload_to_remote(
+            &agent, &url, &user, &password, &remote, &bytes, &policy, prev,
+        )
     })
     .await
     .map_err(|e| format!("Task spawn failed: {e}"))?
@@ -905,7 +907,9 @@ pub async fn webdav_put(
             (Some(s), Some(m)) => Some((s, m)),
             _ => None,
         };
-        upload_to_remote(&agent, &url, &user, &password, &remote, &bytes, &policy, prev)
+        upload_to_remote(
+            &agent, &url, &user, &password, &remote, &bytes, &policy, prev,
+        )
     })
     .await
     .map_err(|e| format!("Task spawn failed: {e}"))?

@@ -732,8 +732,7 @@ pub fn set_data_location(
     let target_settings = new_root.join(SETTINGS_FILE);
     if !target_settings.is_file() {
         // 迁移时已复制；这里兜底「不迁移」的情形，保证目标根始终有一份可用配置。
-        let seed =
-            std::fs::read(old_root.join(SETTINGS_FILE)).unwrap_or_else(|_| b"{}\n".to_vec());
+        let seed = std::fs::read(old_root.join(SETTINGS_FILE)).unwrap_or_else(|_| b"{}\n".to_vec());
         let _ = std::fs::write(&target_settings, seed);
     }
     write_bootstrap(target)?;

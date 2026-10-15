@@ -441,7 +441,10 @@ fn safe_media_path(base: &Path, rel: &str) -> Option<PathBuf> {
     if rel.is_empty() || rel.starts_with('/') || rel.contains(':') {
         return None;
     }
-    if rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+    if rel
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
         return None;
     }
     let canon = base.join(&rel).canonicalize().ok()?;
