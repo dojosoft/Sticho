@@ -114,7 +114,7 @@
 
 <div class="cloud">
   {#if !dav}
-    <div class="hint">{t("WebDAV is not configured yet. Fill it in and test the connection under Settings → WebDAV.")}</div>
+    <div class="hint">{t("WebDAV is not configured yet. Fill it in and test the connection under Settings → Cloud Sync.")}</div>
   {:else}
     <div class="bar">
       <button class="icon" title={t("Up")} disabled={loading || atRoot} onclick={goUp}>↑</button>

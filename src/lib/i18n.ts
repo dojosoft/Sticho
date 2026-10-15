@@ -59,14 +59,15 @@ export const ZH: Record<string, string> = {
   "Interface Language": "界面语言",
   "Language packs: put a .json file into the locales folder to select it here (keys are the original English text, values are the translation).": "语言包：把 .json 放进语言包文件夹即可在这里选用（键为英文原文，值为译文）。",
   "Open Locales Folder": "打开语言包文件夹",
-  "Theme": "主题",
+  "Switch Theme": "切换主题",
   "Takes effect immediately, including the editor toolbar tooltips — no restart needed.": "切换后立即生效，编辑器工具栏的气泡提示也随之更新，无需重启。",
-  "Toolbar": "工具栏",
+  "Custom Toolbar": "自定义工具栏",
   "Fullscreen": "全屏",
   "Default": "默认",
-  "Light (Default)": "浅色（默认）",
+  "Light": "浅色",
+  "Auto (Default)": "自动切换（默认）",
   "Open Themes Folder": "打开主题文件夹",
-  "Appearance is set here: “Light (Default)” is the built-in light theme; picking a theme applies its colors and switches the editor / code highlighting to match — a theme counts as dark when its CSS declares color-scheme: dark. Put any .css file in the themes folder to use it here.": "外观在此统一设置：「浅色（默认）」即内置浅色主题；选择某个主题会应用它的整套配色，并同步切换编辑器与代码高亮的深浅——主题 CSS 里声明 color-scheme: dark 即视为深色主题。把任意 .css 文件放进主题文件夹即可在此选用。",
+  "Appearance is set here: “Auto (Default)” follows the Windows theme and switches between the built-in light and dark themes; “Light” is the built-in light theme; picking a theme file applies its colors and switches the editor / code highlighting to match — a theme counts as dark when its CSS declares color-scheme: dark. Put any .css file in the themes folder to use it here.": "外观在此统一设置：「自动切换（默认）」跟随 Windows 主题，在内置浅色与深色之间自动切换；「浅色」即内置浅色主题；选择某个主题文件会应用它的整套配色，并同步切换编辑器与代码高亮的深浅——主题 CSS 里声明 color-scheme: dark 即视为深色主题。把任意 .css 文件放进主题文件夹即可在此选用。",
   "Skin Settings": "皮肤设置",
   "General": "通用",
   "Other": "其他",
@@ -185,6 +186,7 @@ export const ZH: Record<string, string> = {
   "Automatic installation failed:\n{detail}\n\nOpen the official download page to install manually?": "自动安装失败：\n{detail}\n\n是否打开官网下载页面手动安装？",
   "Pandoc conversion engine not found.\n\nIt is used by “Import Word” and “Export LaTeX / Epub” (about 35 MB, one-time install). Skipping it does not affect other features.": "未检测到 Pandoc 转换引擎。\n\n它用于「导入 Word」与「导出 LaTeX / Epub」，约 35MB，只需安装一次；不安装不影响其它功能。",
   "Pandoc is installed. You can now use “Import Word” and “Export LaTeX / Epub”.": "Pandoc 安装完成，现在可以使用「导入 Word」与「导出 LaTeX / Epub」了。",
+  "This command needs the Pandoc conversion engine. Install it under Help → Download Support Components…": "该命令需要 Pandoc 转换引擎：请在「帮助 → 下载支持组件…」中下载安装。",
 
   // ---- 帮助菜单：下载支持组件 ----
   "Download Support Components…": "下载支持组件…",
@@ -472,7 +474,7 @@ export const ZH: Record<string, string> = {
   "A lightweight Markdown / plain text / code / HTML document editor.": "轻量级 Markdown / 纯文本 / 代码 / HTML 文档编辑器。",
   "Converts between Markdown, Word, PDF and HTML, all on your machine.": "支持 Markdown、Word、PDF、HTML 互转，全部转换在本机完成。",
   "Built with Tauri + Svelte + Vditor.": "基于 Tauri + Svelte + Vditor 构建。",
-  "Word conversion is done by a separate Pandoc process (GPL-2.0, not bundled with this app).": "Word 转换由 Pandoc 独立进程完成（GPL-2.0，未随本程序分发）。",
+  "Word import and LaTeX / Epub conversion are done by a separate Pandoc process (GPL-2.0, not bundled with this app).": "导入 Word 与 LaTeX / Epub 转换由 Pandoc 独立进程完成（GPL-2.0，未随本程序分发）。",
   "Shortcut": "快捷键",
   "Function": "功能",
 
@@ -499,7 +501,7 @@ export const ZH: Record<string, string> = {
 
   // ---- 阅读排版（字体 / 字号 / 行距 / 文字色 / 护眼底色）----
   "Reading Typography": "阅读排版",
-  "Scope: font, size, line height and text color apply to Markdown / plain text only; the code view honors only font size, line height and page background (text color is handled by syntax highlighting); HTML documents keep their own styles and are unaffected.": "生效范围：字体、字号、行距、文字颜色只作用于 Markdown / 纯文本；代码视图只认字号、行距与页面背景（文字色交给语法高亮）；HTML 文档自带样式，全部不受影响。",
+  "Scope: font and text color apply to Markdown / plain text only (the code view uses a fixed monospace stack and syntax-highlight colors); font size, line height and page background apply to both Markdown / plain text and the code view; HTML documents keep their own styles and are unaffected. Settings that do not apply to the current document mode are greyed out.": "生效范围：字体与文字颜色只作用于 Markdown / 纯文本（代码视图固定为等宽字体栈、文字色交给语法高亮）；字号、行距与页面背景在 Markdown / 纯文本与代码视图中都生效；HTML 文档自带样式，以上各项均不受影响。对当前文档模式不生效的设置项会置灰显示。",
   "Font": "字体",
   "Font packs: put .ttf / .otf / .woff2 files into the “fonts folder” to use them in the font list above.": "字体包：把 .ttf / .otf / .woff2 放进「字体包文件夹」，即可在上面的字体列表中选用。",
   "Open Fonts Folder": "打开字体包文件夹",
@@ -526,8 +528,8 @@ export const ZH: Record<string, string> = {
   "Silver": "银灰",
 
   // ---- WebDAV 云同步与多版本（批次九）----
-  "Cloud Sync": "云同步",
-  "Service Provider": "服务商",
+  "Cloud Sync": "云端同步",
+  "WebDAV Service Provider": "WebDAV 服务商",
   "Custom Server": "自定义服务器",
   "Jianguoyun": "坚果云 Jianguoyun",
   "InfiniCLOUD": "InfiniCLOUD（原 TeraCLOUD）",
@@ -542,7 +544,7 @@ export const ZH: Record<string, string> = {
   "Pick a common WebDAV provider to fill in its server address, or choose “Custom Server” and edit the address yourself.": "选择常见 WebDAV 服务商可直接填入其服务器地址；选「自定义服务器」则自行填写地址。",
   "Use HTTPS": "使用 HTTPS",
   "Turn this off to allow a plain http connection (unencrypted). Keep it on to require https.": "关闭后将允许明文 http 连接（不加密）；保持开启则要求使用 https。",
-  "Server URL": "服务器地址",
+  "WebDAV Server URL": "WebDAV 服务器地址",
   "Username": "用户名",
   "Password": "密码",
   "Remote Root": "远端根目录",
@@ -579,8 +581,8 @@ export const ZH: Record<string, string> = {
   "Cloud": "云端",
   "Cloud Folder": "云端目录",
   "Browse and edit cloud (WebDAV) files": "浏览与编辑云端（WebDAV）文件",
-  "WebDAV is not configured yet. Fill it in and test the connection under Settings → WebDAV.": "尚未配置 WebDAV，请到「设置 → WebDAV」中填写并测试连接。",
-  "WebDAV is not configured or the connection has not been tested, so the file cannot be saved to the cloud. Configure and test the connection under Settings → WebDAV.": "尚未配置 WebDAV 或未通过连接测试，无法保存到云端。请到「设置 → WebDAV」中配置并测试连接。",
+  "WebDAV is not configured yet. Fill it in and test the connection under Settings → Cloud Sync.": "尚未配置 WebDAV，请到「设置 → 云端同步」中填写并测试连接。",
+  "WebDAV is not configured or the connection has not been tested, so the file cannot be saved to the cloud. Configure and test the connection under Settings → Cloud Sync.": "尚未配置 WebDAV 或未通过连接测试，无法保存到云端。请到「设置 → 云端同步」中配置并测试连接。",
   // 云端变更检测（跨设备冲突预警）
   "Cloud versions updated: {n}": "云端版本已更新：{n} 项",
   "The cloud copy of the following file(s) was updated by another device. Open the cloud version to compare?\n{names}": "以下文件的云端副本已被其他设备更新，要打开云端版本对比吗？\n{names}",

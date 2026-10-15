@@ -263,7 +263,7 @@
     { id: "general", label: "General" },
     { id: "save", label: "Recovery Center" },
     { id: "assoc", label: "File Associations" },
-    { id: "cloud", label: "WebDAV" },
+    { id: "cloud", label: "Cloud Sync" },
   ];
 
   /** 文件关联的分块顺序与标题（纯展示数据，随组件自带） */
@@ -311,7 +311,6 @@
               <button class="set-action" onclick={onOpenLocalesDir}>{t("Open Locales Folder")}</button>
             </div>
             <label class="set-row set-row--field">
-              <span class="set-label">{t("Interface Language")}</span>
               <select
                 class="set-select"
                 value={locale}
@@ -325,9 +324,8 @@
           </section>
 
           <section class="set-group">
-            <h3 data-tip={t("The initial mode for documents you open or create; it only affects documents opened afterwards. Large documents and oversized code files always open in read-only mode.")}>{t("Open")}</h3>
+            <h3 data-tip={t("The initial mode for documents you open or create; it only affects documents opened afterwards. Large documents and oversized code files always open in read-only mode.")}>{t("Default Open Mode")}</h3>
             <div class="set-row set-row--field">
-              <span class="set-label">{t("Default Open Mode")}</span>
               <div class="set-radios" role="radiogroup" aria-label={t("Default Open Mode")}>
                 <label class="set-radio">
                   <input
@@ -580,7 +578,7 @@
         {#if settingsTab === "cloud"}
           <section class="set-group">
             <label class="set-row set-row--field">
-              <span class="set-label" data-tip={t("Pick a common WebDAV provider to fill in its server address, or choose “Custom Server” and edit the address yourself.")}>{t("Service Provider")}</span>
+              <span class="set-label" data-tip={t("Pick a common WebDAV provider to fill in its server address, or choose “Custom Server” and edit the address yourself.")}>{t("WebDAV Service Provider")}</span>
               <select
                 class="set-select"
                 value={davProvider}
@@ -592,7 +590,7 @@
               </select>
             </label>
             <label class="set-row set-row--field">
-              <span class="set-label" data-tip={t("HTTPS servers with self-signed certificates are not supported; use a public CA or a plain http intranet address")}>{t("Server URL")}</span>
+              <span class="set-label" data-tip={t("HTTPS servers with self-signed certificates are not supported; use a public CA or a plain http intranet address")}>{t("WebDAV Server URL")}</span>
               <input
                 class="set-input"
                 type="text"

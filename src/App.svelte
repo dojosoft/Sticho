@@ -197,7 +197,7 @@
   import { loadSetting, loadAllSettings, saveSetting, deleteSetting } from "./lib/settings";
   import { diffLines, type DiffLine } from "./lib/diff";
   import { ZH, LOCALES, makeTFrom, vditorLang, type Locale } from "./lib/i18n";
-  import { DEFAULT_PACK_FILES, INK_DARK_THEME_FILE } from "./lib/defaultPacks";
+  import { DEFAULT_PACK_FILES, DARK_THEME_FILE, LEGACY_DARK_THEME_FILE } from "./lib/defaultPacks";
   import { loadWelcomeDocs, welcomeFor } from "./lib/welcome";
   import {
     compileFindRegex,
@@ -516,7 +516,15 @@
   let modeOpen = $state(false); // 状态栏文档模式下拉是否展开
 
   // ---- 侧边栏（阶段 11）----
-  let sidebarVisible = $state(true);
+  /**
+   * 侧边栏显隐按「当前文档模式」分别记忆：纯文本（代码）默认不启用，Markdown / HTML 默认启用；
+   * 各模式里做过的手动改动各自保存，切换文档模式时套用该模式的记忆值。
+   */
+  let sidebarByKind = $state<Record<"markdown" | "html" | "code", boolean>>({
+    markdown: true,
+    html: true,
+    code: false,
+  });
   let sidebarView = $state<SidebarView>("outline");
   /**
    * 侧边栏各面板各自的开关（视图 → 侧边栏 里的勾选项）。
@@ -601,7 +609,12 @@
   let settingsTab = $state<"general" | "save" | "assoc" | "cloud">("general");
   let skinOpen = $state(false); // 皮肤设置面板
   let themeFiles = $state<ThemeFile[]>([]); // 自定义主题目录里的 .css（批次八）
-  let userTheme = $state<string | null>(null); // 当前选用的自定义主题文件名
+  /** 「自动切换」档的哨兵值：主题文件名都带 .css，撞不上它 */
+  const AUTO_THEME = "auto";
+  /** 主题选择：AUTO_THEME = 跟随系统深浅；"" = 内置浅色；其它 = 主题文件名 */
+  let themeChoice = $state<string>(AUTO_THEME);
+  /** 系统当前是否深色：只有「自动切换」档用它，故不必做成响应式状态 */
+  let systemDark = false;
   let fontPacks = $state<FontPack[]>([]); // 字体包目录里的字体文件（批次十二）
 
   // ---- 顶栏「工具栏自定义」按钮：勾选项以小图标显示在皮肤按钮左侧（皮肤设置 → 工具栏）----
@@ -2196,6 +2209,13 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   /** Pandoc 官方安装页（自动下载不可用时的兜底出口） */
   const PANDOC_PAGE = "https://pandoc.org/installing.html";
 
+  /**
+   * Pandoc 是否可用：启动自检与安装成功后回填。
+   * 未装时把「导入 Word」「导出 LaTeX / Epub」在菜单里置灰，并在悬停提示里引导去
+   * 「帮助 → 下载支持组件…」安装。注意：导出 Word 走本机 exportDocx，不依赖 Pandoc，故不置灰。
+   */
+  let pandocReady = $state(false);
+
   /** Microsoft Edge WebView2 Runtime 官方下载页（本软件运行所依赖的渲染内核） */
   const WEBVIEW2_PAGE = "https://developer.microsoft.com/microsoft-edge/webview2/";
 
@@ -2230,6 +2250,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     busy = true;
     try {
       await invoke<string>("download_pandoc"); // 阻塞至完成（busy 状态覆盖）
+      pandocReady = true; // 装好即解禁菜单里那几项依赖 Pandoc 的命令
       return true;
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
@@ -2252,14 +2273,16 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
    * （菜单里的按需引导 ensurePandoc 始终可用）。
    */
   async function checkPandocOnStartup(): Promise<void> {
-    if (await loadSetting<boolean>("pandocPromptDismissed")) return;
     let version: string | null = null;
     try {
       version = await invoke<string | null>("check_pandoc");
     } catch {
       return; // 检测本身失败就静默放过，不为环境问题打扰用户
     }
+    // 菜单置灰的依据：装没装都得先问一次，且要在「不再提示」短路之前问
+    pandocReady = version !== null;
     if (version) return; // 已安装（含系统 PATH 里自装的 pandoc）
+    if (await loadSetting<boolean>("pandocPromptDismissed")) return;
 
     const choice = await askChoice(
       t("Pandoc conversion engine not found.\n\nIt is used by “Import Word” and “Export LaTeX / Epub” (about 35 MB, one-time install). Skipping it does not affect other features."),
@@ -2288,7 +2311,10 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   /** Pandoc 引导（批次八抽公共）：未安装时询问是否下载（一次性，存到用户数据目录）。返回是否可用 */
   async function ensurePandoc(reason: string): Promise<boolean> {
     const version = await invoke<string | null>("check_pandoc");
-    if (version) return true;
+    if (version) {
+      pandocReady = true; // 顺手把菜单置灰状态同步过来（例如刚在别处装好）
+      return true;
+    }
     const ok = await confirmDialog(
       t("“{reason}” requires the Pandoc conversion engine (about 35 MB, downloaded from the official source to this machine, one time only).\nDownload it now?", { reason }),
       { title: "Sticho", kind: "info", okLabel: t("Download"), cancelLabel: t("Cancel") },
@@ -2596,10 +2622,19 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   }
 
   // ---- 侧边栏（阶段 11）----
-  async function setSidebarVisible(visible: boolean): Promise<void> {
-    sidebarVisible = visible;
+  /** 当前文档模式的侧边栏是否显示（渲染与菜单勾选态都读它） */
+  const sidebarVisible = $derived(sidebarByKind[docKind]);
+
+  /**
+   * 设置「当前文档模式」的侧边栏显隐，并写入该模式的记忆。
+   *
+   * persist = false 用于切模式时的自动补位 / 自动收起：那只是该模式的默认表现，不该覆盖
+   * 用户在该模式里显式做过的选择，故不落盘。
+   */
+  async function setSidebarVisible(visible: boolean, persist = true): Promise<void> {
+    sidebarByKind = { ...sidebarByKind, [docKind]: visible };
     if (visible) refreshSideNow();
-    await saveSetting("sidebarVisible", visible);
+    if (persist) await saveSetting("sidebarVisibleByKind", sidebarByKind);
   }
 
   /**
@@ -2618,12 +2653,18 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     return setSidebarVisible(!sidebarVisible);
   };
 
-  async function setSidebarView(view: SidebarView): Promise<void> {
+  /**
+   * 切换侧边栏正显示的面板。
+   *
+   * show = false 用于代码模式下大纲不可用时的自动补位：只换视图、不展开侧边栏，
+   * 因为代码模式默认收起，切过来不该被这次补位顺手展开。
+   */
+  async function setSidebarView(view: SidebarView, show = true): Promise<void> {
     sidebarView = view;
-    sidebarVisible = true;
-    refreshSideNow();
+    if (show) sidebarByKind = { ...sidebarByKind, [docKind]: true };
+    if (show || sidebarVisible) refreshSideNow();
     await saveSetting("sidebarView", view);
-    await saveSetting("sidebarVisible", true);
+    if (show) await saveSetting("sidebarVisibleByKind", sidebarByKind);
   }
 
   /** 侧边栏面板的固定排列顺序：文件树 → 大纲 → 书签 → 属性 → 搜索 → 云端 */
@@ -2690,8 +2731,10 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   // 只调整「当前视图」，不动 sidebarPanels 里的用户偏好——切回 markdown 后大纲自然恢复。
   $effect(() => {
     if (docKind !== "code" || sidebarView !== "outline") return;
-    if (enabledSidebarViews.length === 0) void setSidebarVisible(false);
-    else void setSidebarView(enabledSidebarViews[0]!);
+    // 这里的收起 / 补位都不落盘（persist=false / show=false）：只是代码模式的默认表现，
+    // 不该覆盖用户在该模式里显式做过的侧边栏显隐选择。
+    if (enabledSidebarViews.length === 0) void setSidebarVisible(false, false);
+    else void setSidebarView(enabledSidebarViews[0]!, false);
   });
 
   /** 目录树点击文件 → 复用打开管道（按扩展名分派） */
@@ -3882,6 +3925,19 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     { label: t("Night"), value: "#2b2b2b" },
   ]);
 
+  /**
+   * 阅读排版各项对「当前文档模式」是否生效（不生效的在面板里置灰，与菜单按模式自适应同一原则）。
+   * 分流依据是下面那个 $effect（阅读排版分流的真源）：
+   * - Markdown：全项生效；
+   * - 纯文本 / 代码：字体与文字色不生效（字体固定等宽栈、文字色交给语法高亮），其余生效；
+   * - HTML：文档自带样式，全项都不生效。
+   */
+  const readerFontEnabled = $derived(docKind !== "code" && docKind !== "html");
+  const readerSizeEnabled = $derived(docKind !== "html");
+  const readerLineEnabled = $derived(docKind !== "html");
+  const readerColorEnabled = $derived(docKind !== "code" && docKind !== "html");
+  const readerBgEnabled = $derived(docKind !== "html");
+
   /** 写入一项阅读排版设置；value 为空串 = 清除该项，回到默认样式 */
   async function setReaderOption(key: keyof ReaderStyle, value: string): Promise<void> {
     const next: ReaderStyle = { ...readerStyle };
@@ -3913,31 +3969,69 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   }
 
   /**
-   * 读取主题目录并把选中主题应用到界面；已选主题文件被删掉时回落默认并清掉设置。
-   * 明 / 暗档位也在这一处统一决定：未选主题 = 内置浅色默认；选中主题按其 color-scheme 定深浅。
+   * 按当前选择把「整份配色 + 明暗档位」一并落地。
+   * 自动档（AUTO_THEME）：跟随系统深浅，在两个内置档位之间切换，不注入任何主题 CSS；
+   * 显式档：注入该主题 CSS，深浅按其 color-scheme 判定。
+   */
+  function applyThemeChoice(): void {
+    const auto = themeChoice === AUTO_THEME;
+    const hit =
+      !auto && themeChoice !== "" ? themeFiles.find((f) => f.name === themeChoice) : undefined;
+    applyUserThemeCss(hit?.css ?? "");
+    applyThemeMode(auto ? systemDark : themeChoice !== "" && themeIsDark(hit?.css ?? ""));
+  }
+
+  /**
+   * 读取主题目录并把选中主题应用到界面；已选主题文件被删掉时回落「自动切换」并清掉设置。
+   * 旧版内置深色主题（「内置主题·暗墨.css」）改名后不会被自动删除（内置包只在缺失时释放），
+   * 这里把它从列表里滤掉，免得下拉框多出一条重名选项。
    */
   async function refreshThemes(): Promise<void> {
     try {
-      themeFiles = await loadThemes();
+      themeFiles = (await loadThemes()).filter((f) => f.name !== LEGACY_DARK_THEME_FILE);
     } catch {
       themeFiles = [];
     }
-    const hit = userTheme ? themeFiles.find((f) => f.name === userTheme) : undefined;
-    applyUserThemeCss(hit?.css ?? "");
-    if (userTheme && !hit) {
-      userTheme = null;
-      await saveSetting("userTheme", null);
+    if (
+      themeChoice !== AUTO_THEME &&
+      themeChoice !== "" &&
+      !themeFiles.some((f) => f.name === themeChoice)
+    ) {
+      themeChoice = AUTO_THEME;
+      await saveSetting("userTheme", AUTO_THEME);
     }
-    applyThemeMode(userTheme !== null && themeIsDark(hit?.css ?? ""));
+    applyThemeChoice();
   }
 
-  /** 选用 / 清除主题：整份配色与明暗档位一并切换并记忆 */
-  async function selectUserTheme(name: string | null): Promise<void> {
-    userTheme = name;
-    const css = name ? themeFiles.find((f) => f.name === name)?.css ?? "" : "";
-    applyUserThemeCss(css);
-    applyThemeMode(name !== null && themeIsDark(css));
-    await saveSetting("userTheme", name);
+  /** 选用主题：整份配色与明暗档位一并切换并记忆（""=内置浅色，AUTO_THEME=跟随系统，其它=主题文件） */
+  async function selectUserTheme(choice: string): Promise<void> {
+    themeChoice = choice;
+    applyThemeChoice();
+    await saveSetting("userTheme", choice);
+  }
+
+  /** 问系统当前深浅：优先 Tauri 的窗口主题（读的是 OS 主题），拿不到再退回 prefers-color-scheme */
+  async function readSystemDark(): Promise<boolean> {
+    try {
+      return (await getCurrentWindow().theme()) === "dark";
+    } catch {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches;
+    }
+  }
+
+  /** 订阅系统主题变化：两条通路都要能用（Tauri 窗口事件 / matchMedia 兜底） */
+  async function watchSystemTheme(): Promise<void> {
+    const apply = (dark: boolean) => {
+      systemDark = dark;
+      if (themeChoice === AUTO_THEME) applyThemeChoice();
+    };
+    try {
+      await getCurrentWindow().onThemeChanged((e) => apply(e.payload === "dark"));
+    } catch {
+      window
+        .matchMedia("(prefers-color-scheme: dark)")
+        .addEventListener("change", (e) => apply(e.matches));
+    }
   }
 
   /** 打开主题目录（顺带刷新列表：用户常先打开文件夹放文件，再回来选） */
@@ -5134,7 +5228,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (remote === null) return;
     if (!davReady) {
       await messageDialog(
-        t("WebDAV is not configured or the connection has not been tested, so the file cannot be saved to the cloud. Configure and test the connection under Settings → WebDAV."),
+        t("WebDAV is not configured or the connection has not been tested, so the file cannot be saved to the cloud. Configure and test the connection under Settings → Cloud Sync."),
         { title: "Sticho", kind: "info" },
       );
       return;
@@ -5578,7 +5672,19 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     tip?: string;
   };
 
-  type MenuDef = { id: string; label: string; key: string; items: MenuItem[]; readonlyLocked?: boolean };
+  type MenuDef = {
+    id: string;
+    label: string;
+    key: string;
+    items: MenuItem[];
+    /** 只读浏览时整菜单置灰（如「编辑」在阅读模式下） */
+    readonlyLocked?: boolean;
+    /**
+     * 额外的整体置灰条件：为真时整菜单（连同子菜单）都不可用。
+     * 用于「按当前文档模式自适应」——例如「段落 / 格式」只在 Markdown 编辑模式下有效。
+     */
+    lockWhen?: () => boolean;
+  };
 
   /**
    * 「视图 → 纯文本模式」三级子菜单的子菜单项：自动（按扩展名）/ 纯文本 / 各语言，单选。
@@ -5680,7 +5786,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
           label: t("Import"),
           disabled: () => busy,
           sub: [
-            { label: t("Import Word…"), action: importWord },
+            { label: t("Import Word…"), disabled: () => !pandocReady, tip: t("This command needs the Pandoc conversion engine. Install it under Help → Download Support Components…"), action: importWord },
             { label: t("Import PDF…"), action: importPdfFile },
             { label: t("Import HTML as Markdown…"), action: importHtml },
             { label: t("Convert to Markdown to Edit"), disabled: () => docKind !== "html", action: () => void convertToMarkdown() },
@@ -5695,9 +5801,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
             { label: t("Export as HTML"), shortcut: "Ctrl+Shift+H", action: exportHtmlFile },
             { label: t("Export as Plain Text"), shortcut: "Ctrl+Shift+T", action: exportTxtFile },
             { sep: true },
-            // LaTeX / Epub 经 Pandoc 转 Markdown，对代码与 HTML 文档语义不成立，置灰
-            { label: t("Export as LaTeX (.tex)"), disabled: () => docKind !== "markdown", action: exportLatexFile },
-            { label: t("Export as Epub (.epub)"), disabled: () => docKind !== "markdown", action: exportEpubFile },
+            // LaTeX / Epub 经 Pandoc 转 Markdown：对代码与 HTML 文档语义不成立，且未装 Pandoc 时不可用，两种情况都置灰
+            { label: t("Export as LaTeX (.tex)"), disabled: () => docKind !== "markdown" || !pandocReady, tip: t("This command needs the Pandoc conversion engine. Install it under Help → Download Support Components…"), action: exportLatexFile },
+            { label: t("Export as Epub (.epub)"), disabled: () => docKind !== "markdown" || !pandocReady, tip: t("This command needs the Pandoc conversion engine. Install it under Help → Download Support Components…"), action: exportEpubFile },
           ],
         },
         { label: t("Print…"), action: () => void printDoc() },
@@ -5797,6 +5903,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       label: t("Paragraph"),
       key: "p",
       readonlyLocked: true,
+      // 段落命令是给 Markdown 源码用的：纯文本（代码）/ HTML 模式下没有这些概念，整体置灰
+      lockWhen: () => docKind !== "markdown",
       items: [
         {
           label: t("Heading"),
@@ -5835,6 +5943,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       label: t("Format"),
       key: "o",
       readonlyLocked: true,
+      // 行内格式命令同样只对 Markdown 源码有效，纯文本 / HTML 模式下整体置灰
+      lockWhen: () => docKind !== "markdown",
       items: [
         { label: t("Bold"), shortcut: "Ctrl+B", action: () => applyFormat("bold") },
         { label: t("Italic"), shortcut: "Ctrl+I", action: () => applyFormat("italic") },
@@ -5991,6 +6101,14 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     subOpen2 = null;
     // 展开「文件」菜单时刷新历史版本列表，供「文件历史」动态子菜单使用
     if (willOpen && id === "file") void refreshHistory();
+  }
+
+  /**
+   * 整菜单是否整体置灰：只读浏览锁（readonlyLocked）+ 按当前文档模式的锁（lockWhen）。
+   * 顶栏项与面板内各项共用它，保证「段落 / 格式」在非 Markdown 模式下从外到内一起灰掉。
+   */
+  function menuLocked(menu: MenuDef): boolean {
+    return (menu.readonlyLocked === true && browseMode) || menu.lockWhen?.() === true;
   }
 
   function runMenuItem(item: MenuItem): void {
@@ -6513,17 +6631,26 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 启动配置一次性读回：此前二十个键逐个 await 是二十次串行 IPC，整体拖慢首帧
       const s = await loadAllSettings();
       // 启动配置：外观（主题统一决定）、最近文件、侧边栏、文件关联
-      // 外观已并入「主题」：未选主题 = 内置浅色默认；选中主题按自身 color-scheme 定深浅
-      // （见 refreshThemes）。这里先落默认浅色，深色主题随后由 refreshThemes 切换。
-      userTheme = (s["userTheme"] as string | undefined) ?? null;
-      // 旧配置里显式选过「深色」的，迁移到内置深色主题「暗墨」，避免升级后莫名变浅色
-      if (userTheme === null && (s["theme"] as string | undefined) === "dark") {
-        userTheme = INK_DARK_THEME_FILE;
-        void saveSetting("userTheme", userTheme);
-        // 旧键 theme 必须一并删除：它是「外观三选（浅/深/跟随系统）」的遗留控制位，
-        // 留着的话用户显式清掉主题后，下次启动会被这里再次强制拉回「暗墨」。
+      // 外观已并入「主题」：真正的选择由 refreshThemes → applyThemeChoice 落地；
+      // 这里先落浅色底，避免首帧闪一下没着色的界面。
+      // 主题选择：键不存在、或存过 null（两者都等于「没选过自定义主题」）= 新的默认值
+      // 「自动切换」（跟随 Windows 深浅）。旧版内置深色主题「内置主题·暗墨.css」已改名为
+      // 「内置主题·深色.css」，选过它的老配置在这里换名，免得下次启动按找不到的文件回落。
+      const savedTheme = s["userTheme"] as string | null | undefined;
+      themeChoice =
+        savedTheme == null
+          ? AUTO_THEME
+          : savedTheme === LEGACY_DARK_THEME_FILE
+            ? DARK_THEME_FILE
+            : savedTheme;
+      // 旧键 theme（「外观三选」遗留）为 dark 的，迁到内置深色主题而不是让它跟着系统走，
+      // 避免升级后莫名变浅色；迁完必须删掉旧键，否则用户改成自动/浅色后下次启动又被拉回深色。
+      if (themeChoice === AUTO_THEME && (s["theme"] as string | undefined) === "dark") {
+        themeChoice = DARK_THEME_FILE;
+        void saveSetting("userTheme", themeChoice);
         void deleteSetting("theme");
       }
+      if (savedTheme === LEGACY_DARK_THEME_FILE) void saveSetting("userTheme", DARK_THEME_FILE);
       applyAppTheme(false);
       // 界面语言（批次八；批次十五起默认中文）：先读设置再初始化编辑器，让 Vditor 一次就用对语言
       locale = (s["locale"] as Locale | undefined) ?? "zh-CN";
@@ -6533,12 +6660,24 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 代码文件「手动指定语法高亮语言」的覆盖表（键为路径指纹）：setCodeLang 负责写盘，
       // 这里必须读回，否则重启后回退成按扩展名判定，用户设过的语言白设。
       codeLangOverrides = (s["codeLangOverrides"] as Record<string, string | null> | undefined) ?? {};
-      sidebarVisible = (s["sidebarVisible"] as boolean | undefined) ?? true;
+      // 侧边栏显隐按文档模式分别记忆。默认：Markdown / HTML 启用、纯文本（代码）不启用。
+      const byKindDefault: Record<"markdown" | "html" | "code", boolean> = { markdown: true, html: true, code: false };
+      const savedByKind = s["sidebarVisibleByKind"] as Partial<Record<"markdown" | "html" | "code", boolean>> | undefined;
+      const savedSidebar = s["sidebarVisible"] as boolean | undefined;
+      // 旧配置只有一个全局布尔（sidebarVisible）：迁到 Markdown / HTML 两个「默认启用」档位，
+      // 纯文本档保持默认不启用。迁完删掉旧键，否则下次启动又被它盖回去。
+      if (savedByKind === undefined && savedSidebar !== undefined) {
+        sidebarByKind = { ...byKindDefault, markdown: savedSidebar, html: savedSidebar };
+        void saveSetting("sidebarVisibleByKind", sidebarByKind);
+        void deleteSetting("sidebarVisible");
+      } else {
+        sidebarByKind = { ...byKindDefault, ...savedByKind };
+      }
       sidebarView = (s["sidebarView"] as SidebarView | undefined) ?? "outline";
       // 面板开关：与默认值合并，兼容旧配置（没有该键时只开文件树/大纲/书签，属性/搜索/云端默认关）
       sidebarPanels = { tree: true, outline: true, bookmarks: true, props: false, search: false, cloud: false, ...(s["sidebarPanels"] as Partial<Record<SidebarView, boolean>> | undefined) };
-      // 全部面板关闭时侧边栏没有内容可显示，强制收起（旧配置可能存着 sidebarVisible=true）
-      if (enabledSidebarViews.length === 0) sidebarVisible = false;
+      // 全部面板关闭时侧边栏没有内容可显示，三个档位一并强制收起（旧配置可能存着开启态）
+      if (enabledSidebarViews.length === 0) sidebarByKind = { markdown: false, html: false, code: false };
       // 上次停留的面板被关掉时，落回第一个仍开启的面板
       else if (!sidebarPanels[sidebarView]) sidebarView = enabledSidebarViews[0]!;
       // 行号的开合统一由下方按「当前视图是否支持」的门控 $effect 落地，这里只取值，
@@ -6600,9 +6739,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
 
       // 自定义主题（批次八）：读主题目录，已选主题立即注入 head（须在编辑器绘制前完成）；
       // 语言包 / 字体包（批次十二）：释放默认包 → 加载词表与字体，失败也不阻挡启动。
-      // 顺序不能并行：内置「暗墨」等主题文件要先由 initPacks 落盘，refreshThemes 才能把
+      // 顺序不能并行：内置「深色」等主题文件要先由 initPacks 落盘，refreshThemes 才能把
       // 用户选中的主题认出来，否则会被当成「文件已被删除」而回落默认。
       await initPacks();
+      // 「自动切换」档要跟随 Windows 主题：先问一次系统深浅，再订阅后续变化
+      systemDark = await readSystemDark();
+      void watchSystemTheme();
       await refreshThemes();
 
       const host = document.getElementById("editor-host")!;
@@ -6781,6 +6923,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         <button
           class="menu-title"
           class:open={menuOpen === menu.id}
+          class:is-off={menuLocked(menu)}
           onclick={() => toggleMenu(menu.id)}
           onmouseenter={() => {
             if (menuOpen) menuOpen = menu.id;
@@ -6788,7 +6931,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         >{menu.label}({menu.key.toUpperCase()})</button>
 
         {#if menuOpen === menu.id}
-          {@const locked = menu.readonlyLocked === true && browseMode}
+          {@const locked = menuLocked(menu)}
           <div class="menu-panel">
             {#each menu.items as item, i (i)}
               {#if item.sep}
@@ -6999,7 +7142,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
             <!-- 工具栏自定义：勾选的按钮以小图标显示在顶栏右侧（皮肤按钮左边） -->
             <section class="set-group">
               <div class="set-head">
-                <h3>{t("Toolbar")}</h3>
+                <h3>{t("Custom Toolbar")}</h3>
               </div>
               <div class="set-checks">
                 {#each TOOLBAR_BUTTONS as btn (btn.id)}
@@ -7018,16 +7161,17 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
             <!-- 外观（主题统一决定）：选主题即改整份配色，并按其 color-scheme 定编辑器 / 代码高亮深浅 -->
             <section class="set-group">
               <div class="set-head">
-                <h3 data-tip={t("Appearance is set here: “Light (Default)” is the built-in light theme; picking a theme applies its colors and switches the editor / code highlighting to match — a theme counts as dark when its CSS declares color-scheme: dark. Put any .css file in the themes folder to use it here.")}>{t("Theme")}</h3>
+                <h3 data-tip={t("Appearance is set here: “Auto (Default)” follows the Windows theme and switches between the built-in light and dark themes; “Light” is the built-in light theme; picking a theme file applies its colors and switches the editor / code highlighting to match — a theme counts as dark when its CSS declares color-scheme: dark. Put any .css file in the themes folder to use it here.")}>{t("Switch Theme")}</h3>
                 <button class="set-action" onclick={() => void openThemesFolder()}>{t("Open Themes Folder")}</button>
               </div>
               <div class="set-row">
                 <select
                   class="set-select"
-                  value={userTheme ?? ""}
-                  onchange={(e) => void selectUserTheme(e.currentTarget.value === "" ? null : e.currentTarget.value)}
+                  value={themeChoice}
+                  onchange={(e) => void selectUserTheme(e.currentTarget.value)}
                 >
-                  <option value="">{t("Light (Default)")}</option>
+                  <option value={AUTO_THEME}>{t("Auto (Default)")}</option>
+                  <option value="">{t("Light")}</option>
                   {#each themeFiles as file (file.name)}
                     <option value={file.name}>{file.name.replace(/\.css$/i, "")}</option>
                   {/each}
@@ -7038,11 +7182,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
             <!-- 阅读排版：Markdown/纯文本全量生效，代码视图仅字号/行距/背景，HTML 不受影响 -->
             <section class="set-group">
               <div class="set-head">
-                <h3 data-tip={t("Scope: font, size, line height and text color apply to Markdown / plain text only; the code view honors only font size, line height and page background (text color is handled by syntax highlighting); HTML documents keep their own styles and are unaffected.")}>{t("Reading Typography")}</h3>
+                <h3 data-tip={t("Scope: font and text color apply to Markdown / plain text only (the code view uses a fixed monospace stack and syntax-highlight colors); font size, line height and page background apply to both Markdown / plain text and the code view; HTML documents keep their own styles and are unaffected. Settings that do not apply to the current document mode are greyed out.")}>{t("Reading Typography")}</h3>
                 <button class="set-action" onclick={() => void openFontsFolder()}>{t("Open Fonts Folder")}</button>
               </div>
 
-              <label class="set-row">
+              <label class="set-row" class:is-off={!readerFontEnabled}>
                 <span class="set-label" data-tip={t("Font packs: put .ttf / .otf / .woff2 files into the “fonts folder” to use them in the font list above.")}>{t("Font")}</span>
                 <select
                   class="set-select"
@@ -7055,7 +7199,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
                 </select>
               </label>
 
-              <label class="set-row">
+              <label class="set-row" class:is-off={!readerSizeEnabled}>
                 <span class="set-label">{t("Font Size")}</span>
                 <select
                   class="set-select"
@@ -7069,7 +7213,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
                 </select>
               </label>
 
-              <label class="set-row">
+              <label class="set-row" class:is-off={!readerLineEnabled}>
                 <span class="set-label">{t("Line Height")}</span>
                 <select
                   class="set-select"
@@ -7083,7 +7227,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
                 </select>
               </label>
 
-              <div class="set-row set-row--stack">
+              <div class="set-row set-row--stack" class:is-off={!readerColorEnabled}>
                 <span class="set-label">{t("Text Color")}</span>
                 <div class="reader-swatches">
                   <button class:active={!readerStyle.textColor} title={t("Default")} onclick={() => void setReaderOption("textColor", "")}>
@@ -7109,7 +7253,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
                 </div>
               </div>
 
-              <div class="set-row set-row--stack">
+              <div class="set-row set-row--stack" class:is-off={!readerBgEnabled}>
                 <span class="set-label">{t("Page Background")}</span>
                 <div class="reader-swatches">
                   <button class:active={!readerStyle.background} title={t("Default")} onclick={() => void setReaderOption("background", "")}>
@@ -7361,7 +7505,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
           <p class="about-line">{t("Converts between Markdown, Word, PDF and HTML, all on your machine.")}</p>
           <p class="about-line about-dim">{t("Built with Tauri + Svelte + Vditor.")}</p>
           <p class="about-line about-dim">
-            {t("Word conversion is done by a separate Pandoc process (GPL-2.0, not bundled with this app).")}
+            {t("Word import and LaTeX / Epub conversion are done by a separate Pandoc process (GPL-2.0, not bundled with this app).")}
           </p>
           <!-- 作者与版权：中英文一致，硬编码即可，不入 i18n 词表（免得撞「中文值 ≠ 英文键」的断言） -->
           <div class="about-author">© 2026 Marvin 翁敏峰</div>
@@ -7720,6 +7864,15 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   .menu-title:hover,
   .menu-title.open {
     background: var(--hover, rgba(0, 0, 0, 0.07));
+  }
+
+  /* 整菜单对当前文档模式不可用时（如非 Markdown 模式下的「段落 / 格式」）：顶栏项置灰、去掉悬停高亮 */
+  .menu-title.is-off {
+    opacity: 0.4;
+  }
+
+  .menu-title.is-off:hover {
+    background: transparent;
   }
 
   .menu-panel {
@@ -8277,6 +8430,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   .set-row--stack {
     align-items: flex-start;
     cursor: default;
+  }
+
+  /* 对当前文档模式不生效的设置项：整体置灰且不可操作（与菜单「按模式自适应」同一原则） */
+  .set-row.is-off {
+    opacity: 0.45;
+    pointer-events: none;
   }
 
   .set-select {

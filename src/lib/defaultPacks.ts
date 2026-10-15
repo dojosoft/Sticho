@@ -85,9 +85,9 @@ const THEMES_README = `Sticho 主题包文件夹
 因此「外观」只需选主题即可，不再单独切明 / 暗档位。
 
 说明：
-- 本目录里的「内置主题·暗墨.css」「内置主题·暖夜.css」「内置主题·温酒.css」是三份整套界面的
-  示例（暗墨=中性深色，暖夜=偏暖深色，温酒=暖黄浅色），照着改就行。
-- 不选任何主题时使用程序内置的浅色默认外观。
+- 本目录里的「内置主题·深色.css」「内置主题·暖夜.css」「内置主题·温酒.css」是三份整套界面的
+  示例（深色=中性深色，暖夜=偏暖深色，温酒=暖黄浅色），照着改就行。
+- 主题默认「自动切换」：跟随 Windows 的深浅在内置浅色 / 深色之间切换；也可以显式指定某份主题。
 - 不需要时把 .css 文件删掉即可，程序不会重新生成它。
 `;
 
@@ -304,13 +304,13 @@ html .md-large-reader__body {
 const WARM_WINE_THEME_FILE = "内置主题·温酒.css";
 
 /**
- * 内置主题：中性深色（暗墨）——即原「外观 → 深色」档位，现转为一等内置主题。
+ * 内置主题：深色——即原「外观 → 深色」档位，现转为一等内置主题。
  *
  * 与「暖夜」的偏暖深色不同，这份是中性灰黑（编辑器 / 代码视图的观感与原深色档位一致），
  * 供只想用深色、不需要暖色的用户直接选用。选中后由 CSS 里的 `color-scheme: dark`
  * 声明它是深色主题，程序据此把编辑器与代码高亮一起切到深色。
  */
-const INK_DARK_THEME = `/* 内置主题 · 暗墨（中性深色）
+const DARK_THEME = `/* 内置主题 · 深色（中性深色）
  *
  * 这份主题对应原「外观 → 深色」档位：中性灰黑底 + 浅灰文字 + 蓝色强调，
  * 编辑器与代码视图保持深色观感。在「外观 → 主题」里选用即时生效。
@@ -399,8 +399,15 @@ html .md-large-reader__body {
 }
 `;
 
-/** 内置中性深色主题文件名（不带 version，缺失时才释放）。App 的「深色」迁移也用这个名字 */
-export const INK_DARK_THEME_FILE = "内置主题·暗墨.css";
+/** 内置深色主题文件名（不带 version，缺失时才释放） */
+export const DARK_THEME_FILE = "内置主题·深色.css";
+
+/**
+ * 旧版内置深色主题的文件名（0.1.0 里叫「暗墨」）。
+ * 内置包只在文件缺失时释放、不会主动删掉改名前留下的旧文件，所以主题下拉框要把它滤掉，
+ * 否则老用户会多看到一条重名选项。选中过它的老配置由 App 侧迁移成新名字。
+ */
+export const LEGACY_DARK_THEME_FILE = "内置主题·暗墨.css";
 
 /** 简体中文语言包：由内置 ZH 词表直接导出，保证与界面文案同源（键 = 英文原文，值 = 中文译文） */
 const ZH_CN_PACK = JSON.stringify({ _label: "简体中文", _version: PACK_VERSION, ...ZH }, null, 2);
@@ -415,8 +422,8 @@ export const DEFAULT_PACK_FILES: DefaultPackFile[] = [
   { dir: "locales", name: "zh-CN.json", content: ZH_CN_PACK, version: PACK_VERSION },
   { dir: "locales", name: "en-US.json", content: EN_US_PACK, version: PACK_VERSION },
   { dir: "themes", name: "README.txt", content: THEMES_README },
-  // 内置「暗墨」主题：中性深色（原「外观 → 深色」档位，现为一等主题；不带 version，缺失时才释放）
-  { dir: "themes", name: INK_DARK_THEME_FILE, content: INK_DARK_THEME },
+  // 内置「深色」主题：中性深色（原「外观 → 深色」档位，现为一等主题；不带 version，缺失时才释放）
+  { dir: "themes", name: DARK_THEME_FILE, content: DARK_THEME },
   // 内置「暖夜」主题：整套偏暖深色界面配色（不带 version，缺失时才释放）
   { dir: "themes", name: WARM_NIGHT_THEME_FILE, content: WARM_NIGHT_THEME },
   // 内置「温酒」主题：与之对应的整套暖黄浅色界面配色（不带 version，缺失时才释放）

@@ -8,6 +8,7 @@
     "core:window:allow-set-title",
     "core:window:allow-destroy",
     "core:window:allow-show",
+    "core:window:allow-theme",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-confirm",
