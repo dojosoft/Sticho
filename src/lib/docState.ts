@@ -14,6 +14,24 @@
 export type DocKind = "markdown" | "html" | "code";
 export type HtmlView = "preview" | "source";
 
+/** 行尾风格：`\r\n` = Windows CRLF，`\n` = LF */
+export type Eol = "\r\n" | "\n";
+
+/**
+ * 从正文探测行尾风格：出现 CRLF 即按 CRLF 处理（Windows 惯例），否则 LF。
+ *
+ * 为什么必须记住它：Markdown 走 Vditor，取值由 DOM 反推、行尾恒为 LF，
+ * 若不还原，打开一份 CRLF 的 .md 一保存就会把整份文件的行尾悄悄改成 LF。
+ */
+export function detectEol(text: string): Eol {
+  return text.includes("\r\n") ? "\r\n" : "\n";
+}
+
+/** 把正文里的行尾统一成指定风格（幂等：已是该风格时原样返回） */
+export function applyEol(text: string, eol: Eol): string {
+  return text.replace(/\r\n|\r|\n/g, eol);
+}
+
 /** 一个标签页的快照 */
 export type DocTab = {
   /** 运行时唯一 id：标签栏的 key，也是草稿 id 的来源 */
@@ -24,8 +42,12 @@ export type DocTab = {
   kind: DocKind;
   /** 已保存到的路径；null = 尚未落盘的新文档 */
   path: string | null;
+  /** 绑定的云端（WebDAV）远端路径；非 null 时保存会就地回写云端而非本地文件 */
+  remote: string | null;
   /** 保存时按此编码写回 */
   encoding: string;
+  /** 文档原有的行尾风格（保存时按它还原，避免 Markdown 被 Vditor 规整成 LF） */
+  eol: Eol;
   dirty: boolean;
   /** Markdown 文档：正文快照；HTML 文档：HTML 源码快照 */
   content: string;
@@ -38,13 +60,25 @@ export type DocTab = {
   previewMutated: boolean;
   /** 上次落草稿时的内容指纹（长度 + 前 64 字符）：内容没变就不重复写盘 */
   draftHash: string;
+  /** 本标签的书签快照（不写入文档、不持久化到会话）：代码/纯文本按行首字符偏移；
+   *  Markdown 按块锚点（text + 同文本序号 occ + 源码偏移 offset） */
+  bookmarks: {
+    /** 代码 / 纯文本：书签所在行的行首字符偏移 */
+    code: number[];
+    /** Markdown：块锚点（见 editor.ts 的 MdBookmarkAnchor） */
+    md: { text: string; occ: number; offset: number }[];
+  };
 };
 
 /** 会话里记录的单个标签（只有元信息，正文在各自的恢复草稿里） */
 export type SessionTab = {
   kind: DocKind;
   path: string | null;
+  /** 云端文档的远端路径；恢复后按它重新下载正文 */
+  remote?: string | null;
   encoding: string;
+  /** 行尾风格（可选，老会话文件里没有该字段时按 LF 处理） */
+  eol?: Eol;
   dirty: boolean;
   htmlView: HtmlView;
   draftId: string;
@@ -60,13 +94,16 @@ export function newDocTab(id: number, content: string): DocTab {
     draftId: `d-${id}`,
     kind: "markdown",
     path: null,
+    remote: null,
     encoding: "utf-8",
+    eol: "\n",
     dirty: false,
     content,
     loaded: true,
     htmlView: "preview",
     previewMutated: false,
     draftHash: "",
+    bookmarks: { code: [], md: [] },
   };
 }
 
@@ -76,7 +113,9 @@ export function sessionOf(tabs: DocTab[], active: number): SessionState {
     tabs: tabs.map((tab) => ({
       kind: tab.kind,
       path: tab.path,
+      remote: tab.remote,
       encoding: tab.encoding,
+      eol: tab.eol,
       dirty: tab.dirty,
       htmlView: tab.htmlView,
       draftId: tab.draftId,

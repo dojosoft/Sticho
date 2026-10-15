@@ -46,7 +46,14 @@
     revealLargeSourceOffset,
     scrollLargeRangeIntoView,
     scrollToHeading,
+    getMdBookmarkAnchor,
+    getMdTopBookmarkAnchor,
+    revealMdBookmark,
+    selectAllEditorContent,
+    setLargeReaderWrap,
+    preloadEditor,
     whenEditorReady,
+    type MdBookmarkAnchor,
     type ReaderStyle,
   } from "./lib/editor";
   import {
@@ -59,6 +66,7 @@
     getContextMenu,
     setContextMenu,
     openDefaultAppsSettings,
+    clearSystemIntegration,
     writeRecovery,
     listRecovery,
     readRecovery,
@@ -66,25 +74,43 @@
     exportPandoc,
     loadThemes,
     openThemeDir,
+    ensurePacks,
+    loadLocales,
+    loadFonts,
+    openPackDir,
     webdavTest,
     webdavUpload,
+    webdavPut,
+    webdavDownload,
+    webdavStat,
     saveDavPassword,
     loadDavPassword,
     getDataLocation,
     getDataRoot,
+    getConfigState,
+    setupConfigLocation,
     checkDataLocation,
     setDataLocation,
     restartApp,
+    clearAllData,
     openUrl,
     listHistory,
     readHistory,
     restoreHistory,
+    pruneHistory,
+    bookmarksSave,
+    bookmarksLoad,
+    bookmarksDelete,
     searchFiles,
+    revealFile,
     logEvent,
     exportDiagnostics,
     type DataLocationMode,
+    type ConfigState,
     type DavConfig,
     type ThemeFile,
+    type LocalePack,
+    type FontPack,
     type AssocExt,
     type HistoryEntry,
   } from "./lib/tauri-api";
@@ -96,10 +122,24 @@
     setCodeReadonly,
     setCodeTheme,
     setCodeLineNumbers,
+    setCodeLineWrapping,
     setCodeTypewriter,
     setCodeParagraphFocus,
     setCodeReaderStyle,
     focusCodeEditor,
+    toggleCodeBookmark,
+    nextCodeBookmark,
+    getCodeBookmarkPositions,
+    getCodeBookmarks,
+    clearCodeBookmarks,
+    setCodeBookmarks,
+    scrollToCodeOffset,
+    addCodeBookmark,
+    removeCodeBookmark,
+    getCodeSelectionText,
+    deleteCodeSelection,
+    insertCodeText,
+    selectAllCode,
     setCodeFind,
     getCodeMatches,
     gotoCodeMatch,
@@ -129,8 +169,15 @@
     prettyJson,
     type ToolResult,
   } from "./lib/codeTools";
+  import {
+    cjkLatinAddSpace,
+    cjkLatinRemoveSpace,
+    collapseInnerSpaces,
+    removeBlankLines,
+    removeTrailingSpaces,
+  } from "./lib/textTools";
   import { ENCODINGS, encodingLabel } from "./lib/encoding";
-  import { newDocTab, sessionOf, type DocTab, type SessionState } from "./lib/docState";
+  import { newDocTab, sessionOf, applyEol, detectEol, type DocTab, type Eol, type SessionState } from "./lib/docState";
   import { parseOutline, parseOutlineFromHtml, parseFrontMatter, htmlPlainText, type OutlineItem, type SidebarView } from "./lib/sidebar";
   import Sidebar from "./components/Sidebar.svelte";
   import CodeTools from "./components/CodeTools.svelte";
@@ -140,6 +187,7 @@
   import FindBar from "./components/FindBar.svelte";
   import StatusBar from "./components/StatusBar.svelte";
   import SettingsModal from "./components/SettingsModal.svelte";
+  import ConfigSetupDialog from "./components/ConfigSetupDialog.svelte";
   import CommandPalette, { type PaletteCommand } from "./components/CommandPalette.svelte";
   import WelcomeDialog from "./components/WelcomeDialog.svelte";
   import { groupSearchHits, literalAnchor, type SearchGroup, type SearchHit } from "./lib/fileSearch";
@@ -148,14 +196,36 @@
   // pdfjs-dist 这类大依赖，却只在对应菜单动作时才用得上。
   import { loadSetting, loadAllSettings, saveSetting, deleteSetting } from "./lib/settings";
   import { diffLines, type DiffLine } from "./lib/diff";
-  import { makeT, vditorLang, type Locale } from "./lib/i18n";
-  import { invoke } from "@tauri-apps/api/core";
+  import { ZH, LOCALES, makeTFrom, vditorLang, type Locale } from "./lib/i18n";
+  import { DEFAULT_PACK_FILES, INK_DARK_THEME_FILE } from "./lib/defaultPacks";
+  import { loadWelcomeDocs, welcomeFor } from "./lib/welcome";
+  import {
+    compileFindRegex,
+    collectDomHits,
+    collectStringHits,
+    applyReplacement,
+    hitIndexFrom,
+    setHighlightRanges,
+    applyFindHighlights,
+    clearFindHighlights,
+    type DomHit,
+    type StringHit,
+  } from "./lib/findReplace";
+  import { runAutoSave, runExternalChangeCheck, startPolling, recoveryFingerprint, EXTERNAL_POLL_INTERVAL_MS } from "./lib/autoSave";
+  import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 
-  /** 版本号：与 src-tauri/tauri.conf.json 的 version 保持一致 */
-  const APP_VERSION = "0.1.0";
+  /** 版本号：由 vite define 从 package.json 注入（单一来源，勿手写） */
+  const APP_VERSION = __APP_VERSION__;
 
   // ---- 应用状态（Svelte 5 runes）----
   let currentPath = $state<string | null>(null); // null = 尚未保存过的新文档
+  /**
+   * 当前文档绑定的云端远端路径（批次十一）。
+   *
+   * 由侧边栏「云端」视图打开的文件带此值：这类文档没有本地文件（currentPath 为 null），
+   * 保存时按此路径直接写回云端（见 saveFile 的云端分支）。本地文档此值恒为 null。
+   */
+  let currentRemote = $state<string | null>(null);
   let dirty = $state(false);
   let busy = $state(false); // 文件操作进行中，防重复触发
   // 当前文档的本地历史版本（文件菜单展开时刷新，供「文件历史」动态子菜单消费）
@@ -178,7 +248,6 @@
   let searchRegex = $state(false); // 最近一次搜索是否按正则解释（供定位时复用同一套匹配语义）
   let searchSeq = 0; // 搜索序号：丢弃过期请求的结果，避免快速输入时结果乱序
   let theme = $state<"light" | "dark">("light");
-  let userThemeSet = $state(false); // 用户是否显式选过主题（否则跟随系统）
   let recentFiles = $state<string[]>([]);
   let wordCount = $state(0);
   let charCount = $state(0); // 状态栏实时统计：字符数（批次七）
@@ -187,10 +256,15 @@
   let showToolbar = $state(true); // 是否显示编辑器自带排版工具栏
   // 当前 Vditor 渲染模式（状态栏图标 / 视图菜单复选共用）。仅 Markdown 模式有意义，
   // 由 onEditorModeChange 持续同步（含工具栏下拉与菜单两条切换路径）。
-  let editorMode = $state<"ir" | "wysiwyg" | "sv">("ir");
+  let editorMode = $state<"ir" | "wysiwyg" | "sv" | "none">("ir");
   let shortcutsOpen = $state(false); // 「快捷键一览」模态（帮助菜单）
+  let aboutOpen = $state(false); // 「关于」模态：带应用图标的自绘对话框（帮助菜单）
   let tabsEl = $state<HTMLElement | null>(null); // 标签栏滚动容器（切标签时把活跃项滚进可视区）
   let showLineNumbers = $state(true); // 是否显示正文行号（默认显示）
+  let autoWrap = $state(true); // 自动换行（视图 → 自动换行）：默认开
+  let bookmarkCursor = $state(-1); // 上次跳转到的书签下标（Markdown 锚点数组；-1 = 未开始）
+  /** 代码书签的行号 + 文本镜像：命令式读 CM 后写回，供侧边栏面板响应式消费 */
+  let codeBookmarkInfo = $state<{ line: number; text: string }[]>([]);
   let typewriterOn = $state(false); // 打字机模式：光标行始终停在视口垂直中线
   let paragraphFocus = $state(false); // 段落聚焦：只亮当前编辑块，其余内容压暗
   // 大文档（Markdown）分节阅读通路是否激活：那套正文由整篇源码分节拼出，等同纯源码视图，
@@ -204,25 +278,37 @@
 
   // ---- 自动保存与崩溃恢复（批次四）----
   let autoSaveEnabled = $state(true); // 持久化键 "autoSave"，默认开
+  /** 自动保存间隔（分钟）：0.5 表示 30 秒；持久化键 "autoSaveIntervalMin"，默认 1 分钟 */
+  let autoSaveIntervalMin = $state(1);
 
   /**
-   * 默认打开模式（本轮新增）：打开 / 新建 / 导入文档后先进阅读模式还是直接进编辑模式。
+   * 默认打开模式：打开 / 新建 / 导入文档后先进阅读模式还是直接进编辑模式。
    * 只在「新文档落点」生效（见 resetToBrowseMode），不影响标签间切换时各自已有的模式。
+   * 缺省为编辑模式（用户未设置过时也走这一支，见启动回填）。
    */
-  let defaultOpenMode = $state<"read" | "edit">("read");
+  let defaultOpenMode = $state<"read" | "edit">("edit");
 
-  // ---- WebDAV 云同步与多版本（批次九）----
-  // 配置持久化在 settings.json（含明文密码）；davVerified 刻意不持久化：
-  // 每次启动都要重新「测试连接」，避免配置早已失效却还在后台上传。
+  // ---- WebDAV 云同步（批次九）----
+  // 配置持久化在 settings.json（密码另行经 DPAPI 加密存于 secrets.json）；davVerified 仍刻意不持久化，但改为
+  // **启动时后台静默测一次连接**（见 initCloud）：成功即视为本会话已通过，于是已开启的
+  // 云同步重启后会自动继续，既去掉了「每次手动点测试」的摩擦，也不会拿失效配置盲传。
   let davUrl = $state("");
   let davUser = $state("");
   let davPass = $state("");
   let davRoot = $state("/Sticho");
+  let davUseHttps = $state(true); // 使用 HTTPS；关闭后允许明文 http 连接
   let davEnabled = $state(false); // 每次保存后自动上传
-  let davVersioning = $state(false); // 保留历史版本
-  let davKeep = $state(3); // 最多保留版本数 1–10
-  let historyKeep = $state(20); // 本地版本历史保留份数（每份文档各自保持这么多）
   let davVerified = $state(false); // 本会话内「测试连接」已通过
+
+  // ---- 本地多版本控制（保存覆盖前留档，供「文件 → 文件历史」回溯）----
+  // 三类上限（数量 / 容量 / 时长）各有独立开关；只有开启的那一项参与裁剪，
+  // 超限一律从最老的版本开始删（见 Rust 侧 history.rs 的 prune）。
+  let historyKeep = $state(20); // 数量上限：每份文档最多保留的版本数
+  let historyCountLimitOn = $state(true); // 数量上限开关（默认开）
+  let historySizeLimitOn = $state(false); // 容量上限开关（默认关）
+  let historyMaxSizeMb = $state(100); // 容量上限：每份文档的版本总体积（MB）
+  let historyAgeLimitOn = $state(false); // 时长上限开关（默认关）
+  let historyMaxAgeDays = $state(30); // 时长上限：版本的最长保留天数
   // 冲突处理策略：copy = 另存冲突副本（默认，绝不丢数据）/ overwrite = 直接覆盖
   let davConflictPolicy = $state<"copy" | "overwrite">("copy");
   // 同步索引：本地路径 → 上次上传后记录的远端状态，供「远端是否被别的设备改过」判定
@@ -231,6 +317,9 @@
   let davTip = $state(""); // 设置面板里那行结论 / 错误提示
   let davSyncState = $state<"idle" | "busy" | "error">("idle"); // 状态栏同步指示
   let davSyncTip = $state(""); // 状态栏指示的 tooltip（失败详情）
+  // 云端变更检测：本机同步过、但远端已被别的设备改过的文档（远端路径 + 显示名）。
+  // 检测只做提示，绝不改动本地或云端内容——冲突防护仍由上传时的判定负责。
+  let cloudUpdates = $state<{ remote: string; name: string }[]>([]);
   let cloudOpen = $state(false); // 云端文件浏览模态
   // 恢复中心（文件菜单 →「恢复中心…」）：统一浏览恢复草稿与本地版本历史
   let recoveryOpen = $state(false);
@@ -245,10 +334,9 @@
     root: davRoot.trim() || "/Sticho",
   });
 
-  // ---- 配置文件保存位置（批次十）----
-  // 「系统目录」= %APPDATA%\Sticho（默认）；「当前程序目录」= exe 同目录下的 Sticho\（绿色版）；
-  // 「指定目录」= 用户自选目录下的 Sticho\。位置本身由 Rust 侧引导文件决定，这里只做展示与切换；
-  // 切换后需重启才完全生效。
+  // ---- 配置文件保存位置（批次十 / 位置自动探测）----
+  // 「系统目录」= %APPDATA%\Sticho；「当前程序目录」= exe 同目录下的 Sticho\（便携）。
+  // 位置由 Rust 侧探测（程序目录优先，其次系统目录），这里只做展示与切换；切换后需重启才完全生效。
   let dataLocation = $state<DataLocationMode>("user");
   let dataRootPath = $state(""); // 当前数据根目录绝对路径（只读展示）
   let locationBusy = $state(false); // 切换 / 重启进行中
@@ -285,13 +373,47 @@
    *                              上面的 DOM 类功能随之不可用
    * 两者绝不叠加：allow-scripts + allow-same-origin 等于沙箱失效，文档脚本将能反过来操作本应用窗口。
    */
-  let htmlScripts = $state(false);
+  /**
+   * HTML 预览「执行文档内脚本」按标签各自保存（键为标签运行时 id）。
+   *
+   * 安全开关不能串台：一个标签开了脚本、切到另一个标签时，不应被误当成也开着——
+   * 全局单开关在切换标签时会把执行态带过去，这正是本次修复的问题。
+   */
+  let htmlScriptsByTab = $state<Record<number, boolean>>({});
+  /** 当前标签的「执行文档脚本」状态（无标签时恒为关）。
+   *  读的是「当前标签」的值，供模板里的菜单勾选态与 iframe sandbox 属性使用。 */
+  function currentHtmlScripts(): boolean {
+    const tab = tabs[activeIndex];
+    return tab ? htmlScriptsByTab[tab.id] === true : false;
+  }
+  /** 写入当前标签的「执行文档脚本」状态（按标签保存，切换标签互不影响） */
+  function setCurrentHtmlScripts(value: boolean): void {
+    const tab = tabs[activeIndex];
+    if (tab) htmlScriptsByTab[tab.id] = value;
+  }
+  const htmlScripts = $derived(currentHtmlScripts());
   // 预览 DOM 是否已被改动（直接编辑或预览内替换）。决定要不要序列化回 htmlSource：
   // 没改过就不序列化，避免「只是切个视图」把源码整体重排一遍。
   let previewMutated = false;
-  // iframe 的重建键：重新打开同一份文件时，srcdoc 可能恰好等于旧值而被 Svelte 跳过更新，
-  // 导致预览停留在上一次（可能未保存）的 DOM 上。换 key 强制重建，保证与文件一致。
+  // iframe 的重建键：srcdoc 变化时 Svelte 会自动重载，但沙箱模式（sandbox 属性）变化
+  // 不会对已加载的文档生效，必须换 key 强制重建。这里只在「正文或沙箱模式真的变了」时才自增，
+  // 避免切换 HTML 标签 / 重开同一文件时无谓地重建 iframe。
   let previewKey = $state(0);
+  /** 上次真正渲染进 iframe 的正文与沙箱模式，作为「是否需要重建」的比对基准 */
+  let previewBuiltContent: string | null = null;
+  let previewBuiltScripts = false;
+  /** 按需重建 iframe：正文或沙箱模式与上次渲染相同则跳过（srcdoc 变化已由 Svelte 自行处理）。
+   *  previewMutated 表示当前 DOM 已与源码不一致（预览里直接编辑过），此时即便正文串没变也必须重建，
+   *  才能把 DOM 恢复成源码的样子；force 供「上一个标签的 DOM 还留着改动」这类调用方使用。 */
+  function rebuildPreview(content: string, force = false): void {
+    if (!force && content === previewBuiltContent && htmlScripts === previewBuiltScripts && !previewMutated) {
+      return;
+    }
+    previewBuiltContent = content;
+    previewBuiltScripts = htmlScripts;
+    previewMutated = false; // 重建后 DOM 由源码生成，与源码一致
+    previewKey += 1;
+  }
   let previewFrame: HTMLIFrameElement | null = $state(null);
   let sourceArea: HTMLTextAreaElement | null = $state(null);
 
@@ -323,7 +445,7 @@
    */
   const lineNumbersSupported = $derived(
     docKind === "code" ||
-      (docKind === "markdown" && (editorMode === "sv" || largeReading)) ||
+      (docKind === "markdown" && (editorMode === "sv" || editorMode === "none" || largeReading)) ||
       (docKind === "html" && htmlView === "source"),
   );
 
@@ -334,6 +456,12 @@
 
   /** 叠层逐行渲染用的源码行（仅在叠层可见时才拆分，避免编辑时白白 split 大文本） */
   const htmlSourceLines = $derived(htmlGutterOn ? htmlSource.split(/\r\n|\r|\n/) : []);
+
+  /**
+   * Markdown「不渲染」模式：只保留 SV 源码栏，渲染结果栏由 CSS 隐藏（见 app.css 的
+   * .md-source-only）。用于根节点挂类名，非 Markdown 文档恒为 false。
+   */
+  const mdSourceOnly = $derived(docKind === "markdown" && editorMode === "none");
 
   /**
    * 量出 textarea 的正文内容宽度喂给叠层。
@@ -382,22 +510,32 @@
 
   // ---- 编码（阶段 11）：打开时自动检测，可在状态栏或「文件 → 编码」手动切换 ----
   let encoding = $state("utf-8"); // 当前文档编码 id，保存时按此写回
+  let docEol = $state<Eol>("\n"); // 当前文档行尾风格（保存时按它还原，避免 Markdown 被 Vditor 规整成 LF）
   let encodingOpen = $state(false); // 状态栏编码下拉是否展开
   let codeLangOpen = $state(false); // 状态栏「语法高亮方案」下拉是否展开
+  let modeOpen = $state(false); // 状态栏文档模式下拉是否展开
 
   // ---- 侧边栏（阶段 11）----
   let sidebarVisible = $state(true);
   let sidebarView = $state<SidebarView>("outline");
   /**
-   * 侧边栏四个面板各自的开关（视图 → 侧边栏 里的勾选项，默认全开）。
+   * 侧边栏各面板各自的开关（视图 → 侧边栏 里的勾选项）。
    * 面板开关只决定「该面板是否作为可切换的视图存在」；同一时刻仍只显示一个面板
-   * （sidebarView）。四个全关时侧边栏没有任何内容可显示，会自动收起。
+   * （sidebarView）。全部关闭时侧边栏没有任何内容可显示，会自动收起。
+   *
+   * 初始默认只启用「文件目录树 / 文档大纲 / 书签」三项；属性、搜索、云端三项默认不选中，
+   * 用户可在「视图 → 侧边栏」里按需打开。
+   *
+   * 同时开启的面板数上限为 MAX_SIDEBAR_PANELS（5 个）：面板多了之后标签栏会挤成一排，
+   * 超出时弹一次提示、不改状态（见 sidebarLimitReached）。
    */
   let sidebarPanels = $state<Record<SidebarView, boolean>>({
     tree: true,
     outline: true,
-    props: true,
-    search: true,
+    bookmarks: true,
+    props: false,
+    search: false,
+    cloud: false,
   });
   let treeRoot = $state<string | null>(null); // 目录树根目录（跟随当前文档）
   let outlineMd = $state(""); // 用于生成大纲的 Markdown 快照（防抖更新）
@@ -455,19 +593,111 @@
   // ---- 菜单栏状态 ----
   let menuOpen = $state<string | null>(null); // 展开的一级菜单 id
   let subOpen = $state<string | null>(null); // 展开的二级菜单标签
+  let subOpen2 = $state<string | null>(null); // 展开的三级菜单标签
 
   // ---- 左上角图标按钮（阶段 12）：软件设置 / 皮肤设置 ----
   let settingsOpen = $state(false); // 软件设置面板
   // 当前标签：具体标签清单与文案由 SettingsModal 组件自带，这里只保留受控状态
-  let settingsTab = $state<"general" | "assoc" | "cloud" | "storage">("general");
+  let settingsTab = $state<"general" | "save" | "assoc" | "cloud">("general");
   let skinOpen = $state(false); // 皮肤设置面板
   let themeFiles = $state<ThemeFile[]>([]); // 自定义主题目录里的 .css（批次八）
   let userTheme = $state<string | null>(null); // 当前选用的自定义主题文件名
+  let fontPacks = $state<FontPack[]>([]); // 字体包目录里的字体文件（批次十二）
 
-  // ---- 界面语言（批次八）----
+  // ---- 顶栏「工具栏自定义」按钮：勾选项以小图标显示在皮肤按钮左侧（皮肤设置 → 工具栏）----
+  /** 可在顶栏显示的自定义按钮 id */
+  type ToolbarButtonId = "find" | "undo" | "redo" | "save" | "recovery" | "fullscreen";
+  type ToolbarButtonDef = {
+    id: ToolbarButtonId;
+    /** 浮窗提示里的按钮名（i18n 键，以英文原文为键） */
+    label: string;
+    run: () => void;
+    /** 当前不可用（非 Markdown 文档 / 阅读模式 / 正在忙） */
+    disabled: () => boolean;
+  };
+  /** 六个可勾选的顶栏按钮：撤销 / 重做 / 全屏是 Vditor 的能力，仅在 Markdown 文档下可用 */
+  const TOOLBAR_BUTTONS: ToolbarButtonDef[] = [
+    {
+      id: "save",
+      label: "Save",
+      run: () => void saveFile(),
+      disabled: () => busy,
+    },
+    {
+      id: "undo",
+      label: "Undo",
+      run: undoEditor,
+      disabled: () => docKind !== "markdown" || browseMode,
+    },
+    {
+      id: "redo",
+      label: "Redo",
+      run: redoEditor,
+      disabled: () => docKind !== "markdown" || browseMode,
+    },
+    {
+      id: "find",
+      label: "Find…",
+      run: () => void openFind(),
+      disabled: () => false,
+    },
+    {
+      // 文件恢复中心：与「文件 → 恢复中心…」同一入口，统一浏览恢复草稿与本地版本历史
+      id: "recovery",
+      label: "Recovery Center…",
+      run: () => {
+        recoveryOpen = true;
+      },
+      disabled: () => false,
+    },
+    {
+      id: "fullscreen",
+      label: "Fullscreen",
+      run: toggleEditorFullscreen,
+      disabled: () => docKind !== "markdown",
+    },
+  ];
+  let toolbarButtons = $state<Record<ToolbarButtonId, boolean>>({
+    find: false,
+    undo: false,
+    redo: false,
+    save: false,
+    recovery: false,
+    fullscreen: false,
+  });
+  /** 勾选 / 取消某个顶栏按钮并持久化 */
+  async function toggleToolbarButton(id: ToolbarButtonId): Promise<void> {
+    const next = { ...toolbarButtons, [id]: !toolbarButtons[id] };
+    toolbarButtons = next;
+    await saveSetting("toolbarButtons", next);
+  }
+
+  // ---- 界面语言（批次八；批次十四改由语言包提供词表；批次十五起默认中文，可在首次运行引导里改）----
   let locale = $state<Locale>("zh-CN");
-  /** 翻译函数：以中文原文为键；locale 变化时重建，界面文案随之刷新 */
-  const t = $derived(makeT(locale));
+  /** 语言包目录里已加载的语言包（含内置释放的 zh-CN / en-US） */
+  let localePacks = $state<LocalePack[]>([]);
+  /**
+   * 当前语种的词表：以内置词表打底，再叠加语言包词条（语言包可逐条覆盖内置译文）。
+   *
+   * 不用「有语言包就整体替换」：旧版本释放的 locales/zh-CN.json 只含 `_label`、
+   * 没有词条（当时以中文为键，无需译文），整体替换会让查表全部落空而回落英文，
+   * 表现为「切到中文却仍是英文」。以 ZH 打底即可兜住这类陈旧语言包。
+   */
+  const activeEntries = $derived.by(() => {
+    const base = locale === "zh-CN" ? ZH : {};
+    const pack = localePacks.find((p) => p.id === locale);
+    return pack ? { ...base, ...pack.entries } : base;
+  });
+  /** 翻译函数：以英文原文为键；语种或词表变化时重建，界面文案随之刷新 */
+  const t = $derived(makeTFrom(activeEntries));
+  /** 语言下拉项：内置两种始终在列，再并入语言包里的其它语种（按 id 去重） */
+  const localeOptions = $derived.by(() => {
+    const out = [...LOCALES];
+    for (const pack of localePacks) {
+      if (!out.some((o) => o.id === pack.id)) out.push({ id: pack.id, label: pack.label });
+    }
+    return out;
+  });
 
   // ---- 查找 / 替换状态 ----
   let findOpen = $state(false);
@@ -480,19 +710,31 @@
   let findWord = $state(false);
   let findRegex = $state(false);
 
-  const WELCOME = `# 欢迎使用 Sticho
+  /**
+   * 新建文档的欢迎正文：优先取配置目录 `docs/Welcome.<locale>.md` 的正文（用户可自由修改），
+   * 读不到时回落内置文案。文档内容不随切换语言重译——只在「新建标签 / 首次打开」时取当时的语言，
+   * 之后它就是普通正文，用户改动与保存都不受影响。
+   */
+  function welcomeText(): string {
+    return welcomeFor(locale) ?? builtinWelcomeText();
+  }
 
-开始输入，或从 **文件 → 打开** 载入 \`.md\` / \`.html\` 文件。
+  /** 内置欢迎文案（配置目录里没有对应文档时的回落） */
+  function builtinWelcomeText(): string {
+    return `# ${t("Welcome to Sticho")}
 
-支持拖拽 md / html / docx / pdf 文件到窗口直接打开。
+${t("Type to start, or load a .md / .html file via File → Open.")}
+
+${t("Drag md / html / docx / pdf files into the window to open them directly.")}
 `;
+  }
 
   // ---- 多标签页（批次六）----
   // 顶层 $state 仍是活跃标签的唯一真源；tabs 只在切换 / 关闭 / 落草稿时被搬运（见 lib/docState.ts）。
   let tabSeq = 0;
   function createTab(): DocTab {
     tabSeq += 1;
-    return newDocTab(tabSeq, WELCOME);
+    return newDocTab(tabSeq, welcomeText());
   }
 
   let tabs = $state<DocTab[]>([createTab()]);
@@ -503,6 +745,13 @@
   let lastSessionJson = "";
   /** 标签栏右键菜单：屏幕坐标 + 被右键的标签下标（null = 未打开） */
   let tabMenu = $state<{ x: number; y: number; index: number } | null>(null);
+  /** 文档区右键菜单：屏幕坐标（null = 未打开）。仅代码 / Markdown 文档自绘 */
+  let docMenu = $state<{ x: number; y: number } | null>(null);
+
+  /** 某标签的本地磁盘路径（活跃标签读全局，其余读快照；云端专属标签为 null） */
+  function tabPathAt(index: number): string | null {
+    return index === activeIndex ? currentPath : (tabs[index]?.path ?? null);
+  }
 
   /** 活跃标签 */
   function activeTab(): DocTab | undefined {
@@ -511,8 +760,13 @@
 
   /** 标签栏显示名 / 未保存圆点：活跃项读全局（未及时搬运时也始终是最新的），其余读快照 */
   function tabTitle(index: number): string {
-    const path = index === activeIndex ? currentPath : tabs[index]?.path ?? null;
-    return path ? fileName(path) : t("未命名");
+    const tab = tabs[index];
+    const path = index === activeIndex ? currentPath : (tab?.path ?? null);
+    if (path) return fileName(path);
+    // 无本地文件但绑定了云端路径的文档：用远端文件名做标签标题
+    const remote = index === activeIndex ? currentRemote : (tab?.remote ?? null);
+    if (remote) return fileName(remote);
+    return t("Untitled");
   }
 
   function tabDirty(index: number): boolean {
@@ -533,7 +787,9 @@
     if (!tab || !tabsReady) return;
     tab.kind = docKind;
     tab.path = currentPath;
+    tab.remote = currentRemote;
     tab.encoding = encoding;
+    tab.eol = docEol;
     tab.dirty = dirty;
     tab.htmlView = htmlView;
     tab.previewMutated = previewMutated;
@@ -545,23 +801,49 @@
     } else {
       tab.content = getEditorValue();
     }
+    if (docKind === "code") tab.bookmarks.code = codeLargeText === null ? getCodeBookmarkPositions() : [];
     tab.loaded = true;
   }
 
-  /** 把某个标签的快照投影回全局状态，并让编辑器显示它的正文 */
+  /**
+   * 把某个标签的快照投影回全局状态，并让编辑器显示它的正文。
+   *
+   * 切换期间全程置 `busy`（并保存/恢复调用方原有的 busy）：本函数会**先同步**改写
+   * 全局身份（docKind / currentPath / encoding），随后才 await 换正文。若此时放行
+   * Ctrl+S，`currentText()` 会拿到尚未换好的正文（见 codeText 的注释），把空串或
+   * 上一个标签的内容写进新文件路径。busy 一置，saveFile / 其它写入口的 `if (busy) return`
+   * 就能挡住这段窗口。
+   */
   async function activateTab(index: number): Promise<void> {
     const tab = tabs[index];
     if (!tab) return;
+    const wasBusy = busy;
+    busy = true;
+    try {
+      await activateTabInner(tab, index);
+    } finally {
+      busy = wasBusy;
+    }
+  }
+
+  /** 真正的切换实现（由 activateTab 包一层 busy 保护） */
+  async function activateTabInner(tab: DocTab, index: number): Promise<void> {
     if (!tab.loaded) await loadTabContent(tab); // 会话恢复出来的标签：正文此刻才读盘
     activeIndex = index;
     diskMtime = null; // 先清掉基准：读盘 / 重建 iframe 期间不能让轮询拿着旧时间误报「外部变更」
 
     docKind = tab.kind;
     currentPath = tab.path;
+    currentRemote = tab.remote ?? null;
     encoding = tab.encoding;
+    docEol = tab.eol;
     dirty = tab.dirty;
     htmlView = tab.htmlView;
-    htmlScripts = false;
+    // 「执行文档脚本」不再在此重置：它已按标签各自保存在 htmlScriptsByTab 里，
+    // 切换标签时 htmlScripts（$derived）会自动读回该标签的值，不该被统统清成关。
+    // 上一个标签若在预览里直接改过 DOM（尚未重建），切换后必须重建 iframe，否则会看到它的 DOM：
+    // 要在把 previewMutated 投影成目标标签的值之前先把上一份记下来。
+    const priorPreviewMutated = previewMutated;
     previewMutated = tab.previewMutated;
     if (tab.path) treeRoot = parentDir(tab.path);
     setDocumentPath(tab.path); // 图片落盘目录 / 相对路径换算都跟随各自文档
@@ -569,7 +851,8 @@
     if (tab.kind === "html") {
       htmlSource = tab.content;
       previewDoc = tab.content;
-      previewKey += 1; // 强制重建 iframe：两个标签的 srcdoc 可能恰好相同
+      // 正文或沙箱模式真的变了才重建，否则沿用现有 iframe（srcdoc 变化 Svelte 会自动重载）
+      rebuildPreview(tab.content, priorPreviewMutated);
     } else if (tab.kind === "code") {
       htmlSource = "";
       previewDoc = "";
@@ -579,6 +862,17 @@
       previewDoc = "";
       setEditorValue(tab.content);
     }
+
+    bookmarkCursor = -1;
+    if (tab.kind === "code") {
+      if (codeLargeText === null) setCodeBookmarks(tab.bookmarks.code);
+      else clearCodeBookmarks();
+      codeBookmarkInfo = getCodeBookmarks();
+    } else {
+      codeBookmarkInfo = [];
+    }
+    // 书签以磁盘（配置目录 bookmarks/）为准：先把内存快照投影上去，再读回覆盖
+    if (shouldLoadBookmarks(tab)) await loadStoredBookmarks(tab);
 
     await updateTitle();
     refreshSideNow();
@@ -618,7 +912,7 @@
     // 超大代码文件是只读分节纯文本：没有可编辑的正文，切「编辑模式」只会把几 MB 源码
     // 塞回 Vditor 重新渲染（就是这条通路要避开的那份代价），所以直接挡下。
     if (!on && codeLargeText !== null) {
-      await messageDialog(t("超大代码文件以只读分节方式打开，无法切换到编辑模式。"), {
+      await messageDialog(t("Very large code files open as read-only sections and cannot be switched to edit mode."), {
         title: "Sticho",
         kind: "info",
       });
@@ -626,10 +920,9 @@
     }
     if (!on && isLargeDocMode()) {
       const ok = await confirmDialog(
-        t(
-          "这是大文档，正在以分节渲染方式打开（阅读流畅，但正文不可直接编辑）。\n切到编辑模式需要把整篇交给编辑器重新渲染，可能明显卡顿。\n继续切换吗？",
+        t("This is a large document, opened with section-by-section rendering for smooth reading (the text is not directly editable).\nSwitching to edit mode re-renders the entire document at once and may lag noticeably.\nContinue?",
         ),
-        { title: "Sticho", kind: "info", okLabel: t("切换到编辑模式"), cancelLabel: t("取消") },
+        { title: "Sticho", kind: "info", okLabel: t("Switch to Edit Mode"), cancelLabel: t("Cancel") },
       );
       if (!ok) return;
     }
@@ -691,10 +984,9 @@
         docKind = "html";
         htmlSource = text;
         previewDoc = text;
-        previewKey += 1; // 强制重建 iframe：切模式时 srcdoc 可能恰好相同
-        previewMutated = false;
         htmlView = "preview";
-        htmlScripts = false; // 脚本执行按文档逐个开启，不跨模式沿用
+        setCurrentHtmlScripts(false); // 脚本执行按文档逐个开启，不跨模式沿用
+        rebuildPreview(text); // 切模式后正文或沙箱变化才重建 iframe
       }
       const tab = tabs[activeIndex];
       if (tab) tab.kind = mode; // 立刻写回快照，免得切标签时被 captureActiveTab 用旧值盖回去
@@ -714,14 +1006,21 @@
     // 判据取自全局状态（= 活跃标签的真实状态），刻意不读快照里的 path：
     // 刚由本函数新建出来的标签还没被 captureActiveTab 搬过，快照里 path 仍是 null，
     // 按快照判断会把这个「刚打开文件」的标签又当成空白标签复用，下一个 Ctrl+O 就把它覆盖掉。
-    const pristine = currentPath === null && docKind === "markdown" && !dirty;
+    const pristine = currentPath === null && currentRemote === null && docKind === "markdown" && !dirty;
     if (!pristine) {
       captureActiveTab();
       tabs.push(createTab());
       activeIndex = tabs.length - 1;
       await updateTitle();
     }
+    // 新标签默认不绑定云端：打开逻辑若需要（openCloudContent）会自行重建绑定。
+    // 必须放在 captureActiveTab 之后——上一个标签要把它的远端绑定先搬回快照。
+    currentRemote = null;
     await run();
+    // 刚打开的文档也要把磁盘上的书签装回来：本函数是「直填全局状态」的落点，
+    // 不走 activateTab，不在这里补一次，重开后书签就会像「没保存」一样消失。
+    const openedTab = tabs[activeIndex];
+    if (openedTab && shouldLoadBookmarks(openedTab)) await loadStoredBookmarks(openedTab);
     resetToBrowseMode();
   }
 
@@ -739,13 +1038,13 @@
 
     if (tabDirty(index)) {
       const choice = await askChoice(
-        t("「{name}」有未保存的修改。", { name: tabTitle(index) }),
+        t("“{name}” has unsaved changes.", { name: tabTitle(index) }),
         [
-          { label: t("保存"), value: "save", primary: true },
-          { label: t("不保存"), value: "discard" },
-          { label: t("取消"), value: "cancel" },
+          { label: t("Save"), value: "save", primary: true },
+          { label: t("Don't Save"), value: "discard" },
+          { label: t("Cancel"), value: "cancel" },
         ],
-        t("关闭标签"),
+        t("Close Tab"),
       );
       if (choice === null || choice === "cancel") return;
       if (choice === "save") {
@@ -794,13 +1093,13 @@
       const dirtyOthers = tabs.filter((_tab, i) => i !== keepIndex && tabDirty(i)).length;
       if (dirtyOthers > 0) {
         const choice = await askChoice(
-          t("另有 {n} 个标签有未保存的修改，关闭其他标签将丢弃这些修改。", { n: dirtyOthers }),
+          t("{n} other tab(s) have unsaved changes that will be discarded. Continue?", { n: dirtyOthers }),
           [
-            { label: t("全部保存"), value: "save", primary: true },
-            { label: t("不保存"), value: "discard" },
-            { label: t("取消"), value: "cancel" },
+            { label: t("Save All"), value: "save", primary: true },
+            { label: t("Don't Save"), value: "discard" },
+            { label: t("Cancel"), value: "cancel" },
           ],
-          t("关闭其他标签"),
+          t("Close Other Tabs"),
         );
         if (choice === null || choice === "cancel") return;
         if (choice === "save") {
@@ -808,7 +1107,7 @@
           for (let i = 0; i < tabs.length; i++) {
             if (i === keepIndex || !tabDirty(i)) continue;
             await activateTab(i);
-            await saveFile();
+            await saveFile(true); // 外层已置 busy：强制保存，否则会被守卫拦下
             if (dirty) return; // 没保存成功：不关
           }
         }
@@ -830,6 +1129,88 @@
     }
   }
 
+  /**
+   * 批量关闭给定下标集合（标签右键「关闭右侧/左侧标签」）。
+   *
+   * 与 closeOtherTabs 守同样的底线：
+   * 1. 逐个检测每个待关闭标签的保存状态（tabDirty），有任一未保存就先弹一次确认
+   *    （全部保存 / 不保存 / 取消）；
+   * 2. 「全部保存」中途失败（取消了另存为、或写盘报错）就整体放弃，一个标签都不关。
+   */
+  async function closeTabsAt(indices: number[], title: string): Promise<void> {
+    if (busy) return;
+    const targets = [...new Set(indices)]
+      .filter((i) => i >= 0 && i < tabs.length)
+      .sort((a, b) => a - b);
+    if (targets.length === 0) return;
+    busy = true;
+    try {
+      captureActiveTab();
+      const keepId = tabs[activeIndex]?.id; // 记住用户原本停留的标签，关完后尽量回到它
+
+      const dirtyTargets = targets.filter((i) => tabDirty(i));
+      if (dirtyTargets.length > 0) {
+        const choice = await askChoice(
+          t("{n} tab(s) have unsaved changes that will be discarded. Continue?", { n: dirtyTargets.length }),
+          [
+            { label: t("Save All"), value: "save", primary: true },
+            { label: t("Don't Save"), value: "discard" },
+            { label: t("Cancel"), value: "cancel" },
+          ],
+          title,
+        );
+        if (choice === null || choice === "cancel") return;
+        if (choice === "save") {
+          // 逐个切过去保存：下标在保存期间不变（此时还没删标签）
+          for (const i of dirtyTargets) {
+            await activateTab(i);
+            await saveFile(true); // 外层已置 busy：强制保存，否则会被守卫拦下
+            if (dirty) return; // 没保存成功：不关
+          }
+        }
+      }
+
+      // 从后往前删，避免下标漂移
+      const remove = new Set(targets);
+      for (let i = tabs.length - 1; i >= 0; i--) {
+        if (!remove.has(i)) continue;
+        const tab = tabs[i]!;
+        void deleteRecovery(tab.draftId).catch(() => {}); // 标签没了，它的草稿也该清掉
+        tabs.splice(i, 1);
+      }
+
+      const keptIndex = keepId === undefined ? -1 : tabs.findIndex((tab) => tab.id === keepId);
+      if (tabs.length === 0) {
+        tabs.push(createTab());
+        await activateTab(0);
+      } else if (keptIndex >= 0) {
+        await activateTab(keptIndex);
+      } else {
+        // 原本停留的标签也被关掉了：落到最靠近的一个（优先被关集合的右邻，越界则最左）
+        await activateTab(Math.min(targets[0]!, tabs.length - 1));
+      }
+      void saveSession();
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** 标签右键：关闭某标签右侧的全部标签（集合为空时不执行） */
+  function closeTabsRight(index: number): void {
+    const indices: number[] = [];
+    for (let i = index + 1; i < tabs.length; i++) indices.push(i);
+    if (indices.length === 0) return;
+    void closeTabsAt(indices, t("Close Tabs to the Right"));
+  }
+
+  /** 标签右键：关闭某标签左侧的全部标签（集合为空时不执行） */
+  function closeTabsLeft(index: number): void {
+    const indices: number[] = [];
+    for (let i = 0; i < index; i++) indices.push(i);
+    if (indices.length === 0) return;
+    void closeTabsAt(indices, t("Close Tabs to the Left"));
+  }
+
   /** 标签右键：记录屏幕坐标与被右键的标签（浮层用固定定位，不受标签栏滚动影响） */
   function openTabMenu(e: MouseEvent, index: number): void {
     e.preventDefault();
@@ -841,13 +1222,84 @@
     };
   }
 
-  /** 标签右键菜单的动作：先收浮层再执行，免得确认对话框被浮层压住 */
-  function runTabMenu(close: boolean): void {
+  /**
+   * 标签右键菜单的动作：先收浮层再执行，免得确认对话框被浮层压住。
+   *
+   * 关闭类动作作用于被右键的那个标签、无需切换；其余都是「文档级」操作（打开文件位置 /
+   * 保存 / 另存为 / 文件属性），先把该标签切为活跃再执行，让上下文与操作对象一致。
+   */
+  async function runTabMenu(
+    action: "close" | "closeOther" | "closeRight" | "closeLeft" | "reveal" | "save" | "saveAs" | "properties",
+  ): Promise<void> {
     const menu = tabMenu;
     tabMenu = null;
     if (!menu) return;
-    if (close) void closeTab(menu.index);
-    else void closeOtherTabs(menu.index);
+    if (action === "close") return void closeTab(menu.index);
+    if (action === "closeOther") return void closeOtherTabs(menu.index);
+    if (action === "closeRight") return closeTabsRight(menu.index);
+    if (action === "closeLeft") return closeTabsLeft(menu.index);
+
+    // 文档级操作：先切到被右键的标签（避免对错误的文档下手）
+    if (menu.index !== activeIndex) await activateTab(menu.index);
+    if (action === "reveal") return void revealInExplorer();
+    if (action === "save") return void saveFile();
+    if (action === "saveAs") return void saveFileAs();
+    if (action === "properties") return void showFileInfo();
+  }
+
+  /**
+   * 文档区右键菜单：文档自身支持书签（代码 / Markdown）时自绘一套「标准编辑项 + 添加为书签」。
+   * HTML 模式保留原生菜单（iframe / 源码 textarea 有自己的交互），不接管。
+   */
+  function openDocMenu(e: MouseEvent): void {
+    if (docKind === "html") return;
+    e.preventDefault();
+    // 贴边时往回缩，免得菜单被窗口边缘截掉
+    docMenu = {
+      x: Math.min(e.clientX, window.innerWidth - 170),
+      y: Math.min(e.clientY, window.innerHeight - 190),
+    };
+  }
+
+  /** 当前（含代码模式）选中文字，供右键菜单「复制 / 剪切」判断有无可选内容 */
+  function docSelectionText(): string {
+    return docKind === "code" ? getCodeSelectionText() : getEditorSelection();
+  }
+
+  /** 文档区右键菜单的动作：收浮层后按当前文档类型分发到对应编辑器 */
+  async function runDocMenu(action: "cut" | "copy" | "paste" | "selectAll" | "bookmark"): Promise<void> {
+    docMenu = null;
+    if (action === "bookmark") return void addBookmark();
+    if (action === "selectAll") {
+      if (docKind === "code") selectAllCode();
+      else selectAllEditorContent();
+      return;
+    }
+    // 阅读模式下不允许改写正文（剪切 / 粘贴）
+    if (browseMode && (action === "cut" || action === "paste")) return;
+    if (docKind === "code") {
+      if (action === "copy" || action === "cut") {
+        const sel = getCodeSelectionText();
+        if (!sel) return;
+        try {
+          await writeClipboardText(sel);
+          if (action === "cut") deleteCodeSelection();
+        } catch (e) {
+          await showError(t(action === "cut" ? "Failed to cut: " : "Failed to copy: "), e);
+        }
+        return;
+      }
+      try {
+        insertCodeText(await readClipboardText());
+      } catch (e) {
+        await showError(t("Failed to paste: "), e);
+      }
+      return;
+    }
+    // Markdown：复用编辑菜单既有剪贴板通路
+    if (action === "cut") return void cutSelection();
+    if (action === "copy") return void copySelection();
+    return void pasteClipboard();
   }
 
   /** 标签栏滚轮：竖向滚动转成横向（标签超出宽度时才接管） */
@@ -907,7 +1359,7 @@
   }
 
   function formatTime(ms: number | null): string {
-    return ms === null ? t("未知") : new Date(ms).toLocaleString("zh-CN", { hour12: false });
+    return ms === null ? t("Unknown") : new Date(ms).toLocaleString("zh-CN", { hour12: false });
   }
 
   // ---- 侧边栏数据：大纲 + 文件属性 ----
@@ -921,6 +1373,17 @@
     if (docKind === "code") return codeText();
     if (docKind === "html") return htmlSource;
     return getEditorValue();
+  }
+
+  /**
+   * 写盘 / 上云专用的正文：在 currentText() 的基础上按当前文档的行尾风格还原 EOL。
+   *
+   * Markdown 走 Vditor，取值由 DOM 反推（Lute 的 VditorIRDOM2Md），行尾恒为 LF；
+   * HTML 源码、CodeMirror 也各有自己的行尾习惯。统一在这里还原成文档原有的 CRLF / LF，
+   * 打开一份 CRLF 文件再保存就不会被悄悄改成 LF。
+   */
+  function textForDisk(): string {
+    return applyEol(currentText(), docEol);
   }
 
   /**
@@ -943,18 +1406,19 @@
     // 属性面板与状态栏同源同刻取值，两处数字不会互相打架
     updateStats(text, value);
     const rows: [string, string][] = [
-      [t("文件名"), currentPath ? fileName(currentPath) : t("未命名")],
-      [t("位置"), currentPath ?? t("尚未保存到磁盘")],
+      [t("File name"), currentPath ? fileName(currentPath) : currentRemote ? fileName(currentRemote) : t("Untitled")],
+      // 云端文档没有本地路径：位置直接显示远端路径，便于确认编辑的是哪份云端文件
+      [t("Location"), currentPath ?? currentRemote ?? t("Not saved to disk yet")],
     ];
 
     if (currentPath) {
       try {
         const info = await invoke<{ size: number; created: number | null; modified: number | null }>("get_file_info", { path: currentPath });
-        rows.push([t("大小"), t("{size}（{bytes} 字节）", { size: formatSize(info.size), bytes: info.size.toLocaleString() })]);
-        rows.push([t("创建时间"), formatTime(info.created)]);
-        rows.push([t("修改时间"), formatTime(info.modified)]);
+        rows.push([t("Size"), t("{size} ({bytes} bytes)", { size: formatSize(info.size), bytes: info.size.toLocaleString() })]);
+        rows.push([t("Created"), formatTime(info.created)]);
+        rows.push([t("Modified"), formatTime(info.modified)]);
       } catch (e) {
-        rows.push([t("磁盘信息"), e instanceof Error ? e.message : String(e)]);
+        rows.push([t("Disk info"), e instanceof Error ? e.message : String(e)]);
       }
     }
 
@@ -966,15 +1430,15 @@
       // 注意：循环变量不要与上面的 value 同名——同名遮蔽虽在源码层合法，
       // 但压缩后会被重命名成同一个标识符，for-of 的迭代表达式会踩到 TDZ 直接抛错
       for (const [field, text] of parseFrontMatter(value)) {
-        rows.push([t("头部字段 {field}", { field }), text || t("（空）")]);
+        rows.push([t("Front matter field {field}", { field }), text || t("(empty)")]);
       }
     }
     rows.push(
-      [t("字数"), wordCount.toLocaleString()],
-      [t("字符数"), charCount.toLocaleString()],
-      [t("行数"), lineCount.toLocaleString()],
-      [t("编码"), encodingLabel(encoding)],
-      [t("格式"), `${format}${dirty ? t("（有未保存的修改）") : ""}`],
+      [t("Words"), wordCount.toLocaleString()],
+      [t("Characters"), charCount.toLocaleString()],
+      [t("Lines"), lineCount.toLocaleString()],
+      [t("Encoding"), t(encodingLabel(encoding))],
+      [t("Format"), `${format}${dirty ? t("(unsaved changes)") : ""}`],
     );
     fileProps = rows;
   }
@@ -1131,16 +1595,16 @@
   function toggleHtmlScripts(): void {
     if (docKind !== "html") return;
     syncHtmlFromPreview(); // 换沙箱会销毁当前 DOM，先保住改动
-    htmlScripts = !htmlScripts;
+    setCurrentHtmlScripts(!htmlScripts); // 按标签保存：只改当前标签的开关
     // 执行脚本时父窗口读不到文档，预览也就无法可编辑——previewEditable 里已含这一条
-    previewMutated = false;
-    previewKey += 1;
+    rebuildPreview(previewDoc); // 沙箱模式变了，必然重建 iframe（顺带复位 previewMutated）
     void refreshFileProps();
   }
 
   // ---- 窗口标题 ----
   async function updateTitle(): Promise<void> {
-    const name = currentPath ? fileName(currentPath) : t("未命名");
+    // 云端文档没有本地路径，用远端文件名做标题；两者都没有才是「未命名」
+    const name = currentPath ? fileName(currentPath) : currentRemote ? fileName(currentRemote) : t("Untitled");
     const mark = dirty ? " ●" : "";
     await getCurrentWindow().setTitle(`${name}${mark} - Sticho`);
   }
@@ -1177,8 +1641,8 @@
   async function restoreHistoryVersion(file: string): Promise<void> {
     if (!currentPath) return;
     const ok = await confirmDialog(
-      t("用该历史版本覆盖当前编辑内容？当前磁盘上的版本会先留一份档，可再回滚。"),
-      { title: "Sticho", kind: "warning", okLabel: t("恢复"), cancelLabel: t("取消") },
+      t("Overwrite the current editor content with this version? The version currently on disk will be archived first, so you can roll back again."),
+      { title: "Sticho", kind: "warning", okLabel: t("Restore"), cancelLabel: t("Cancel") },
     );
     if (!ok) return;
     try {
@@ -1186,16 +1650,21 @@
       if (docKind === "html") {
         htmlSource = content;
         previewDoc = content;
-        previewKey += 1;
-        previewMutated = false;
+        rebuildPreview(content); // 正文变了才重建 iframe
+      } else if (docKind === "code") {
+        // 代码文档同样要把恢复的内容写回编辑器（此前漏了这条分支，恢复对代码文件不生效）
+        await showCodeDoc(content, currentPath);
       } else {
         setEditorValue(content);
       }
       dirty = true; // 恢复结果需要保存才写回磁盘，避免误覆盖
+      // 重置外部变更比对基准：留档 / 读取历史版本会触碰磁盘，若不刷新基准，
+      // 5 秒轮询会把这次恢复当成「文件被外部修改」立刻误报（且此时 dirty=true 会弹三选框）。
+      await syncDiskMtime(currentPath);
       await refreshHistory();
       await updateTitle();
     } catch (e) {
-      await showError(t("恢复历史版本失败："), e);
+      await showError(t("Failed to restore the version: "), e);
     }
   }
 
@@ -1206,10 +1675,10 @@
    * 因此这里用一个二选一对话框承接（复用 askChoice），不改动菜单渲染逻辑。
    */
   async function historyVersionMenu(file: string): Promise<void> {
-    const pick = await askChoice(t("对该历史版本的操作"), [
-      { label: t("查看与当前内容的差异"), value: "diff", primary: true },
-      { label: t("用该版本覆盖当前编辑内容"), value: "restore" },
-    ], t("文件历史"));
+    const pick = await askChoice(t("Actions for this version"), [
+      { label: t("Compare with current content"), value: "diff", primary: true },
+      { label: t("Overwrite current editor content with this version"), value: "restore" },
+    ], t("File History"));
     if (pick === "diff") await openHistoryDiff(file);
     else if (pick === "restore") await restoreHistoryVersion(file);
   }
@@ -1221,13 +1690,13 @@
       const oldText = await readHistory(currentPath, file);
       const newText = currentText();
       diffView = {
-        title: t("版本差异"),
-        leftLabel: t("历史版本"),
-        rightLabel: t("当前内容"),
+        title: t("Version Comparison"),
+        leftLabel: t("History"),
+        rightLabel: t("Current Content"),
         lines: diffLines(oldText, newText),
       };
     } catch (e) {
-      await showError(t("读取历史版本失败："), e);
+      await showError(t("Failed to read the version: "), e);
     }
   }
 
@@ -1244,6 +1713,22 @@
     encoding?: string;
   }): Promise<void> {
     const { content, kind, path } = payload;
+    // 取回草稿前先查一次原文件：若它在本草稿保存之后又被外部改过，明确提示一次，
+    // 免得用户以为恢复出来的就是磁盘上的最新内容（disk 是毫秒，草稿 saved_at 是 Unix 秒）。
+    if (path) {
+      const [meta, disk] = await Promise.all([
+        listRecovery()
+          .then((list) => list.find((d) => d.path === path && d.kind === kind))
+          .catch(() => undefined),
+        readDiskMtime(path).catch(() => null),
+      ]);
+      if (meta && disk !== null && disk > meta.saved_at * 1000) {
+        await messageDialog(
+          t("The original file has been updated externally since this draft was saved. The recovered content may not include those changes."),
+          { title: "Sticho", kind: "warning" },
+        );
+      }
+    }
     await loadIntoFreshTab(async () => {
       docKind = kind === "html" ? "html" : kind === "code" ? "code" : "markdown";
       currentPath = path;
@@ -1254,10 +1739,9 @@
       if (docKind === "html") {
         htmlSource = content;
         previewDoc = content;
-        previewKey += 1;
-        previewMutated = false;
         htmlView = "preview";
-        htmlScripts = false;
+        setCurrentHtmlScripts(false);
+        rebuildPreview(content);
       } else if (docKind === "code") {
         await showCodeDoc(content, path);
       } else {
@@ -1273,16 +1757,16 @@
   async function exportDiagnosticsReport(): Promise<void> {
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     const path = await saveDialog({
-      title: t("导出诊断信息"),
-      defaultPath: `Sticho-诊断-${stamp}.txt`,
-      filters: [{ name: t("文本文件"), extensions: ["txt"] }],
+      title: t("Export Diagnostics"),
+      defaultPath: `Sticho-diagnostics-${stamp}.txt`,
+      filters: [{ name: t("Text File"), extensions: ["txt"] }],
     });
     if (!path) return;
     try {
       await exportDiagnostics(path);
-      await messageDialog(t("诊断信息已导出：\n{path}", { path }), { title: "Sticho", kind: "info" });
+      await messageDialog(t("Diagnostics exported to:\n{path}", { path }), { title: "Sticho", kind: "info" });
     } catch (e) {
-      await showError(t("导出诊断信息失败："), e);
+      await showError(t("Failed to export diagnostics: "), e);
     }
   }
 
@@ -1337,7 +1821,7 @@
       // 失效条目（文件已被移动/删除）：从列表移除并告知
       recentFiles = recentFiles.filter((p) => p !== path);
       await saveSetting("recentFiles", recentFiles);
-      await showError(t("打开失败（已从最近列表移除）："), e);
+      await showError(t("Failed to open (removed from the recent list): "), e);
     } finally {
       busy = false;
     }
@@ -1385,6 +1869,9 @@
     const key = codeLangKey(currentPath);
     if (input === undefined) delete codeLangOverrides[key];
     else codeLangOverrides[key] = input;
+    // 持久化语言覆盖：此前只存内存、重启就丢，用户设过的语言每次都要重设。
+    // 存整份快照（展开成普通对象再序列化），避免把响应式代理写进配置。
+    await saveSetting("codeLangOverrides", { ...codeLangOverrides });
     refreshCodeLangLabel(currentPath);
     await showCodeEditor(currentText(), currentPath);
   }
@@ -1399,6 +1886,7 @@
       paragraphFocus: paragraphFocus,
       dark: theme === "dark",
       lineNumbers: showLineNumbers,
+      wrap: autoWrap,
       readonly: browseMode,
       onChange: syncFromCode,
       onCursor: (line, column) => {
@@ -1410,11 +1898,17 @@
     };
   }
 
-  /** 阅读排版的字号 / 行距同样服务代码视图（与 Markdown 共用同一份设置） */
+  /**
+   * 阅读排版落到代码视图：只取字号 / 行距 / 背景。
+   *
+   * 字体固定等宽栈、文字色由语法高亮决定，所以用户设的「字体」「文字颜色」在代码视图
+   * 里不生效（需求约定）；「页面背景」则与 Markdown / 纯文本一致地生效。
+   */
   function applyCodeReaderStyle(): void {
     const style: CodeReaderStyle = {};
     if (readerStyle.fontSize) style.fontSize = readerStyle.fontSize;
     if (readerStyle.lineHeight) style.lineHeight = readerStyle.lineHeight;
+    if (readerStyle.background) style.background = readerStyle.background;
     setCodeReaderStyle(style);
   }
 
@@ -1498,12 +1992,34 @@
     if (src.trim() === "") return;
     const res = fn(src);
     if (!res.ok) {
-      void messageDialog(res.error, { title: t("代码工具执行失败"), kind: "error" });
+      void messageDialog(t(res.error), { title: t("Code tool failed"), kind: "error" });
       return;
     }
     if (selected !== "") replaceCodeSelection(res.text);
     else setCodeValue(res.text);
     syncFromCode();
+  }
+
+  /**
+   * 执行一个文本工具（批量去空行、行尾空白、中英文混排加/去空格等）。
+   *
+   * 面向**整篇文档**（这些工具本身就是「批量」语义），三种文档模式都可用；
+   * 写入方式按当前内核分派，撤销栈各留一步。超大代码文件是只读分节视图，菜单已置灰。
+   */
+  function applyTextTool(fn: (src: string) => string): void {
+    const src = currentText();
+    if (src.trim() === "") return;
+    const text = fn(src);
+    if (text === src) return; // 无实际变化就不写回，免得平白多一步撤销
+    if (docKind === "code") {
+      setCodeValue(text);
+      syncFromCode();
+    } else if (docKind === "html") {
+      onHtmlInput(text);
+    } else {
+      setEditorValue(text);
+      syncFromEditor();
+    }
   }
 
   // ---- 核心文件操作（「路径内核」，菜单对话框 / 拖拽 / 最近列表三方复用）----
@@ -1516,8 +2032,10 @@
   async function openCodePath(path: string): Promise<void> {
     const file = await readTextFile(path);
     currentPath = path;
+    currentRemote = null; // 打开本地文件：解除上一个文档的云端绑定
     dirty = false;
     encoding = file.encoding;
+    docEol = detectEol(file.content); // 记下原文件的行尾风格，保存时还原
     htmlSource = "";
     previewDoc = "";
     previewMutated = false;
@@ -1535,9 +2053,11 @@
     const file = await readTextFile(path);
     docKind = "markdown"; // 打开 Markdown 文档：退出 HTML 文档模式
     currentPath = path;
+    currentRemote = null; // 打开本地文件：解除上一个文档的云端绑定
     setDocumentPath(path); // 正文里的相对路径图片要按文档所在目录换算成 asset URL
     dirty = false;
     encoding = file.encoding;
+    docEol = detectEol(file.content); // 记下原文件的行尾风格，保存时还原
     setEditorValue(file.content);
     treeRoot = parentDir(path);
     await updateTitle();
@@ -1557,13 +2077,15 @@
     docKind = "html";
     htmlSource = file.content;
     previewDoc = file.content;
-    previewKey += 1; // 强制重建 iframe：重新打开同一文件时 srcdoc 可能没变
-    previewMutated = false;
     htmlView = "preview";
-    htmlScripts = false; // 执行脚本按文档逐个开启，不跨文档沿用
+    setCurrentHtmlScripts(false); // 执行脚本按文档逐个开启，不跨文档沿用
+    // 正文或沙箱模式真的变了才重建：重新打开同一文件且内容未变时无需无谓重建
+    rebuildPreview(file.content);
     currentPath = path;
+    currentRemote = null; // 打开本地文件：解除上一个文档的云端绑定
     dirty = false;
     encoding = file.encoding;
+    docEol = detectEol(file.content); // 记下原文件的行尾风格，保存时还原
     treeRoot = parentDir(path);
     await updateTitle();
     await pushRecentFile(path);
@@ -1576,8 +2098,8 @@
     if (docKind !== "html") return;
     // 这条路径有损：CSS 布局、SVG 图表、表格样式都无法用 Markdown 表达
     const ok = await confirmDialog(
-      t("转为 Markdown 后，文档的样式、布局、图表等 HTML 排版信息会丢失，且无法再恢复成原来的渲染效果。\n\n原 .html 文件不会被改动，转换结果是一个未保存的新文档。是否继续？"),
-      { title: "Sticho", kind: "warning", okLabel: t("转为 Markdown"), cancelLabel: t("取消") },
+      t("Converting to Markdown will lose the document's styling, layout, charts and other HTML formatting, and the original rendering cannot be restored.\n\nThe original .html file will not be modified; the result is a new, unsaved document. Continue?"),
+      { title: "Sticho", kind: "warning", okLabel: t("Convert to Markdown"), cancelLabel: t("Cancel") },
     );
     if (!ok) return;
 
@@ -1590,6 +2112,7 @@
       setDocumentPath(null);
       dirty = true;
       encoding = "utf-8"; // 转换结果是新生成的文本，按 UTF-8 保存
+      docEol = "\n"; // 新生成的文本用 LF
       setEditorValue(md);
       diskMtime = null; // 新文档尚未落盘
       void updateTitle();
@@ -1604,8 +2127,8 @@
     try {
       const picked = await openDialog({
         multiple: false,
-        title: t("导入 HTML 文档"),
-        filters: [{ name: t("HTML 文档"), extensions: ["html", "htm"] }],
+        title: t("Import HTML Document"),
+        filters: [{ name: t("HTML Document"), extensions: ["html", "htm"] }],
       });
       if (typeof picked !== "string") return; // 用户取消
       const file = await readTextFile(picked);
@@ -1616,13 +2139,14 @@
         setDocumentPath(null);
         dirty = true;
         encoding = "utf-8";
+        docEol = "\n"; // 新生成的文本用 LF
         setEditorValue(md);
         await updateTitle();
         await pushRecentFile(picked);
         refreshSideNow();
       });
     } catch (e) {
-      await showError(t("导入 HTML 失败："), e);
+      await showError(t("Failed to import HTML: "), e);
     } finally {
       busy = false;
     }
@@ -1630,6 +2154,26 @@
 
   /** Pandoc 官方安装页（自动下载不可用时的兜底出口） */
   const PANDOC_PAGE = "https://pandoc.org/installing.html";
+
+  /** Microsoft Edge WebView2 Runtime 官方下载页（本软件运行所依赖的渲染内核） */
+  const WEBVIEW2_PAGE = "https://developer.microsoft.com/microsoft-edge/webview2/";
+
+  /**
+   * 帮助菜单「下载支持组件…」：按需前往官网页下载 / 更新本软件的两个可选支持组件。
+   * pandoc 负责 Word / LaTeX / Epub 转换，WebView2 是本软件运行依赖的渲染内核。
+   */
+  async function downloadSupportComponents(): Promise<void> {
+    const choice = await askChoice(
+      t("Sticho uses two optional support components. Choose one to open its official download page:"),
+      [
+        { label: t("Pandoc (Word / LaTeX / Epub conversion)"), value: "pandoc", primary: true },
+        { label: t("Microsoft Edge WebView2 Runtime"), value: "webview" },
+      ],
+      t("Download Support Components"),
+    );
+    if (choice === "pandoc") await openUrl(PANDOC_PAGE);
+    else if (choice === "webview") await openUrl(WEBVIEW2_PAGE);
+  }
 
   /**
    * 下载安装 Pandoc；失败时询问是否转跳官网。
@@ -1649,8 +2193,8 @@
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       const go = await confirmDialog(
-        t("自动安装失败：\n{detail}\n\n是否打开官网下载页面手动安装？", { detail }),
-        { title: "Sticho", kind: "warning", okLabel: t("前往官网"), cancelLabel: t("取消") },
+        t("Automatic installation failed:\n{detail}\n\nOpen the official download page to install manually?", { detail }),
+        { title: "Sticho", kind: "warning", okLabel: t("Visit Website"), cancelLabel: t("Cancel") },
       );
       if (go) await openUrl(PANDOC_PAGE);
       return false;
@@ -1677,18 +2221,18 @@
     if (version) return; // 已安装（含系统 PATH 里自装的 pandoc）
 
     const choice = await askChoice(
-      t("未检测到 Pandoc 转换引擎。\n\n它用于「导入 Word」与「导出 LaTeX / Epub」，约 35MB，只需安装一次；不安装不影响其它功能。"),
+      t("Pandoc conversion engine not found.\n\nIt is used by “Import Word” and “Export LaTeX / Epub” (about 35 MB, one-time install). Skipping it does not affect other features."),
       [
-        { label: t("自动下载安装"), value: "install", primary: true },
-        { label: t("前往官网"), value: "page" },
-        { label: t("以后再说"), value: "later" },
+        { label: t("Download & Install"), value: "install", primary: true },
+        { label: t("Visit Website"), value: "page" },
+        { label: t("Maybe Later"), value: "later" },
       ],
-      t("环境检测"),
+      t("Environment Check"),
     );
 
     if (choice === "install") {
       if (await installPandoc()) {
-        await messageDialog(t("Pandoc 安装完成，现在可以使用「导入 Word」与「导出 LaTeX / Epub」了。"), {
+        await messageDialog(t("Pandoc is installed. You can now use “Import Word” and “Export LaTeX / Epub”."), {
           title: "Sticho",
           kind: "info",
         });
@@ -1705,15 +2249,15 @@
     const version = await invoke<string | null>("check_pandoc");
     if (version) return true;
     const ok = await confirmDialog(
-      t("「{reason}」需要 Pandoc 转换引擎（约 35MB，从官方渠道下载到本机，只需一次）。\n现在下载吗？", { reason }),
-      { title: "Sticho", kind: "info", okLabel: t("下载"), cancelLabel: t("取消") },
+      t("“{reason}” requires the Pandoc conversion engine (about 35 MB, downloaded from the official source to this machine, one time only).\nDownload it now?", { reason }),
+      { title: "Sticho", kind: "info", okLabel: t("Download"), cancelLabel: t("Cancel") },
     );
     if (!ok) return false;
     return installPandoc(); // 失败时自动给出官网兜底
   }
 
   async function importWordPath(path: string): Promise<void> {
-    if (!(await ensurePandoc(t("导入 Word")))) return;
+    if (!(await ensurePandoc(t("Import Word")))) return;
     const md = await invoke<string>("import_docx", { path });
     await loadIntoFreshTab(async () => {
       docKind = "markdown";
@@ -1721,6 +2265,7 @@
       setDocumentPath(null);
       dirty = true;
       encoding = "utf-8";
+      docEol = "\n"; // 新生成的文本用 LF
       setEditorValue(md);
       await updateTitle();
       refreshSideNow();
@@ -1736,11 +2281,12 @@
       setDocumentPath(null);
       dirty = true;
       encoding = "utf-8";
+      docEol = "\n"; // 新生成的文本用 LF
       setEditorValue(markdown);
       await updateTitle();
       refreshSideNow();
     });
-    await messageDialog(t("已导入 {n} 页。转换结果为尽力还原，建议检查标题层级与段落划分是否需要校正。", { n: pageCount }), {
+    await messageDialog(t("Imported {n} page(s). The conversion is best-effort; please check the heading levels and paragraph breaks and correct them if needed.", { n: pageCount }), {
       title: "Sticho",
       kind: "info",
     });
@@ -1753,15 +2299,15 @@
     try {
       const picked = await openDialog({
         multiple: false,
-        title: t("打开文档"),
+        title: t("Open Document"),
         filters: [
           // 默认筛选器要能看见所有能打开的文件，代码扩展名统一读 codeLang 的白名单，
           // 免得出现「能拖进来但在这个对话框里选不到」
           // .txt 已归入代码白名单、按代码视图打开，所以这里不再单列
-          { name: t("所有支持的文档"), extensions: ["md", "markdown", "html", "htm", ...CODE_EXTS_SORTED] },
+          { name: t("All Supported Documents"), extensions: ["md", "markdown", "html", "htm", ...CODE_EXTS_SORTED] },
           { name: "Markdown", extensions: ["md", "markdown"] },
           { name: "HTML", extensions: ["html", "htm"] },
-          { name: t("代码文件"), extensions: [...CODE_EXTS_SORTED] },
+          { name: t("Code File"), extensions: [...CODE_EXTS_SORTED] },
         ],
       });
       if (typeof picked !== "string") return; // 用户取消
@@ -1772,64 +2318,88 @@
         else await openPath(picked);
       });
     } catch (e) {
-      await showError(t("打开失败："), e);
+      await showError(t("Failed to open: "), e);
     } finally {
       busy = false;
     }
   }
 
-  async function saveFile(): Promise<void> {
-    if (busy) return;
-    if (currentPath === null) return saveFileAs();
+  /**
+   * 保存当前文档（Ctrl+S）。
+   *
+   * `force` 专供「关闭其他/左侧/右侧标签 → 全部保存」这类**已经在 busy 临界区内**
+   * 的批量流程调用：它们本就需要串行保存，外层已置 busy，若再被这里的 busy 守卫
+   * 拦下，保存会静默失败（旧行为即如此：Save All 实际一个都没保存、随后整体放弃）。
+   * force=true 时绕过守卫，但仍保存/恢复外层 busy，不破坏临界区。
+   */
+  async function saveFile(force = false): Promise<void> {
+    if (busy && !force) return;
+    // 云端文档：没有本地文件，按记录的远端路径直接写回云端
+    if (currentPath === null && currentRemote !== null) return saveCloudBound();
+    if (currentPath === null) return saveFileAs(force);
+    const wasBusy = busy;
     busy = true;
     try {
       syncHtmlFromPreview(); // 预览里直接编辑的改动先落回源码
       // 正文统一走 currentText()：markdown / html / code 三种内核都能写对
-      await writeTextFile(currentPath, currentText(), encoding);
+      await writeTextFile(currentPath, textForDisk(), encoding);
       dirty = false;
       await updateTitle();
       refreshSideNow();
       await syncDiskMtime(currentPath); // 自己刚写的文件，别让轮询误判成「外部变更」
-      clearRecoveryDraft(); // 磁盘已是最新，兜底草稿没意义了
+      clearRecoveryDraftsForDoc(currentPath); // 磁盘已是最新，该文档的自动保存草稿一并清空
       if (davEnabled && davVerified) syncToCloud(currentPath); // 云同步：不 await，不拖慢本地保存
     } catch (e) {
-      await showError(t("保存失败："), e);
+      await showError(t("Failed to save: "), e);
     } finally {
-      busy = false;
+      busy = wasBusy;
     }
   }
 
-  async function saveFileAs(): Promise<void> {
-    if (busy) return;
+  async function saveFileAs(force = false): Promise<void> {
+    if (busy && !force) return;
+    const wasBusy = busy;
     busy = true;
     try {
       const isHtml = docKind === "html";
       const isCode = docKind === "code";
       syncHtmlFromPreview(); // 同上：另存也要带上预览里的改动
       const picked = await saveDialog({
-        title: isHtml ? t("保存 HTML 文件") : isCode ? t("保存代码文件") : t("保存 Markdown 文件"),
+        title: isHtml ? t("Save HTML File") : isCode ? t("Save Code File") : t("Save Markdown File"),
         defaultPath: currentPath
           ? fileName(currentPath)
           : isHtml
-            ? `${t("未命名")}.html`
+            ? `${t("Untitled")}.html`
             : isCode
-              ? `${t("未命名")}.${codeExt || "txt"}`
-              : `${t("未命名")}.md`,
+              ? `${t("Untitled")}.${codeExt || "txt"}`
+              : `${t("Untitled")}.md`,
         filters: isHtml
           ? [{ name: "HTML", extensions: ["html", "htm"] }]
           : isCode
-            ? [{ name: t("代码文件"), extensions: codeExt ? [codeExt] : [...CODE_EXTS_SORTED] }]
+            ? [{ name: t("Code File"), extensions: codeExt ? [codeExt] : [...CODE_EXTS_SORTED] }]
             : [{ name: "Markdown", extensions: ["md"] }],
       });
       if (typeof picked !== "string") return; // 用户取消
       // 另存可能换扩展名（.txt → .py），而语言覆盖是按路径查的，
       // 所以「变更前」的生效语言必须在改写 currentPath 之前先取出来
       const langBefore = isCode ? effectiveCodeLangId(codeExt, currentPath) : null;
-      await writeTextFile(picked, currentText(), encoding);
+      // 另存为会换掉文档身份（未命名 → 路径 / 云端 → 本地）：先记下旧身份，
+      // 好把书签从旧 owner 迁到新路径，否则按新路径重开时书签会读不到。
+      const active = tabs[activeIndex];
+      const ownerBefore = active ? bookmarkOwner(active) : "";
+      await writeTextFile(picked, textForDisk(), encoding);
       currentPath = picked;
+      currentRemote = null; // 另存为落到本地文件：解除云端绑定，后续保存写本地
       setDocumentPath(picked); // 另存后图片落盘目录随之改变
       dirty = false;
       treeRoot = parentDir(picked);
+      // 同步刷新当前标签快照的路径与未保存状态：否则后续再保存仍会写回旧路径，
+      // 标签栏也还显示旧文件名 / 未保存圆点（与已落盘的事实不符）。
+      if (active) {
+        active.path = picked;
+        active.remote = null; // 另存为落到本地：快照里的云端绑定一并解除
+        active.dirty = false;
+      }
       // 代码文件另存成别的扩展名时语言要跟着换：高亮由语言扩展决定，
       // 只在挂载时设置，所以语言真的变了才重建一次视图（会重置光标，故加了变化判断）
       if (isCode) {
@@ -1844,12 +2414,22 @@
       await pushRecentFile(picked);
       refreshSideNow();
       await syncDiskMtime(picked); // 同上：新路径 + 新的磁盘修改时间
-      clearRecoveryDraft();
+      clearRecoveryDraftsForDoc(picked); // 另存后：该文档（含未命名时期的草稿）一律清空
+      // 书签改挂到新身份下，并清掉旧身份遗留的文件（内存里的书签此刻已是权威）。
+      // 顺序必须是「先写新键、写成功再删旧键」：反过来先删后写，一旦中途失败书签就丢了。
+      if (active) {
+        const ownerAfter = bookmarkOwner(active);
+        if (ownerBefore && ownerBefore !== ownerAfter) {
+          void persistBookmarks(active).then(() => bookmarksDelete(ownerBefore)).catch(() => {});
+        } else {
+          void persistBookmarks(active);
+        }
+      }
       if (davEnabled && davVerified) syncToCloud(picked); // 云同步同 saveFile
     } catch (e) {
-      await showError(t("保存失败："), e);
+      await showError(t("Failed to save: "), e);
     } finally {
-      busy = false;
+      busy = wasBusy;
     }
   }
 
@@ -1879,43 +2459,36 @@
   /**
    * 外部变更轮询（每 5 秒一轮，仅针对已保存到磁盘的文档）。
    *
-   * 用 get_file_info 的修改时间比对，不做文件系统监听——轮询的粒度足够覆盖
-   * 「别的编辑器 / 脚本改了同一份文件」，且没有 watcher 常驻句柄的代价。
-   * 自己保存后会把基准时间刷新（syncDiskMtime），所以不会误报。
-   * 文件被删除时读不到时间，直接跳过（不打扰用户）。
+   * 判定逻辑已抽到 lib/autoSave.ts（批次 3.3），这里只注入组件状态与回调。
    */
   async function checkExternalChange(): Promise<void> {
-    if (busy || externalChecking || currentPath === null || diskMtime === null) return;
-    // 窗口不可见（最小化 / 切到后台）时跳过：既省掉无谓的 IPC + 文件 stat，
-    // 也避免在用户看不到窗口时弹出「文件已被外部修改」的模态框。
-    if (document.visibilityState !== "visible") return;
-    const path = currentPath;
-    externalChecking = true;
-    try {
-      const mtime = await readDiskMtime(path);
-      if (mtime === null || mtime === diskMtime || currentPath !== path) return;
-      diskMtime = mtime; // 先更新基准：用户还在选的时候，下一轮不该再弹一次
-      if (!dirty) {
-        await reloadFromDisk(path); // 本地没有改动：静默跟上磁盘版本
-        return;
-      }
-      const choice = await askChoice(
-        t("文件已在外部被修改，而当前文档有未保存的改动。重新加载会丢弃这些改动。"),
-        [
-          { label: t("重新加载"), value: "reload", primary: true },
-          { label: t("保留我的"), value: "keep" },
-          { label: t("另存为…"), value: "saveas" },
-        ],
-        t("文件已在外部更改"),
-      );
-      if (choice === "reload") await reloadFromDisk(path);
-      else if (choice === "saveas") await saveFileAs();
-      // "keep"：什么都不做。本次改动仍留在编辑器里，等用户自己决定何时保存
-    } catch {
-      // 轮询失败（权限变化等）：不打扰用户，交给下一轮
-    } finally {
-      externalChecking = false;
-    }
+    await runExternalChangeCheck({
+      getBusy: () => busy,
+      getChecking: () => externalChecking,
+      getCurrentPath: () => currentPath,
+      getDiskMtime: () => diskMtime,
+      getDirty: () => dirty,
+      // 窗口不可见（最小化 / 切到后台）时跳过：既省掉无谓的 IPC + 文件 stat，
+      // 也避免在用户看不到窗口时弹出「文件已被外部修改」的模态框。
+      isVisible: () => document.visibilityState === "visible",
+      readDiskMtime,
+      reloadFromDisk,
+      saveFileAs,
+      ask: askChoice,
+      setChecking: (v) => {
+        externalChecking = v;
+      },
+      setDiskMtime: (v) => {
+        diskMtime = v;
+      },
+      labels: {
+        message: t("The file was modified externally and this document has unsaved changes. Reloading will discard them."),
+        reload: t("Reload"),
+        keep: t("Keep Mine"),
+        saveAs: t("Save As…"),
+        title: t("File Changed Externally"),
+      },
+    });
   }
 
   // ---- 编码（阶段 11）----
@@ -1937,11 +2510,11 @@
     }
 
     if (dirty) {
-      const ok = await confirmDialog(t("按新编码重新读取磁盘文件会丢弃当前未保存的修改。是否继续？"), {
+      const ok = await confirmDialog(t("Re-reading the file from disk with the new encoding will discard current unsaved changes. Continue?"), {
         title: "Sticho",
         kind: "warning",
-        okLabel: t("继续"),
-        cancelLabel: t("取消"),
+        okLabel: t("Continue"),
+        cancelLabel: t("Cancel"),
       });
       if (!ok) return;
     }
@@ -1950,13 +2523,14 @@
     try {
       const file = await readTextFile(currentPath, id ?? undefined);
       encoding = file.encoding;
+      docEol = detectEol(file.content); // 换编码重读后，行尾风格随之刷新
       dirty = false;
       if (docKind === "html") {
         htmlSource = file.content;
         previewDoc = file.content; // 重新渲染预览
-        previewKey += 1; // 编码可能没变，srcdoc 值可能相同，需强制重建
-        previewMutated = false;
-        htmlScripts = false;
+        setCurrentHtmlScripts(false);
+        // 编码可能没变（正文串相同）也需重建：previewMutated 为真时会强制重建，否则按需跳过
+        rebuildPreview(file.content);
       } else if (docKind === "code") {
         await showCodeDoc(file.content, currentPath);
       } else {
@@ -1969,12 +2543,12 @@
       // 解码时出现替换符：多半选错了编码，提示用户换一种或交给自动检测
       if (file.content.includes("\uFFFD")) {
         await messageDialog(
-          t("按「{enc}」解码时遇到无法识别的字节（已显示为 �），该编码可能不是文件的真实编码，建议改用自动检测或换一种编码。", { enc: encodingLabel(encoding) }),
+          t("Unrecognized bytes were encountered while decoding as “{enc}” (shown as a replacement character). This encoding may not be the file's real encoding; use auto-detect or another encoding.", { enc: t(encodingLabel(encoding)) }),
           { title: "Sticho", kind: "warning" },
         );
       }
     } catch (e) {
-      await showError(t("按该编码重新读取失败："), e);
+      await showError(t("Failed to re-read with that encoding: "), e);
     } finally {
       busy = false;
     }
@@ -1987,9 +2561,19 @@
     await saveSetting("sidebarVisible", visible);
   }
 
+  /**
+   * 显示 / 隐藏侧边栏。
+   *
+   * 侧边栏的可见性由「启用侧边栏」这一开关独立掌控，与下面各面板是否勾选无关：
+   * 勾选即显示、取消即隐藏（哪怕下面还勾着面板；反之哪怕一个面板都没勾也能打开）。
+   * 展开时若确实一个面板都没勾选，自动补开文件树，避免出现一片空白的侧边栏。
+   */
   const toggleSidebar = () => {
-    // 没有任何面板开启时，展开只会得到一个空侧边栏——此时「显示侧边栏」不可用
-    if (!sidebarVisible && enabledSidebarViews.length === 0) return;
+    if (!sidebarVisible && enabledSidebarViews.length === 0) {
+      const next = { ...sidebarPanels, tree: true };
+      sidebarPanels = next;
+      void saveSetting("sidebarPanels", next);
+    }
     return setSidebarVisible(!sidebarVisible);
   };
 
@@ -2001,14 +2585,36 @@
     await saveSetting("sidebarVisible", true);
   }
 
-  /** 面板的固定排列顺序：文件树 → 大纲 → 属性 → 搜索 */
-  const SIDEBAR_ORDER: SidebarView[] = ["tree", "outline", "props", "search"];
-  /** 当前开启的面板（供菜单勾选态与「是否还有内容可显示」判断） */
-  const enabledSidebarViews = $derived(SIDEBAR_ORDER.filter((v) => sidebarPanels[v]));
+  /** 侧边栏面板的固定排列顺序：文件树 → 大纲 → 书签 → 属性 → 搜索 → 云端 */
+  const SIDEBAR_ORDER: SidebarView[] = ["tree", "outline", "bookmarks", "props", "search", "cloud"];
+  /** 允许同时开启的面板数上限（超出则提示，见 sidebarLimitReached） */
+  const MAX_SIDEBAR_PANELS = 5;
+  /** 当前开启的面板（供菜单勾选态与「是否还有内容可显示」判断）。
+   *  纯文本模式（code）没有大纲，临时把 outline 从可用集合里剔除（不改用户偏好，切回 markdown 恢复）。 */
+  const enabledSidebarViews = $derived(
+    SIDEBAR_ORDER.filter((v) => sidebarPanels[v] && !(v === "outline" && docKind === "code")),
+  );
+
+  /**
+   * 开启新面板前的上限检查：已达上限则弹提示并返回 true（调用方据此中止）。
+   *
+   * 只数用户偏好（sidebarPanels 里 true 的项），不扣掉「当前文档模式下暂不可用」的大纲——
+   * 上限约束的是偏好配置本身，与当前正看哪个文档无关。
+   */
+  async function sidebarLimitReached(): Promise<boolean> {
+    const on = SIDEBAR_ORDER.filter((v) => sidebarPanels[v]).length;
+    if (on < MAX_SIDEBAR_PANELS) return false;
+    await messageDialog(
+      t("Up to {n} sidebar panels can be shown at once. Turn one off before enabling another.", { n: MAX_SIDEBAR_PANELS }),
+      { title: "Sticho", kind: "warning" },
+    );
+    return true;
+  }
 
   /** 确保某面板处于开启状态并切到它，同时把侧边栏显示出来 */
   async function showSidebarView(view: SidebarView): Promise<void> {
     if (!sidebarPanels[view]) {
+      if (await sidebarLimitReached()) return;
       const next = { ...sidebarPanels, [view]: true };
       sidebarPanels = next;
       await saveSetting("sidebarPanels", next);
@@ -2017,12 +2623,14 @@
   }
 
   /**
-   * 侧边栏面板开关（视图 → 侧边栏 的四项）。
-   * - 侧边栏收起、或该项尚未勾选：显示侧边栏并切到该面板；
+   * 侧边栏面板开关（视图 → 侧边栏 的各项）。
+   * - 侧边栏收起、或该项尚未勾选：显示侧边栏并切到该面板（已达上限时先弹提示）；
    * - 取消一项后若还有别的面板开启，且当前正显示它，则切到剩下的第一个；
-   * - 四个全取消则侧边栏自动收起。
+   * - 全部取消则侧边栏自动收起。
    */
   async function toggleSidebarPanel(view: SidebarView): Promise<void> {
+    // 纯文本模式没有大纲：入口临时不可用，点了不生效（偏好不变，切回 markdown 自动恢复）
+    if (view === "outline" && docKind === "code") return;
     // 侧边栏收起时，这一项只负责「把它显示出来并切到该面板」：若仍按勾选逻辑走，
     // 点一个已勾选的项会变成取消勾选，与「收起状态下选择即显示」的预期正好相反。
     if (!sidebarVisible || !sidebarPanels[view]) {
@@ -2037,6 +2645,14 @@
     else if (sidebarView === view) await setSidebarView(rest[0]!);
   }
 
+  // 纯文本模式没有大纲：切到 code 时若正停在大纲面板，自动落到其它可用面板；都不可用则收起侧边栏。
+  // 只调整「当前视图」，不动 sidebarPanels 里的用户偏好——切回 markdown 后大纲自然恢复。
+  $effect(() => {
+    if (docKind !== "code" || sidebarView !== "outline") return;
+    if (enabledSidebarViews.length === 0) void setSidebarVisible(false);
+    else void setSidebarView(enabledSidebarViews[0]!);
+  });
+
   /** 目录树点击文件 → 复用打开管道（按扩展名分派） */
   async function openFromTree(path: string): Promise<void> {
     if (busy) return;
@@ -2047,12 +2663,12 @@
       else if (ext === "md" || ext === "markdown") await loadIntoFreshTab(() => openPath(path));
       else if (isCodePath(path)) await loadIntoFreshTab(() => openCodePath(path));
       else
-        await messageDialog(t("目录树中仅支持打开 Markdown / HTML / 纯文本 / 代码文件（.{ext} 需要先转换）。", { ext }), {
+        await messageDialog(t("The tree only supports opening Markdown / HTML / plain-text / code files (a .{ext} file must be converted first).", { ext }), {
           title: "Sticho",
           kind: "info",
         });
     } catch (e) {
-      await showError(t("打开失败："), e);
+      await showError(t("Failed to open: "), e);
     } finally {
       busy = false;
     }
@@ -2061,10 +2677,10 @@
   /** 手动指定目录树根目录（未打开文档时也能浏览） */
   async function pickTreeRoot(): Promise<void> {
     try {
-      const picked = await openDialog({ directory: true, multiple: false, title: t("选择文件夹作为目录树根") });
+      const picked = await openDialog({ directory: true, multiple: false, title: t("Choose Folder as Tree Root") });
       if (typeof picked === "string") treeRoot = picked;
     } catch (e) {
-      await showError(t("选择文件夹失败："), e);
+      await showError(t("Failed to choose folder: "), e);
     }
   }
 
@@ -2122,7 +2738,7 @@
       await setFileAssociation(ext, next);
       assoc = { ...assoc, [ext]: next };
     } catch (e) {
-      await showError(t("设置文件关联失败："), e);
+      await showError(t("Failed to set file association: "), e);
     }
   }
 
@@ -2141,7 +2757,7 @@
       for (const ext of exts) next[ext] = enable;
       assoc = next;
     } catch (e) {
-      await showError(t("设置文件关联失败："), e);
+      await showError(t("Failed to set file association: "), e);
       await loadAssocState(); // 失败后回读真实状态，避免界面与注册表不一致
     } finally {
       assocBusy = false;
@@ -2193,10 +2809,11 @@
     const next = !contextMenu;
     assocBusy = true;
     try {
-      await setContextMenu(next);
+      // 传入当前界面语言：系统语言取不到时，Rust 侧据此决定菜单文案的中 / 英
+      await setContextMenu(next, locale);
       contextMenu = next;
     } catch (e) {
-      await showError(t("设置右键菜单失败："), e);
+      await showError(t("Failed to set context menu: "), e);
     } finally {
       assocBusy = false;
     }
@@ -2207,13 +2824,91 @@
     try {
       await openDefaultAppsSettings();
     } catch (e) {
-      await showError(t("打开系统设置失败："), e);
+      await showError(t("Failed to open system settings: "), e);
+    }
+  }
+
+  /**
+   * 清理系统写入：撤销全部文件关联（含「替代系统记事本」覆盖的格式）+ 删除右键菜单项，
+   * 使程序恢复到便携状态。先弹确认框告知影响范围，确认后执行并回读真实的关联/菜单状态。
+   */
+  async function clearSystemWrites(): Promise<void> {
+    const answer = await askChoice(
+      t(
+        "This removes all changes Sticho made to the system: it reverts every file association (including the “replace Notepad” formats) and removes the “Open with Sticho” file context-menu item. Your documents and settings are not affected. Continue?",
+      ),
+      [
+        { label: t("Clean Up"), value: "clear", primary: true },
+        { label: t("Cancel"), value: "cancel" },
+      ],
+    );
+    if (answer !== "clear") return;
+    try {
+      const warnings = await clearSystemIntegration();
+      await loadAssocState(); // 成功后回读真实状态，勾选态随之复位
+      if (warnings.length > 0) {
+        await showError(t("Cleanup incomplete: "), new Error(warnings.join("\n")));
+        return;
+      }
+      await askChoice(t("System integration has been cleaned up — Sticho is now portable again."), [
+        { label: t("OK"), value: "ok", primary: true },
+      ]);
+    } catch (e) {
+      await showError(t("Cleanup failed: "), e);
+    }
+  }
+
+  /**
+   * 一键清理全部配置文件：两次确认（第二次为后果最终警示），确认后删除配置根下的所有
+   * 用户数据（位置标记保留，位置选择不丢），随后提示重启。
+   * 内置包（内置主题 / 自带语言包 / 说明 / 欢迎页）下次启动会自动重新释放。
+   */
+  async function clearConfigFiles(): Promise<void> {
+    const first = await askChoice(
+      t(
+        "This will delete all Sticho configuration files: settings, custom themes and language packs, bookmarks, recovery drafts and version history. This cannot be undone. Continue?",
+      ),
+      [
+        { label: t("Continue"), value: "next", primary: true },
+        { label: t("Cancel"), value: "cancel" },
+      ],
+    );
+    if (first !== "next") return;
+    const second = await confirmDialog(
+      t(
+        "Final confirmation: all configuration files will be permanently deleted and cannot be recovered. Built-in themes and language packs will be restored automatically on the next launch. Delete now?",
+      ),
+      {
+        title: "Sticho",
+        kind: "warning",
+        okLabel: t("Delete All"),
+        cancelLabel: t("Cancel"),
+      },
+    );
+    if (!second) return;
+    try {
+      const warnings = await clearAllData();
+      if (warnings.length > 0) {
+        await showError(t("Cleanup incomplete: "), new Error(warnings.join("\n")));
+      }
+      const ok = await confirmDialog(
+        t("Configuration files have been cleared. The app needs to restart to rebuild them. Restart now?"),
+        {
+          title: "Sticho",
+          kind: "info",
+          okLabel: t("Restart Now"),
+          cancelLabel: t("Later"),
+        },
+      );
+      if (ok) await restartWithSaveCheck();
+    } catch (e) {
+      await showError(t("Cleanup failed: "), e);
     }
   }
 
   /** 当前文档主名（导出对话框的默认文件名） */
   function docBaseName(): string {
-    if (!currentPath) return t("未命名");
+    if (!currentPath) return t("Untitled");
     const name = fileName(currentPath);
     // 代码文件的扩展名五花八门（codeLang 里几十个），逐个列进正则不如直接砍最后一段扩展名
     if (docKind === "code") return name.replace(/\.[^.]+$/, "") || name;
@@ -2259,7 +2954,7 @@
       if (typeof picked !== "string") return; // 用户取消
       await run(picked, await exportSource(ext));
     } catch (e) {
-      await showError(t("{title}失败：", { title }), e);
+      await showError(t("{title} failed: ", { title }), e);
     } finally {
       busy = false;
     }
@@ -2268,7 +2963,7 @@
   // exportDocx / importPdf 走调用点动态加载：docx 与 pdfjs-dist 体积可观，
   // 却只有导出 Word / 导入 PDF 时才用得上，静态打进主包白白拖慢首帧
   const exportWord = () =>
-    exportAs(t("导出为 Word 文档"), "docx", t("Word 文档"), async (path, source) => {
+    exportAs(t("Export as Word Document"), "docx", t("Word Document"), async (path, source) => {
       const [{ exportDocx }, { renderMermaidToPng }] = await Promise.all([
         import("./lib/export-docx"),
         import("./lib/mermaidImage"),
@@ -2276,34 +2971,35 @@
       const { embedded, skipped } = await exportDocx(path, source, {
         baseDir: docDirPath(),
         renderMermaid: renderMermaidToPng,
+        t,
       });
       // 有图片没能嵌入时给一次汇总说明（远端图、不支持格式、相对路径解析失败等）
       if (skipped.length) {
         const list = skipped.slice(0, 8).join("\n");
-        const more = skipped.length > 8 ? t("\n…另有 {n} 张", { n: skipped.length - 8 }) : "";
+        const more = skipped.length > 8 ? t("\n…and {n} more", { n: skipped.length - 8 }) : "";
         await messageDialog(
-          t("已嵌入 {n} 张图片。以下图片未能嵌入，已回落为占位文字：\n{list}{more}", {
+          t("Embedded {n} image(s). The following images could not be embedded and fell back to placeholder text:\n{list}{more}", {
             n: embedded,
             list,
             more,
           }),
-          { title: t("导出为 Word 文档"), kind: "warning" },
+          { title: t("Export as Word Document"), kind: "warning" },
         );
       }
     });
   const exportPdfFile = () =>
-    exportAs(t("导出为 PDF 文档"), "pdf", t("PDF 文档"), (path, source) =>
-      import("./lib/export-pdf").then((m) => m.exportPdf(path, source, docBaseName())),
+    exportAs(t("Export as PDF Document"), "pdf", t("PDF Document"), (path, source) =>
+      import("./lib/export-pdf").then((m) => m.exportPdf(path, source, docBaseName(), locale)),
     );
   // HTML 文档导出 HTML：源码原样写出（走 markdown-it 会把标签转义成文本）
   const exportHtmlFile = () =>
     docKind === "html"
-      ? exportAs(t("导出为 HTML 文档"), "html", t("HTML 文档"), (path, source) => writeTextFile(path, source, encoding))
-      : exportAs(t("导出为 HTML 文档"), "html", t("HTML 文档"), (path, source) =>
-          import("./lib/export-html").then((m) => m.exportHtml(path, source)),
+      ? exportAs(t("Export as HTML Document"), "html", t("HTML Document"), (path, source) => writeTextFile(path, source, encoding))
+      : exportAs(t("Export as HTML Document"), "html", t("HTML Document"), (path, source) =>
+          import("./lib/export-html").then((m) => m.exportHtml(path, source, locale, activeEntries)),
         );
   const exportTxtFile = () =>
-    exportAs(t("导出为纯文本文件"), "txt", t("纯文本"), (path, source) =>
+    exportAs(t("Export as Plain Text File"), "txt", t("Plain Text"), (path, source) =>
       import("./lib/export-txt").then((m) => m.exportTxt(path, source)),
     );
 
@@ -2315,8 +3011,8 @@
     });
   }
 
-  const exportLatexFile = () => exportViaPandoc(t("导出为 LaTeX 文档"), "tex", t("LaTeX 文档"), "latex");
-  const exportEpubFile = () => exportViaPandoc(t("导出为 Epub 电子书"), "epub", t("Epub 电子书"), "epub");
+  const exportLatexFile = () => exportViaPandoc(t("Export as LaTeX Document"), "tex", t("LaTeX Document"), "latex");
+  const exportEpubFile = () => exportViaPandoc(t("Export as Epub E-book"), "epub", t("Epub E-book"), "epub");
 
   /**
    * 打印：交给系统打印对话框（WebView2 自带打印预览，故本软件不再自建预览）。
@@ -2331,6 +3027,7 @@
       kind: docKind,
       title: docBaseName(),
       dir: docDirPath(),
+      locale,
     });
     await m.printHtml(html);
   }
@@ -2342,13 +3039,13 @@
     try {
       const picked = await openDialog({
         multiple: false,
-        title: t("导入 Word 文档"),
-        filters: [{ name: t("Word 文档"), extensions: ["docx"] }],
+        title: t("Import Word Document"),
+        filters: [{ name: t("Word Document"), extensions: ["docx"] }],
       });
       if (typeof picked !== "string") return; // 用户取消
       await importWordPath(picked);
     } catch (e) {
-      await showError(t("导入 Word 失败："), e);
+      await showError(t("Failed to import Word: "), e);
     } finally {
       busy = false;
     }
@@ -2361,33 +3058,47 @@
     try {
       const picked = await openDialog({
         multiple: false,
-        title: t("导入 PDF 文档"),
-        filters: [{ name: t("PDF 文档"), extensions: ["pdf"] }],
+        title: t("Import PDF Document"),
+        filters: [{ name: t("PDF Document"), extensions: ["pdf"] }],
       });
       if (typeof picked !== "string") return; // 用户取消
 
       // 事前告知局限性（任务书阶段 6：明确说明扫描件不可用）
       const ok = await confirmDialog(
-        t("PDF 导入为尽力转换：仅支持文字版 PDF，扫描件（图片型 PDF）无法提取文字；表格、多栏等复杂排版可能需要人工校正。\n继续吗？"),
-        { title: "Sticho", kind: "info", okLabel: t("继续"), cancelLabel: t("取消") },
+        t("PDF import is best-effort: only text-based PDFs are supported; scanned (image-only) PDFs cannot be extracted. Tables, columns and other complex layouts may need manual correction.\nContinue?"),
+        { title: "Sticho", kind: "info", okLabel: t("Continue"), cancelLabel: t("Cancel") },
       );
       if (!ok) return;
 
       await importPdfPath(picked);
     } catch (e) {
-      await showError(t("导入 PDF 失败："), e);
+      await showError(t("Failed to import PDF: "), e);
     } finally {
       busy = false;
+    }
+  }
+
+  /** 标签右键：在资源管理器中定位当前文件（无本地路径时不动作） */
+  async function revealInExplorer(): Promise<void> {
+    const p = currentPath;
+    if (!p) return;
+    try {
+      await revealFile(p);
+    } catch (e) {
+      await showError(t("Failed to open file location: "), e);
     }
   }
 
   /** 文件属性（阶段 10；阶段 11 起与侧边栏「属性」视图共用同一份数据） */
   async function showFileInfo(): Promise<void> {
     await refreshFileProps();
-    await messageDialog(fileProps.map(([label, value]) => `${label}：${value}`).join("\n"), {
-      title: t("文件属性"),
-      kind: "info",
-    });
+    await messageDialog(
+      fileProps.map(([label, value]) => t("{label}: {value}", { label, value })).join("\n"),
+      {
+        title: t("File Properties"),
+        kind: "info",
+      },
+    );
   }
 
   async function exitApp(): Promise<void> {
@@ -2397,9 +3108,9 @@
       const count = tabs.filter((_t, i) => tabDirty(i)).length;
       const ok = await confirmDialog(
         count > 1
-          ? t("有 {n} 个标签存在未保存的修改，退出将丢弃这些修改。确定退出吗？", { n: count })
-          : t("当前文档有未保存的修改，退出将丢弃这些修改。确定退出吗？"),
-        { title: "Sticho", kind: "warning", okLabel: t("退出"), cancelLabel: t("取消") },
+          ? t("{n} tabs have unsaved changes that will be discarded on exit. Exit anyway?", { n: count })
+          : t("The current document has unsaved changes that will be discarded on exit. Exit anyway?"),
+        { title: "Sticho", kind: "warning", okLabel: t("Exit"), cancelLabel: t("Cancel") },
       );
       if (!ok) return;
     }
@@ -2416,7 +3127,7 @@
       await writeClipboardText(sel);
       deleteEditorSelection();
     } catch (e) {
-      await showError(t("剪切失败："), e);
+      await showError(t("Failed to cut: "), e);
     }
   }
 
@@ -2426,7 +3137,7 @@
     try {
       await writeClipboardText(sel);
     } catch (e) {
-      await showError(t("复制失败："), e);
+      await showError(t("Failed to copy: "), e);
     }
   }
 
@@ -2434,78 +3145,22 @@
     try {
       insertEditorText(await readClipboardText());
     } catch (e) {
-      await showError(t("粘贴失败："), e);
+      await showError(t("Failed to paste: "), e);
     }
   }
 
   // ---- 查找 / 替换（阶段 10；批次五增强为 大小写 / 全词 / 正则 + 计数 + 高亮）----
-  /** 正则元字符转义（字面量模式下把用户输入当成纯文本） */
-  function escapeRegExp(text: string): string {
-    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
+  // 纯逻辑（正则编译 / 命中收集 / 替换展开 / 高亮）已抽到 lib/findReplace.ts（批次 3.3），
+  // 这里只保留读组件状态的薄适配，调用点与行为均不变。
 
-  /**
-   * 按当前三个开关编译查找正则。
-   *
-   * 统一走正则引擎的好处：大小写、全词、正则三种匹配共用同一套「找位置」逻辑，
-   * 替换也能直接用 `String.replace` 的 `$1` 捕获组语义。
-   * 返回 null 表示正则语法有误（前端提示，不抛异常）。
-   */
+  /** 按当前三个开关编译查找正则（转发给纯函数） */
   function buildFindRegex(): RegExp | null {
-    if (!findText) return null;
-    const source = findRegex ? findText : escapeRegExp(findText);
-    // 全词匹配用自定义边界而不是 \b：\b 只认 ASCII 单词边界，中文词会被整段吞掉。
-    // 两侧字符只要不是字母数字/下划线/汉字，就算词的边界。
-    const body = findWord
-      ? `(?<![\\w\\u4e00-\\u9fff])(?:${source})(?![\\w\\u4e00-\\u9fff])`
-      : source;
-    try {
-      return new RegExp(body, findCase ? "g" : "gi");
-    } catch {
-      return null;
-    }
+    return compileFindRegex(findText, { caseSensitive: findCase, wholeWord: findWord, regex: findRegex });
   }
 
-  /** 一个 DOM 内的命中：Range 用于定位/高亮/替换，text 与 groups 供替换时展开 `$1` */
-  type DomHit = { range: Range; text: string; groups: string[] };
-
-  /**
-   * 在给定根节点内收集全部命中。
-   *
-   * 只遍历文本节点，所以「被标签切开的短语」不匹配（如 `**加粗**` 里的跨标记短语），
-   * 与阶段 10 的既有取舍一致。返回 null 表示正则语法有误。
-   */
+  /** 用当前查找正则在给定根节点内收集命中 */
   function domHits(root: Node | null, doc: Document): DomHit[] | null {
-    const re = buildFindRegex();
-    if (!re || !root) return re ? [] : null;
-
-    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        // script/style/noscript 里的文本不可见，不该被命中
-        return (node as Text).parentElement?.closest("script,style,noscript")
-          ? NodeFilter.FILTER_REJECT
-          : NodeFilter.FILTER_ACCEPT;
-      },
-    });
-
-    const hits: DomHit[] = [];
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const textNode = node as Text;
-      const hay = textNode.data;
-      re.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(hay)) !== null) {
-        if (m[0].length === 0) {
-          re.lastIndex++; // 零宽匹配（如 `a*`）不推进 lastIndex 会死循环
-          continue;
-        }
-        const range = doc.createRange();
-        range.setStart(textNode, m.index);
-        range.setEnd(textNode, m.index + m[0].length);
-        hits.push({ range, text: m[0], groups: m.slice(1).map((g) => g ?? "") });
-      }
-    }
-    return hits;
+    return collectDomHits(root, doc, buildFindRegex());
   }
 
   /** 编辑器正文内的命中（Markdown 模式） */
@@ -2513,44 +3168,8 @@
     return domHits(getEditorContentElement(), document);
   }
 
-  // ---- 命中高亮（CSS Custom Highlight API，零 DOM 侵入）----
-  // 不用包裹 <mark>：那会改 DOM，Vditor 下一次 input 就会把包裹元素当正文回写进 Markdown。
-  // Custom Highlight 只登记 Range，正文结构与回写结果都不受影响。
-  type HighlightCtor = new (...ranges: Range[]) => unknown;
-  type HighlightRegistry = { set(name: string, value: unknown): void; delete(name: string): void };
-
-  /** 运行时能力：WebView2 的 Chromium ≥105 才有（更早版本返回 undefined，高亮降级为无） */
-  function highlightRegistry(): HighlightRegistry | null {
-    return (CSS as unknown as { highlights?: HighlightRegistry }).highlights ?? null;
-  }
-
-  function highlightCtor(): HighlightCtor | null {
-    return (window as unknown as { Highlight?: HighlightCtor }).Highlight ?? null;
-  }
-
-  /** 登记高亮：普通命中的那一组与「当前」那处分两个名字，各用各的颜色 */
-  function setHighlightRanges(ranges: Range[], current: Range | null): void {
-    const registry = highlightRegistry();
-    const Ctor = highlightCtor();
-    if (!registry || !Ctor) return;
-    if (ranges.length > 0) registry.set("md-find", new Ctor(...ranges));
-    else registry.delete("md-find");
-    if (current) registry.set("md-find-current", new Ctor(current));
-    else registry.delete("md-find-current");
-  }
-
-  /** 给全部命中上色，当前命中的那一处用另一种颜色区分 */
-  function applyFindHighlights(hits: DomHit[], currentIdx: number): void {
-    const others = hits.filter((_, i) => i !== currentIdx).map((h) => h.range);
-    setHighlightRanges(others, currentIdx >= 0 ? (hits[currentIdx]?.range ?? null) : null);
-  }
-
-  /** 清掉高亮（关闭查找栏、切换文档、重新输入时都要清，否则会留下过期 Range） */
-  function clearFindHighlights(): void {
-    const registry = highlightRegistry();
-    registry?.delete("md-find");
-    registry?.delete("md-find-current");
-  }
+  // 命中高亮（setHighlightRanges / applyFindHighlights / clearFindHighlights）见 lib/findReplace.ts：
+  // 用的是 CSS Custom Highlight API，零 DOM 侵入，与组件状态无关。
 
   /**
    * 按当前选项与文档形态刷新计数显示，并在能高亮的场合顺带上色。
@@ -2571,7 +3190,7 @@
       }
       const n = setCodeFind(codeFindOptions());
       findIdx = -1;
-      findStatus = n === null ? t("正则表达式无效") : `0 / ${n}`;
+      findStatus = n === null ? t("Invalid regular expression") : `0 / ${n}`;
       return;
     }
 
@@ -2583,16 +3202,16 @@
     if (docKind === "html") {
       if (htmlView === "source") {
         const hits = stringHits(htmlSource);
-        findStatus = hits === null ? t("正则表达式无效") : `0 / ${hits.length}`;
+        findStatus = hits === null ? t("Invalid regular expression") : `0 / ${hits.length}`;
         return;
       }
       // 预览视图沿用「选中 + 滚动」的方案（iframe 里没有应用样式，登记高亮也看不见）
       if (!previewReachable()) {
-        findStatus = t("执行脚本时不支持预览查找");
+        findStatus = t("Preview search is unavailable while scripts are enabled");
         return;
       }
       const hits = previewHits();
-      findStatus = hits === null ? t("正则表达式无效") : `0 / ${hits.length}`;
+      findStatus = hits === null ? t("Invalid regular expression") : `0 / ${hits.length}`;
       return;
     }
 
@@ -2600,7 +3219,7 @@
     if (isLargeDocMode()) {
       const largeHits = largeSourceHits();
       if (largeHits === null) {
-        findStatus = t("正则表达式无效");
+        findStatus = t("Invalid regular expression");
         return;
       }
       if (largeHits.length === 0) {
@@ -2615,7 +3234,7 @@
 
     const hits = editorHits();
     if (hits === null) {
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (hits.length === 0) {
@@ -2627,24 +3246,9 @@
     findStatus = `0 / ${hits.length}`;
   }
 
-  /** 字符串内的命中（HTML 源码视图的 textarea 走这条；textarea 没法登记 Range 高亮） */
-  type StringHit = { index: number; text: string; groups: string[] };
-
+  /** 字符串内的命中（HTML 源码视图的 textarea 走这条；用当前查找正则） */
   function stringHits(hay: string): StringHit[] | null {
-    const re = buildFindRegex();
-    if (!re) return null;
-
-    const hits: StringHit[] = [];
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(hay)) !== null) {
-      if (m[0].length === 0) {
-        re.lastIndex++;
-        continue;
-      }
-      hits.push({ index: m.index, text: m[0], groups: m.slice(1).map((g) => g ?? "") });
-    }
-    return hits;
+    return collectStringHits(hay, buildFindRegex());
   }
 
   // ---- 大文档（分节渲染）通路下的查找 ----
@@ -2668,18 +3272,6 @@
       largeHitList = hits;
     }
     return largeHitList;
-  }
-
-  /** 命中列表里第一处「偏移不小于 offset」的下标（列表按偏移升序，故可二分） */
-  function hitIndexFrom(hits: StringHit[], offset: number): number {
-    let lo = 0;
-    let hi = hits.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (hits[mid]!.index < offset) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
   }
 
   /**
@@ -2725,7 +3317,7 @@
     const hits = largeSourceHits();
     if (hits === null) {
       findIdx = -1;
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (hits.length === 0) {
@@ -2752,15 +3344,9 @@
     findStatus = `${findIdx + 1} / ${hits.length}`;
   }
 
-  /** 替换文本里的 `$1` / `$&` / `$$` 展开；字面量模式不展开（与旧行为一致，输入什么就是什么） */
+  /** 替换文本里的 `$1` / `$&` / `$$` 展开（转发给纯函数，字面量模式不展开） */
   function expandReplacement(template: string, full: string, groups: string[]): string {
-    if (!findRegex) return template;
-    return template.replace(/\$(\$|&|\d{1,2})/g, (_whole, token: string) => {
-      if (token === "$") return "$";
-      if (token === "&") return full;
-      const index = Number(token);
-      return index === 0 ? full : (groups[index - 1] ?? "");
-    });
+    return applyReplacement(template, full, groups, findRegex);
   }
 
   // ---- 代码视图（CodeMirror）通路的查找 ----
@@ -2777,7 +3363,7 @@
     const matches = getCodeMatches();
     if (matches === null) {
       findIdx = -1;
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (matches.length === 0) {
@@ -2799,7 +3385,7 @@
   function replaceOneInCode(): void {
     const matches = getCodeMatches();
     if (matches === null) {
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     const current = findIdx >= 0 ? matches[findIdx] : undefined;
@@ -2820,7 +3406,7 @@
   function replaceAllInCode(): void {
     const matches = getCodeMatches();
     if (matches === null) {
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (matches.length === 0) {
@@ -2836,7 +3422,7 @@
       })),
     );
     findIdx = -1;
-    findStatus = t("已替换 {n} 处", { n });
+    findStatus = t("Replaced {n} occurrence(s)", { n });
     if (n > 0) syncFromCode();
   }
 
@@ -2846,7 +3432,7 @@
     if (!el) return;
     const hits = stringHits(htmlSource);
     if (hits === null) {
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (hits.length === 0) {
@@ -2898,13 +3484,13 @@
   function findNextInPreview(backwards: boolean): void {
     if (!previewReachable()) {
       findIdx = -1;
-      findStatus = t("执行脚本时不支持预览查找");
+      findStatus = t("Preview search is unavailable while scripts are enabled");
       return;
     }
     const hits = previewHits();
     if (hits === null) {
       findIdx = -1;
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (hits.length === 0) {
@@ -2952,13 +3538,13 @@
   function replaceOneInPreview(): void {
     if (!previewReachable()) {
       findIdx = -1;
-      findStatus = t("执行脚本时不支持预览替换");
+      findStatus = t("Preview replace is unavailable while scripts are enabled");
       return;
     }
     const hits = previewHits();
     if (hits === null) {
       findIdx = -1;
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (hits.length === 0) {
@@ -2979,13 +3565,13 @@
   function replaceAllInPreview(): void {
     if (!previewReachable()) {
       findIdx = -1;
-      findStatus = t("执行脚本时不支持预览替换");
+      findStatus = t("Preview replace is unavailable while scripts are enabled");
       return;
     }
     const hits = previewHits();
     if (hits === null) {
       findIdx = -1;
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (hits.length === 0) {
@@ -2995,7 +3581,7 @@
     }
     replaceInPreview(hits);
     findIdx = -1;
-    findStatus = t("已替换 {n} 处", { n: hits.length });
+    findStatus = t("Replaced {n} occurrence(s)", { n: hits.length });
   }
 
   /** 编辑器常规通路（Markdown / 纯文本）的「下一个 / 上一个」：在正文 Range 上定位并居中 */
@@ -3003,7 +3589,7 @@
     const hits = editorHits();
     if (hits === null) {
       findIdx = -1;
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (hits.length === 0) {
@@ -3097,7 +3683,7 @@
       const el = sourceArea;
       const hits = stringHits(htmlSource);
       if (hits === null) {
-        findStatus = t("正则表达式无效");
+        findStatus = t("Invalid regular expression");
         return;
       }
       // 当前选中的内容与命中项文本一致才替换：否则先定位一次（与旧行为一致）
@@ -3114,7 +3700,7 @@
     }
     const hits = editorHits();
     if (hits === null) {
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     const current = findIdx >= 0 ? hits[findIdx] : undefined;
@@ -3141,7 +3727,7 @@
       }
       const hits = stringHits(htmlSource);
       if (hits === null) {
-        findStatus = t("正则表达式无效");
+        findStatus = t("Invalid regular expression");
         return;
       }
       if (hits.length === 0) {
@@ -3151,7 +3737,7 @@
       htmlSource = findRegex
         ? htmlSource.replace(buildFindRegex()!, replaceText) // 正则模式用原生 replace：$1 / $& 展开由它负责
         : htmlSource.split(findText).join(replaceText);
-      findStatus = t("已替换 {n} 处", { n: hits.length });
+      findStatus = t("Replaced {n} occurrence(s)", { n: hits.length });
       syncFromHtmlSource();
       return;
     }
@@ -3159,7 +3745,7 @@
     const value = getEditorValue();
     const hits = stringHits(value);
     if (hits === null) {
-      findStatus = t("正则表达式无效");
+      findStatus = t("Invalid regular expression");
       return;
     }
     if (hits.length === 0) {
@@ -3170,7 +3756,7 @@
       findRegex ? value.replace(buildFindRegex()!, replaceText) : value.split(findText).join(replaceText),
     );
     findIdx = -1;
-    findStatus = t("已替换 {n} 处", { n: hits.length });
+    findStatus = t("Replaced {n} occurrence(s)", { n: hits.length });
     syncFromEditor();
   }
 
@@ -3184,7 +3770,7 @@
     refreshFindCount(); // 打开时就把已有内容的命中数算出来
   }
 
-  // ---- 主题（阶段 7）：用户显式选择优先并记忆，未设置时跟随系统 ----
+  // ---- 外观（阶段 7 的明 / 暗档位已并入「主题」，见下方 refreshThemes）----
   function applyAppTheme(dark: boolean): void {
     theme = dark ? "dark" : "light";
     document.documentElement.classList.toggle("dark", dark);
@@ -3193,48 +3779,56 @@
     setCodeTheme(dark); // 代码视图未挂载时为 no-op
   }
 
-  async function setThemeChoice(choice: "light" | "dark" | "system"): Promise<void> {
-    if (choice === "system") {
-      userThemeSet = false;
-      applyAppTheme(window.matchMedia("(prefers-color-scheme: dark)").matches);
-      await saveSetting("theme", null); // null → 下次启动回退「跟随系统」
-      return;
-    }
-    userThemeSet = true;
-    applyAppTheme(choice === "dark");
-    await saveSetting("theme", choice);
+  /**
+   * 主题是否为深色：看它 CSS 里声明的 `color-scheme`（主题文件夹 README 有这条约定）。
+   * 声明 dark → 深色主题；声明 light 或两者都没写 → 按浅色处理。
+   */
+  function themeIsDark(css: string): boolean {
+    return /color-scheme\s*:\s*dark/i.test(css);
+  }
+
+  /** 明 / 暗档位真的变化时才切换（避免重复设置编辑器与代码高亮主题） */
+  function applyThemeMode(dark: boolean): void {
+    if (dark !== (theme === "dark")) applyAppTheme(dark);
   }
 
   // ---- 阅读排版（字体 / 字号 / 行距 / 文字色 / 护眼底色）----
-  // 只服务 Markdown / 纯文本文档（见 onMount 里的加载与后面的 $effect）。
 
   /** 字体档位：value 为空串表示不覆盖，沿用 Vditor 自带字体栈 */
+  // 内置字体 + 字体包目录里的字体（批次十二）：后者经 @font-face 注册后可在此直接选用
   const READER_FONTS: { id: string; label: string; value: string }[] = $derived([
-    { id: "default", label: t("无衬线（默认）"), value: "" },
-    { id: "yahei", label: t("微软雅黑"), value: '"Microsoft YaHei", "PingFang SC", sans-serif' },
-    { id: "song", label: t("宋体"), value: '"SimSun", "Songti SC", serif' },
-    { id: "hei", label: t("黑体"), value: '"SimHei", "Heiti SC", sans-serif' },
-    { id: "kai", label: t("楷体"), value: '"KaiTi", "Kaiti SC", serif' },
-    { id: "mono", label: t("等宽"), value: '"Cascadia Mono", Consolas, "Courier New", monospace' },
+    { id: "default", label: t("Sans-serif (default)"), value: "" },
+    { id: "yahei", label: t("Microsoft YaHei"), value: '"Microsoft YaHei", "PingFang SC", sans-serif' },
+    { id: "song", label: t("SimSun"), value: '"SimSun", "Songti SC", serif' },
+    { id: "hei", label: t("SimHei"), value: '"SimHei", "Heiti SC", sans-serif' },
+    { id: "kai", label: t("KaiTi"), value: '"KaiTi", "Kaiti SC", serif' },
+    { id: "mono", label: t("Monospace"), value: '"Cascadia Mono", Consolas, "Courier New", monospace' },
+    ...fontPacks.map((f) => ({
+      id: `pack:${f.name}`,
+      label: f.name,
+      value: `${cssString(fontPackFamily(f.name))}, sans-serif`,
+    })),
   ]);
 
   const READER_SIZES = ["12px", "13px", "14px", "15px", "16px", "17px", "18px", "20px", "22px", "24px"];
   const READER_LINES = ["1.2", "1.4", "1.6", "1.8", "2", "2.4"];
 
-  /** 文字颜色预设（护眼阅读常用：深灰而非纯黑，长时间看更柔和） */
+  /** 文字颜色预设（护眼阅读常用：深灰而非纯黑，长时间看更柔和；另备一深一浅两档常用色） */
   const READER_TEXT_COLORS = $derived([
-    { label: t("深棕"), value: "#5b4636" },
-    { label: t("黑色"), value: "#1a1a1a" },
-    { label: t("夜间"), value: "#e8e8e8" },
+    { label: t("Dark Brown"), value: "#5b4636" },
+    { label: t("Black"), value: "#1a1a1a" },
+    { label: t("Deep Blue"), value: "#1e3a5f" },
+    { label: t("Night"), value: "#e8e8e8" },
+    { label: t("Silver"), value: "#c9c9c9" },
   ]);
 
   /** 页面背景预设：米黄 / 护眼绿 / 淡蓝 / 淡灰 / 夜间 */
   const READER_BACKGROUNDS = $derived([
-    { label: t("米黄"), value: "#f6efdc" },
-    { label: t("护眼绿"), value: "#c9e7cb" },
-    { label: t("淡蓝"), value: "#e3edf7" },
-    { label: t("淡灰"), value: "#f0f0f0" },
-    { label: t("夜间"), value: "#2b2b2b" },
+    { label: t("Cream"), value: "#f6efdc" },
+    { label: t("Eye-care Green"), value: "#c9e7cb" },
+    { label: t("Light Blue"), value: "#e3edf7" },
+    { label: t("Light Gray"), value: "#f0f0f0" },
+    { label: t("Night"), value: "#2b2b2b" },
   ]);
 
   /** 写入一项阅读排版设置；value 为空串 = 清除该项，回到默认样式 */
@@ -3252,8 +3846,9 @@
   }
 
   // ---- 自定义 CSS 主题（批次八）----
-  // 主题文件放在 %APPDATA% 的主题目录下，内容整体注入一个 style 节点，
-  // 与明/暗档位是正交的两件事（自定义主题叠在明/暗之上）。
+  // 主题文件放在配置目录的主题目录下，内容整体注入一个 style 节点。
+  // 主题同时决定「整份配色」与「明 / 暗档位」（由 CSS 里的 color-scheme 判定），
+  // 因此外观只需选主题，不再单独切明 / 暗。
 
   /** 把自定义主题 CSS 写进 head 里的专用 style 节点（空串 = 不生效） */
   function applyUserThemeCss(css: string): void {
@@ -3266,13 +3861,15 @@
     el.textContent = css;
   }
 
-  /** 读取主题目录；已选主题文件被删掉时自动回落默认并清掉设置 */
+  /**
+   * 读取主题目录并把选中主题应用到界面；已选主题文件被删掉时回落默认并清掉设置。
+   * 明 / 暗档位也在这一处统一决定：未选主题 = 内置浅色默认；选中主题按其 color-scheme 定深浅。
+   */
   async function refreshThemes(): Promise<void> {
     try {
       themeFiles = await loadThemes();
     } catch {
       themeFiles = [];
-      return;
     }
     const hit = userTheme ? themeFiles.find((f) => f.name === userTheme) : undefined;
     applyUserThemeCss(hit?.css ?? "");
@@ -3280,11 +3877,15 @@
       userTheme = null;
       await saveSetting("userTheme", null);
     }
+    applyThemeMode(userTheme !== null && themeIsDark(hit?.css ?? ""));
   }
 
+  /** 选用 / 清除主题：整份配色与明暗档位一并切换并记忆 */
   async function selectUserTheme(name: string | null): Promise<void> {
     userTheme = name;
-    applyUserThemeCss(name ? themeFiles.find((f) => f.name === name)?.css ?? "" : "");
+    const css = name ? themeFiles.find((f) => f.name === name)?.css ?? "" : "";
+    applyUserThemeCss(css);
+    applyThemeMode(name !== null && themeIsDark(css));
     await saveSetting("userTheme", name);
   }
 
@@ -3294,7 +3895,7 @@
       await openThemeDir();
       await refreshThemes();
     } catch (e) {
-      await showError(t("打开主题文件夹失败："), e);
+      await showError(t("Failed to open themes folder: "), e);
     }
   }
 
@@ -3303,22 +3904,327 @@
     if (skinOpen) void refreshThemes();
   }
 
+  // ---- 自定义浮窗说明（替代原生 title）----
+  //
+  // 原生 tooltip 的框线偏生硬、且只在贴近屏幕右缘时才换行，长句很难读。改用自绘浮窗：
+  // 圆角柔和描边 + 限宽（提前换行），悬停在带 data-tip / 原生 title 的元素上时显示在其下方。
+  // 用 mouseover 事件委托，元素动态增删都能覆盖；沿用原生 title 的元素会临时摘掉 title 以压住系统气泡。
+
+  /** 浮窗最大宽度（px）：与 CSS 的 .app-tip max-width 对应，测量不到时用它兜底 */
+  const TIP_MAX_WIDTH = 320;
+  /** 悬停多久后才弹出浮窗（ms）：鼠标在按钮上停留一会才出现 */
+  const TIP_SHOW_DELAY = 450;
+  /** 浮窗与光标之间的间距（px） */
+  const TIP_GAP = 16;
+  let tipText = $state("");
+  let tipLeft = $state(0);
+  let tipTop = $state(0);
+  /** 浮窗 DOM：弹出后测量实际尺寸，把浮窗夹进视口 */
+  let tipEl = $state<HTMLElement | null>(null);
+  /** 当前已弹出的浮窗归属元素：换元素才更新内容，同一元素内移动不闪烁 */
+  let tipAnchor: HTMLElement | null = null;
+  /** 已排队、尚未弹出的目标元素（正等 TIP_SHOW_DELAY） */
+  let tipPending: HTMLElement | null = null;
+  /** 沿用原生 title 的元素在悬停时被临时摘除 title，这里记住原文以便还原 */
+  let tipAnchorTitle: string | null = null;
+  /** 延迟隐藏的定时器：在相邻按钮之间快速移动时不至于闪一下 */
+  let tipHideTimer = 0;
+  /** 延迟弹出的定时器 */
+  let tipShowTimer = 0;
+  /** 最近一次鼠标位置：浮窗跟随光标定位，而不是挂在元素上 */
+  let tipMouseX = 0;
+  let tipMouseY = 0;
+
+  // 既覆盖显式的 data-tip，也覆盖沿用原生 title 的按钮——统一换成自绘浮窗
+  const TIP_SELECTOR = "[data-tip],[title]";
+
+  // 挂在 document 上而不是模板属性：事件委托同样覆盖动态增删的元素，
+  // 又不给根节点引入无意义的 ARIA 角色 / 键盘事件
+  onMount(() => {
+    document.addEventListener("mousemove", onTipMove);
+    document.addEventListener("mouseover", onTipOver);
+    document.addEventListener("mouseout", onTipOut);
+    // 滚动 / 缩放 / 失焦后锚点位置会变，浮窗留在原地会显得「飘」——直接收起来，避免错位
+    window.addEventListener("scroll", hideTip, true);
+    window.addEventListener("resize", hideTip);
+    window.addEventListener("blur", hideTip);
+    return () => {
+      document.removeEventListener("mousemove", onTipMove);
+      document.removeEventListener("mouseover", onTipOver);
+      document.removeEventListener("mouseout", onTipOut);
+      window.removeEventListener("scroll", hideTip, true);
+      window.removeEventListener("resize", hideTip);
+      window.removeEventListener("blur", hideTip);
+    };
+  });
+
+  function onTipMove(e: MouseEvent): void {
+    tipMouseX = e.clientX;
+    tipMouseY = e.clientY;
+  }
+
+  /** 还原被临时摘除的原生 title（若属性已被重新赋值则不再覆盖） */
+  function restoreTipTitle(): void {
+    if (tipAnchor && tipAnchorTitle !== null && !tipAnchor.hasAttribute("title")) {
+      tipAnchor.setAttribute("title", tipAnchorTitle);
+    }
+    tipAnchorTitle = null;
+  }
+
+  /** 取消排队中的弹出 */
+  function cancelShow(): void {
+    if (tipShowTimer !== 0) {
+      clearTimeout(tipShowTimer);
+      tipShowTimer = 0;
+    }
+    tipPending = null;
+  }
+
+  /** 立即收起浮窗并还原 title */
+  function hideTip(): void {
+    cancelShow();
+    if (tipHideTimer !== 0) {
+      clearTimeout(tipHideTimer);
+      tipHideTimer = 0;
+    }
+    restoreTipTitle();
+    tipAnchor = null;
+    tipText = "";
+  }
+
+  /** 把浮窗摆到光标附近，并按实际尺寸贴边收进视口（右下不够就翻到左上） */
+  function placeTip(): void {
+    const pad = 12;
+    const w = tipEl?.offsetWidth || TIP_MAX_WIDTH;
+    const h = tipEl?.offsetHeight || 0;
+    let left = tipMouseX + TIP_GAP;
+    let top = tipMouseY + TIP_GAP;
+    if (left + w > window.innerWidth - pad) left = tipMouseX - w - TIP_GAP;
+    if (top + h > window.innerHeight - pad) top = tipMouseY - h - TIP_GAP;
+    tipLeft = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
+    tipTop = Math.max(pad, Math.min(top, window.innerHeight - h - pad));
+  }
+
+  /** 到点后真正弹出浮窗 */
+  function presentTip(anchor: HTMLElement, text: string): void {
+    if (!document.contains(anchor)) return; // 等待期间目标已被移除
+    tipAnchor = anchor;
+    tipText = text;
+    // data-tip 之外沿用的原生 title：先摘掉，免得系统气泡同时冒出来
+    if (anchor.dataset.tip) {
+      tipAnchorTitle = null;
+    } else {
+      tipAnchorTitle = anchor.getAttribute("title");
+      anchor.removeAttribute("title");
+    }
+    // 先给个「光标右下」的初值，渲染后按实测尺寸收进视口
+    tipLeft = tipMouseX + TIP_GAP;
+    tipTop = tipMouseY + TIP_GAP;
+    void tick().then(placeTip);
+  }
+
+  function onTipOver(e: MouseEvent): void {
+    const anchor = (e.target as HTMLElement | null)?.closest?.(TIP_SELECTOR) as HTMLElement | null;
+    if (!anchor) return;
+    if (anchor === tipAnchor) {
+      // 仍停在同一元素上：取消一次「即将隐藏」，避免移动途中闪一下
+      if (tipHideTimer !== 0) {
+        clearTimeout(tipHideTimer);
+        tipHideTimer = 0;
+      }
+      return;
+    }
+    if (anchor === tipPending) return; // 已在排队等待，别把计时重置
+    cancelShow();
+    // 上一个锚点已被移出文档（菜单关闭 / 标签关闭等）：先清掉残留浮窗
+    if (tipAnchor && !document.contains(tipAnchor)) hideTip();
+    else restoreTipTitle();
+    const text = anchor.dataset.tip || anchor.getAttribute("title") || "";
+    if (!text.trim()) return;
+    tipPending = anchor;
+    tipShowTimer = window.setTimeout(() => {
+      tipShowTimer = 0;
+      const pending = tipPending;
+      tipPending = null;
+      if (pending) presentTip(pending, text);
+    }, TIP_SHOW_DELAY);
+  }
+
+  function onTipOut(e: MouseEvent): void {
+    const from = (e.target as HTMLElement | null)?.closest?.(TIP_SELECTOR) as HTMLElement | null;
+    const current = tipAnchor ?? tipPending;
+    if (!current || from !== current) return;
+    const next = e.relatedTarget as HTMLElement | null;
+    if (next && current.contains(next)) return; // 仍在同一元素内部移动，不算离开
+    if (current === tipPending) {
+      cancelShow(); // 还没弹出来就离开了：直接取消
+      return;
+    }
+    // 已弹出的：轻微延迟再隐藏，相邻按钮之间移动时不至于闪一下
+    if (tipHideTimer !== 0) clearTimeout(tipHideTimer);
+    tipHideTimer = window.setTimeout(() => {
+      tipHideTimer = 0;
+      hideTip();
+    }, 60);
+  }
+
+  // ---- 语言包 / 字体包（批次十二）----
+
+  /** 字体包在 CSS 里的 family 名：统一加前缀，避免与系统字体同名冲突 */
+  function fontPackFamily(name: string): string {
+    return `Sticho Pack ${name}`;
+  }
+
+  /** 组装 CSS 字符串字面量（font-family / url 都要用），转义反斜杠与双引号 */
+  function cssString(value: string): string {
+    return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  }
+
+  /** 把字体包注册成 @font-face：family 名与 READER_FONTS 用同一套命名 */
+  function applyFontPacks(fonts: FontPack[]): void {
+    const id = "md-studio-font-packs";
+    let el = document.getElementById(id) as HTMLStyleElement | null;
+    if (fonts.length === 0) {
+      el?.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement("style");
+      el.id = id;
+      document.head.appendChild(el);
+    }
+    el.textContent = fonts
+      .map(
+        (f) =>
+          `@font-face { font-family: ${cssString(fontPackFamily(f.name))}; src: url(${cssString(
+            convertFileSrc(f.path),
+          )}); }`,
+      )
+      .join("\n");
+  }
+
+  /** 读取字体包目录并注册；读不到就保持现状（别把用户选用的字体误清掉） */
+  async function refreshFonts(): Promise<void> {
+    let fonts: FontPack[];
+    try {
+      fonts = await loadFonts();
+    } catch {
+      return;
+    }
+    fontPacks = fonts;
+    applyFontPacks(fonts);
+    // 选用的字体包被移走后回落默认，避免下拉框里查无此项
+    if (readerStyle.fontFamily && !READER_FONTS.some((f) => f.value === readerStyle.fontFamily)) {
+      await setReaderOption("fontFamily", "");
+    }
+  }
+
+  /**
+   * 启动时的包目录初始化：先释放默认语言包 / 主题包，再加载语言包与字体包。
+   *
+   * 释放只在文件缺失时发生（Rust 侧 ensure_packs 不覆盖已有文件），所以用户改过的语言包、
+   * 自己写的主题与放进去的字体都不会被冲掉；任何一步失败都降级为「无外部包」，不影响启动。
+   */
+  async function initPacks(): Promise<void> {
+    try {
+      await ensurePacks(DEFAULT_PACK_FILES);
+    } catch (e) {
+      console.error("[sticho] 释放默认包文件失败：", e);
+    }
+    // 欢迎正文 / 语言包 / 字体包：三者互不依赖（都只依赖上面已释放的默认包），并行读取。
+    // 欢迎正文（docs/Welcome.<locale>.md）在 initPacks 返回前一定就绪，
+    // 首个标签的正文随后才写进编辑器（见 boot 段）。
+    await Promise.all([
+      loadWelcomeDocs(),
+      (async () => {
+        try {
+          localePacks = await loadLocales();
+        } catch {
+          localePacks = [];
+        }
+      })(),
+      refreshFonts(),
+    ]);
+  }
+
+  /** 打开语言包目录（顺带刷新列表：用户常先放文件，再回来选） */
+  async function openLocalesFolder(): Promise<void> {
+    try {
+      await openPackDir("locales");
+    } catch (e) {
+      await showError(t("Failed to open locales folder: "), e);
+    }
+    try {
+      localePacks = await loadLocales();
+    } catch {
+      /* 打不开就维持原列表 */
+    }
+  }
+
+  /** 打开字体包目录（顺带刷新：新放入的字体立即出现在字体下拉里） */
+  async function openFontsFolder(): Promise<void> {
+    try {
+      await openPackDir("fonts");
+    } catch (e) {
+      await showError(t("Failed to open fonts folder: "), e);
+    }
+    await refreshFonts();
+  }
+
   // ---- 界面语言（批次八）----
 
-  /** 切换界面语言：立即改 App 文案，并同步 Vditor 的 lang 选项 */
+  /** 切换界面语言：立即改 App 文案，并同步 Vditor 的语言与其工具栏提示 */
   async function selectLocale(next: Locale): Promise<void> {
     locale = next;
-    setEditorLocale(vditorLang(next));
+    void setEditorLocale(vditorLang(next));
     document.documentElement.lang = next;
     await saveSetting("locale", next);
   }
 
-  function switchEditorMode(mode: "ir" | "wysiwyg" | "sv"): void {
-    if (getEditorMode() === mode) return;
-    setEditorMode(mode);
+  /**
+   * 切换渲染模式（状态栏图标组 / 视图菜单共用）。
+   *
+   * 关键：判断「是否已在目标模式」必须拿**我们自己的 editorMode** 比，不能拿 Vditor 的当前模式比
+   * ——「不渲染」在 Vditor 里也是 `sv`（只是再用 CSS 把预览栏藏起来），所以从「不渲染」点回
+   * 「分屏预览」时 `getEditorMode()` 已经是 `"sv"`，按旧写法会直接 return，editorMode 停在
+   * `"none"`，预览栏继续藏着，两个模式就长得一模一样。同理，此时 Vditor 无需再切一次 sv。
+   */
+  function switchEditorMode(mode: "ir" | "wysiwyg" | "sv" | "none"): void {
+    if (mode === editorMode) return;
+    if (mode === "none") {
+      setEditorMode("sv"); // Vditor 切到 SV；预览栏由 CSS 隐藏（.md-source-only）
+      editorMode = "none";
+      return;
+    }
+    // 从「不渲染」退回来时 Vditor 已经是 sv，setEditorMode 是空操作，只落值即可
+    if (getEditorMode() !== mode) setEditorMode(mode);
     // 立即同步状态栏图标与菜单复选：靠编辑器的模式回调要等一拍，且回调只为兜住
     // 「工具栏下拉」那条路径，这里直接落值，反馈更跟手（回调稍后会再确认一次）。
     editorMode = mode;
+  }
+
+  /** 视图菜单：切到 Markdown 模式并用指定渲染模式（含 none=不渲染） */
+  async function applyMarkdownRender(mode: "ir" | "wysiwyg" | "sv" | "none"): Promise<void> {
+    if (docKind !== "markdown") await setDocMode("markdown");
+    switchEditorMode(mode);
+  }
+
+  /** 视图菜单：切到 HTML 模式；给了 view 就同时设置预览/源码 */
+  async function applyHtmlMode(view?: "preview" | "source"): Promise<void> {
+    if (docKind !== "html") await setDocMode("html");
+    if (view) setHtmlView(view);
+  }
+
+  /** 视图菜单：切到 HTML 模式并切换「执行文档脚本」 */
+  async function applyHtmlScriptToggle(): Promise<void> {
+    if (docKind !== "html") await setDocMode("html");
+    toggleHtmlScripts();
+  }
+
+  /** 纯文本模式的三级子菜单：先确保处于纯文本模式，再设置语法高亮语言 */
+  async function applyCodeLang(input: string | null | undefined): Promise<void> {
+    if (docKind !== "code") await setDocMode("code");
+    await setCodeLang(input);
   }
 
   function toggleEditorToolbar(): void {
@@ -3329,16 +4235,221 @@
   /** 表格整列对齐（批次七）。光标不在单元格内时 Vditor 无从判断列，给出提示 */
   async function alignTable(type: "left" | "center" | "right"): Promise<void> {
     if (alignTableColumn(type)) return;
-    await messageDialog(t("请先把光标放到表格单元格内，再设置整列对齐。"), {
+    await messageDialog(t("Place the cursor inside a table cell before setting column alignment."), {
       title: "Sticho",
       kind: "info",
     });
   }
 
+  /** 书签：当前是否可用（HTML 文档 / 超大代码只读分节视图下不可用）。
+   *  阅读模式（浏览）也允许：书签只记位置、不改文档，正合「浏览时标记一下」的用法。
+   *  判据用 docKind 而非全局 codeLargeText：后者在切到 Markdown 后可能是上一份大代码
+   *  文件遗留的旧值，会让 Markdown 文档被误判为「书签不可用」。 */
+  function bookmarksAllowed(): boolean {
+    return docKind !== "html" && !(docKind === "code" && codeLargeText !== null);
+  }
+
+  /** 书签：某标签是否应从磁盘装载（HTML 与超大代码只读分节视图不适用）。
+   *  判据按该标签自身：全局 codeLargeText 在切换到别的标签后可能还留着上一份大代码文件的旧值，
+   *  用它判断会让 Markdown / 普通代码标签被误判为「不可用」。 */
+  function shouldLoadBookmarks(tab: DocTab): boolean {
+    if (tab.kind === "html") return false;
+    // 代码标签按自身正文长度判是否超大：超大走只读分节视图，没有可落书签的行内编辑态
+    if (tab.kind === "code") return tab.content.length < CODE_LARGE_BYTES;
+    return true;
+  }
+
+  /**
+   * 书签持久化用的「文档身份」：已保存的文档用本地路径（云端文档用远端路径），
+   * 未命名文档退回草稿 id——草稿 id 在会话恢复后保持不变，所以未命名文档的书签
+   * 也能跨重启保留。
+   *
+   * 活跃标签一律以**全局状态**（currentPath / currentRemote）为准：标签快照里的
+   * path 只在切换 / 关闭时同步，刚打开还没 capture 过的标签快照仍是 null，若照它
+   * 取 owner 会退回 draftId，导致书签存错文件、重开读不到（本次修复的缺陷根因）。
+   */
+  function bookmarkOwner(tab: DocTab): string {
+    if (tab === tabs[activeIndex]) return currentRemote ?? currentPath ?? tab.draftId;
+    return tab.remote ?? tab.path ?? tab.draftId;
+  }
+
+  /** 书签：把某标签的书签写盘（两边都空则删掉文件，免得配置目录里留一堆空档）。
+   *  返回写入 Promise，供「先写新身份、成功后再删旧身份」的迁移顺序使用。 */
+  function persistBookmarks(tab: DocTab): Promise<void> {
+    const owner = bookmarkOwner(tab);
+    const { code, md } = tab.bookmarks;
+    const task =
+      code.length === 0 && md.length === 0
+        ? bookmarksDelete(owner)
+        : bookmarksSave(owner, JSON.stringify({ code, md }));
+    return task.catch(() => {
+      /* 存书签失败不打扰用户：书签是辅助信息，内存里仍在 */
+    });
+  }
+
+  /** 书签：把磁盘上的书签装回某标签，并投影到当前编辑器 */
+  async function loadStoredBookmarks(tab: DocTab): Promise<void> {
+    let raw: string | null;
+    try {
+      raw = await bookmarksLoad(bookmarkOwner(tab));
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    let parsed: { code?: unknown; md?: unknown };
+    try {
+      parsed = JSON.parse(raw) as { code?: unknown; md?: unknown };
+    } catch {
+      return; // 文件损坏就当没有
+    }
+    if (!Array.isArray(parsed.code) || !Array.isArray(parsed.md)) return;
+    tab.bookmarks = { code: parsed.code as number[], md: parsed.md as MdBookmarkAnchor[] };
+    if (tab.kind === "code" && codeLargeText === null) {
+      setCodeBookmarks(tab.bookmarks.code);
+      codeBookmarkInfo = getCodeBookmarks();
+    }
+  }
+
+  /** 书签：在光标处添加；无光标（未聚焦 / 阅读模式）则落在文档最上方起始位置 */
+  function addBookmark(): void {
+    if (!bookmarksAllowed()) return;
+    const tab = tabs[activeIndex];
+    if (!tab) return;
+    if (docKind === "code") {
+      if (!addCodeBookmark()) return;
+      tab.bookmarks.code = getCodeBookmarkPositions();
+      codeBookmarkInfo = getCodeBookmarks();
+    } else if (docKind === "markdown") {
+      const anchor = getMdBookmarkAnchor() ?? getMdTopBookmarkAnchor();
+      if (!anchor) return;
+      const list = tab.bookmarks.md;
+      const exists = list.some((a) => a.text === anchor.text && a.occ === anchor.occ);
+      if (!exists) {
+        list.push(anchor);
+        tab.bookmarks.md = [...list]; // 重新赋值以触发响应
+      }
+    }
+    void persistBookmarks(tab);
+  }
+
+  /** 书签：删除某一条（侧边栏「书签」面板的单条删除） */
+  function removeBookmarkAt(index: number): void {
+    const tab = tabs[activeIndex];
+    if (!tab) return;
+    if (docKind === "code") {
+      const pos = tab.bookmarks.code[index];
+      if (pos === undefined) return;
+      removeCodeBookmark(pos);
+      tab.bookmarks.code = getCodeBookmarkPositions();
+      codeBookmarkInfo = getCodeBookmarks();
+    } else if (docKind === "markdown") {
+      const list = [...tab.bookmarks.md];
+      if (index < 0 || index >= list.length) return;
+      list.splice(index, 1);
+      tab.bookmarks.md = list;
+    }
+    void persistBookmarks(tab);
+  }
+
+  /** 书签：切换（Ctrl+F2）。代码走 CM 的 StateField，Markdown 走块锚点 */
+  function toggleBookmark(): void {
+    if (!bookmarksAllowed()) return;
+    const tab = tabs[activeIndex];
+    if (!tab) return;
+    if (docKind === "code") {
+      toggleCodeBookmark();
+      tab.bookmarks.code = getCodeBookmarkPositions();
+      codeBookmarkInfo = getCodeBookmarks();
+    } else if (docKind === "markdown") {
+      const anchor = getMdBookmarkAnchor();
+      if (!anchor) return;
+      const list = tab.bookmarks.md;
+      const same = (a: MdBookmarkAnchor): boolean => a.text === anchor.text && a.occ === anchor.occ;
+      const at = list.findIndex(same);
+      if (at >= 0) list.splice(at, 1);
+      else list.push(anchor);
+      tab.bookmarks.md = [...list]; // 重新赋值以触发响应
+    }
+    void persistBookmarks(tab);
+  }
+
+  /** 书签：下一个 / 上一个（F4 / Shift+F4），环绕 */
+  function nextBookmark(dir: 1 | -1): void {
+    if (!bookmarksAllowed()) return;
+    const tab = tabs[activeIndex];
+    if (!tab) return;
+    if (docKind === "code") {
+      nextCodeBookmark(dir);
+      tab.bookmarks.code = getCodeBookmarkPositions();
+      codeBookmarkInfo = getCodeBookmarks();
+      return;
+    }
+    if (docKind === "markdown") {
+      const list = tab.bookmarks.md;
+      if (list.length === 0) return;
+      const next = bookmarkCursor < 0 ? (dir > 0 ? 0 : list.length - 1) : (bookmarkCursor + dir + list.length) % list.length;
+      if (revealMdBookmark(list[next]!)) bookmarkCursor = next;
+    }
+  }
+
+  /** 书签：清除全部 */
+  function clearBookmarks(): void {
+    if (!bookmarksAllowed()) return;
+    const tab = tabs[activeIndex];
+    if (!tab) return;
+    if (docKind === "code") {
+      clearCodeBookmarks();
+      codeBookmarkInfo = getCodeBookmarks();
+    }
+    tab.bookmarks = { code: [], md: [] };
+    bookmarkCursor = -1;
+    void persistBookmarks(tab);
+  }
+
+  /** 侧边栏「书签」面板要显示的行清单（与侧边栏冻结的接口） */
+  const bookmarkItems = $derived.by(
+    (): { label: string; detail?: string; onClick: () => void; onRemove: () => void }[] => {
+      const tab = tabs[activeIndex];
+      if (!tab) return [];
+      if (docKind === "code") {
+        if (codeLargeText !== null) return [];
+        const positions = tab.bookmarks.code;
+        return positions.map((pos, i) => {
+          const info = codeBookmarkInfo[i];
+          return {
+            label: info ? `L${info.line}` : `#${i + 1}`,
+            detail: info?.text,
+            onClick: () => {
+              scrollToCodeOffset(pos);
+              focusCodeEditor();
+            },
+            onRemove: () => removeBookmarkAt(i),
+          };
+        });
+      }
+      if (docKind === "markdown") {
+        return tab.bookmarks.md.map((anchor, i) => ({
+          label: `#${i + 1}`,
+          detail: anchor.text,
+          onClick: () => revealMdBookmark(anchor),
+          onRemove: () => removeBookmarkAt(i),
+        }));
+      }
+      return [];
+    },
+  );
+
   async function toggleLineNumbers(): Promise<void> {
     showLineNumbers = !showLineNumbers;
     setLineNumbersVisible(showLineNumbers);
     await saveSetting("lineNumbers", showLineNumbers);
+  }
+
+  async function toggleAutoWrap(): Promise<void> {
+    autoWrap = !autoWrap;
+    setCodeLineWrapping(autoWrap); // CodeMirror：未挂载时 no-op
+    setLargeReaderWrap(autoWrap); // 大文档纯文本阅读器
+    await saveSetting("wrapLongLines", autoWrap);
   }
 
   async function toggleTypewriter(): Promise<void> {
@@ -3357,44 +4468,34 @@
   /**
    * 落恢复草稿并记录会话（每 30 秒由定时器触发，退出前也会显式调一次）。
    *
-   * 批次六起按标签逐个落：每个脏标签一份草稿（id = `d-<tab.id>`，与路径无关，
-   * 同一文件在两个标签里各改各的也不会互相覆盖），正文取自各自的快照；
-   * 同时把标签集写进会话，启动时据此整体恢复（见 tryRestoreSession）。
-   *
-   * **绝不改 `dirty`**：草稿只是磁盘外的兜底副本，标题的 `●` 与关窗拦截仍按
-   * 「未保存」处理，否则用户会以为已经保存过了。
+   * 落盘逻辑已抽到 lib/autoSave.ts（批次 3.3），这里只注入当前标签与回调。
    */
   async function tickAutoSave(): Promise<void> {
-    if (!autoSaveEnabled || busy || !tabsReady) return;
-    captureActiveTab(); // 活跃标签的最新内容先回到快照，下面统一按快照落盘
-    try {
-      for (const tab of tabs) {
-        if (!tab.dirty) continue;
-        const payload = tab.content;
-        if (!payload.trim()) continue; // 空文档没什么可恢复的
-        const hash = `${payload.length}:${payload.slice(0, 64)}`;
-        if (hash === tab.draftHash) continue; // 内容没变，省一次写盘
-        await writeRecovery({
-          id: tab.draftId,
-          path: tab.path,
-          title: tab.path ? fileName(tab.path) : t("未命名文档"),
-          kind: tab.kind,
-          encoding: tab.encoding,
-          content: payload,
-        });
-        tab.draftHash = hash;
-      }
-    } catch {
-      // 静默：恢复草稿属兜底机制，失败不能打断编辑。
-      // （write_text_file 的「编码不可表示」这类错误也必须吞掉，否则每 30 秒弹一次框）
-    }
-    await saveSession();
+    await runAutoSave({
+      enabled: autoSaveEnabled,
+      busy,
+      ready: tabsReady,
+      tabs,
+      captureActiveTab,
+      writeRecovery,
+      saveSession,
+      fileNameOf: fileName,
+      unnamedLabel: t("Untitled document"),
+    });
   }
 
   async function toggleAutoSave(): Promise<void> {
     autoSaveEnabled = !autoSaveEnabled;
     await saveSetting("autoSave", autoSaveEnabled);
+    // 开启后立刻补跑一次：轮询按间隔计时，不补跑的话最坏要等一整个间隔才首次自动保存
+    if (autoSaveEnabled) void tickAutoSave();
   }
+
+  // 自动保存定时器：间隔取自设置项（默认 1 分钟），设置一变本 effect 自动重建定时器
+  $effect(() => {
+    const ms = Math.max(30_000, autoSaveIntervalMin * 60_000);
+    return startPolling(ms, () => void tickAutoSave());
+  });
 
   // ---- WebDAV 云同步（批次九）----
 
@@ -3419,6 +4520,7 @@
       // 密码不写 settings.json：改走 DPAPI 加密的 secrets.json（换用户/换机器无法解密）
       saveDavPassword(davPass),
       saveSetting("davRoot", davRoot.trim() || "/Sticho"),
+      saveSetting("davUseHttps", davUseHttps),
     ]);
   }
 
@@ -3441,26 +4543,39 @@
     await deleteSetting("davPass");
   }
 
-  /** 测试连接。成功才置 davVerified，从而放开同步开关 */
-  async function testDav(): Promise<void> {
-    if (davTesting) return;
+  /**
+   * 静默验证连接：不起「Testing…」提示、不置「测试中」标记，供启动时后台调用。
+   * 返回是否通过；结论 / 失败原因同时写进 davTip 与 davVerified（设置面板据此展示）。
+   */
+  async function verifyDavSilently(): Promise<boolean> {
     const cfg = davConfig;
-    if (cfg.url === "") {
-      davTip = t("请先填写服务器地址");
-      return;
-    }
-    davTesting = true;
-    davTip = t("测试中…");
+    if (cfg.url === "") return false;
     try {
-      davTip = t(await webdavTest(cfg)); // Rust 侧给的是中文结论，这里按当前语言再翻一层
+      davTip = t(await webdavTest(cfg)); // Rust 侧给的是英文结论，这里按当前语言再翻一层
       davVerified = true;
-      await persistDavConfig();
+      return true;
     } catch (e) {
       davVerified = false;
       davTip = t(e instanceof Error ? e.message : String(e));
-    } finally {
-      davTesting = false;
+      return false;
     }
+  }
+
+  /** 测试连接（设置面板按钮）。成功才置 davVerified，从而放开同步开关，并把参数落盘 */
+  async function testDav(): Promise<void> {
+    if (davTesting) return;
+    if (davUrl.trim() === "") {
+      davTip = t("Enter the server URL first");
+      return;
+    }
+    davTesting = true;
+    davTip = t("Testing…");
+    const ok = await verifyDavSilently();
+    if (ok) {
+      await persistDavConfig();
+      await checkCloudUpdates(); // 连接刚验证通过：顺带做一次云端变更检查
+    }
+    davTesting = false;
   }
 
   async function toggleDavEnabled(): Promise<void> {
@@ -3471,26 +4586,172 @@
     await saveSetting("davEnabled", davEnabled);
   }
 
-  async function toggleDavVersioning(): Promise<void> {
-    davVersioning = !davVersioning;
-    await saveSetting("davVersioning", davVersioning);
-  }
-
-  async function setDavKeep(n: number): Promise<void> {
-    davKeep = Math.min(10, Math.max(1, Math.round(n)));
-    await saveSetting("davKeep", davKeep);
-  }
-
   /** 切换云同步的冲突处理策略（copy = 另存副本，overwrite = 直接覆盖） */
   async function setDavConflictPolicy(p: "copy" | "overwrite"): Promise<void> {
     davConflictPolicy = p;
     await saveSetting("davConflictPolicy", p);
   }
 
+  // ---- 云端变更检测（跨设备冲突预警）----
+
+  /** 一次检查里最多探测的文档数：已同步文档可能很多，避免一轮探测把请求拖得过长 */
+  const CLOUD_CHECK_MAX = 10;
+  /** 云端变更检查间隔（10 分钟） */
+  const CLOUD_CHECK_INTERVAL_MS = 10 * 60_000;
+  /** 与 Rust 侧 CONFLICT_TOLERANCE_SECS 一致：远端修改时间抖动 2 秒内不算「被改过」 */
+  const CLOUD_MODIFIED_TOLERANCE_SECS = 2;
+  /** 上一轮已提示过的变更集合（远端路径拼接）：内容不变就不重复弹提示 */
+  let cloudPromptedKey = "";
+
+  /** 远端路径的显示名（取末段） */
+  function remoteBaseName(remote: string): string {
+    const parts = remote.split("/").filter((s) => s !== "");
+    return parts.length > 0 ? parts[parts.length - 1] : remote;
+  }
+
+  /** 比对基准：远端路径 → 上次同步后记录的 (size, modified) */
+  function cloudBaseline(): Record<string, { size: number; modified: number }> {
+    const out: Record<string, { size: number; modified: number }> = {};
+    for (const record of Object.values(davSyncIndex)) {
+      out[record.remote] = { size: record.size, modified: record.modified };
+    }
+    return out;
+  }
+
+  /**
+   * 检查云端是否被别的设备改过：逐份探测已同步文档的远端状态，与本机上次同步记录比对。
+   *
+   * 只提示、不改动任何内容：本地继续编辑，覆盖风险仍由上传时的冲突判定兜底。
+   * 任何探测失败都忽略——离线或服务不可达时不该反复打扰用户。
+   */
+  async function checkCloudUpdates(): Promise<void> {
+    if (!davReady) return;
+    const conn = { url: davUrl.trim(), user: davUser, password: davPass };
+    const baseline = cloudBaseline();
+    const remotes = Object.keys(baseline).slice(0, CLOUD_CHECK_MAX);
+    const found: { remote: string; name: string }[] = [];
+    await Promise.all(
+      remotes.map(async (remote) => {
+        const base = baseline[remote];
+        try {
+          const stat = await webdavStat(conn, remote);
+          if (!stat.exists) return; // 云端已无此文件：交给上传时的判定处理
+          const changed =
+            stat.size !== base.size ||
+            Math.abs(stat.modified - base.modified) > CLOUD_MODIFIED_TOLERANCE_SECS;
+          if (changed) found.push({ remote, name: remoteBaseName(remote) });
+        } catch {
+          /* 探测失败：本轮忽略 */
+        }
+      }),
+    );
+    cloudUpdates = found;
+    const key = found.map((f) => f.remote).sort().join("\n");
+    if (found.length === 0) {
+      cloudPromptedKey = "";
+    } else if (key !== cloudPromptedKey) {
+      cloudPromptedKey = key;
+      await promptCloudUpdates();
+    }
+  }
+
+  /** 提示云端变更：列出被别的设备改过的文档，可选择打开云端版本对比（打开后不写回云端） */
+  async function promptCloudUpdates(): Promise<void> {
+    const items = cloudUpdates;
+    if (items.length === 0) return;
+    const names = items.map((i) => i.name).join("、");
+    const pick = await askChoice(
+      t("The cloud copy of the following file(s) was updated by another device. Open the cloud version to compare?\n{names}", { names }),
+      [
+        { label: t("Open Cloud Version"), value: "open", primary: true },
+        { label: t("Later"), value: "later" },
+      ],
+    );
+    if (pick === "open") await openCloudUpdates();
+  }
+
+  /** 打开云端版本：一律作为未命名文档打开（不绑定远端路径），绝不误写云端 */
+  async function openCloudUpdates(): Promise<void> {
+    const conn = { url: davUrl.trim(), user: davUser, password: davPass };
+    for (const item of cloudUpdates) {
+      try {
+        const content = await webdavDownload(conn, item.remote);
+        await openCloudDoc(item.remote, content);
+      } catch (e) {
+        await showError(t("Failed to open the cloud file: "), e);
+      }
+    }
+  }
+
+  /**
+   * 启动时的云同步初始化：配置齐了就在后台静默测一次连接——成功即视为本会话已通过，
+   * 于是已开启的云同步无需手动再点「测试连接」即可继续；随后立刻做一次云端变更检查。
+   *
+   * 刻意不 await（见 boot 段）：网络慢不该拖住启动；失败只落状态栏与设置面板提示，
+   * 并置「同步失败」以免静默失效。
+   */
+  async function initCloud(): Promise<void> {
+    if (davUrl.trim() === "") return;
+    if (!(await verifyDavSilently())) {
+      davSyncState = "error";
+      davSyncTip = davTip;
+      return;
+    }
+    await checkCloudUpdates();
+  }
+
+  // 定时做云端变更检查（未配置或未验证时 checkCloudUpdates 自行返回）
+  $effect(() => startPolling(CLOUD_CHECK_INTERVAL_MS, () => void checkCloudUpdates()));
+
+  // ---- 本地多版本控制：三类上限的设置项 ----
+  // 上限一改动就立刻裁剪一次全量历史（Rust 侧 prune_history），让「调小上限」马上释放空间。
+
+  /** 保存上限设置后统一触发一次全量裁剪，并刷新当前文档的可回滚范围 */
+  async function applyHistoryLimits(): Promise<void> {
+    await pruneHistory();
+    await refreshHistory();
+  }
+
+  async function setHistoryCountLimitOn(on: boolean): Promise<void> {
+    historyCountLimitOn = on;
+    await saveSetting("historyCountLimitOn", on);
+    await applyHistoryLimits();
+  }
+
   async function setHistoryKeep(n: number): Promise<void> {
     historyKeep = Math.min(200, Math.max(1, Math.round(n)));
     await saveSetting("historyKeep", historyKeep);
-    await refreshHistory(); // 调小份数时立即反映当前文档的可回滚范围
+    await applyHistoryLimits();
+  }
+
+  async function setHistorySizeLimitOn(on: boolean): Promise<void> {
+    historySizeLimitOn = on;
+    await saveSetting("historySizeLimitOn", on);
+    await applyHistoryLimits();
+  }
+
+  async function setHistoryMaxSizeMb(n: number): Promise<void> {
+    historyMaxSizeMb = Math.min(10_240, Math.max(1, Math.round(n)));
+    await saveSetting("historyMaxSizeMb", historyMaxSizeMb);
+    await applyHistoryLimits();
+  }
+
+  async function setHistoryAgeLimitOn(on: boolean): Promise<void> {
+    historyAgeLimitOn = on;
+    await saveSetting("historyAgeLimitOn", on);
+    await applyHistoryLimits();
+  }
+
+  async function setHistoryMaxAgeDays(n: number): Promise<void> {
+    historyMaxAgeDays = Math.min(3_650, Math.max(1, Math.round(n)));
+    await saveSetting("historyMaxAgeDays", historyMaxAgeDays);
+    await applyHistoryLimits();
+  }
+
+  /** 切换自动保存间隔（分钟，0.5 = 30 秒）并持久化；定时器随 $effect 自动重建 */
+  async function setAutoSaveInterval(min: number): Promise<void> {
+    autoSaveIntervalMin = min > 0 ? min : 1;
+    await saveSetting("autoSaveIntervalMin", autoSaveIntervalMin);
   }
 
   /** 切换「默认打开模式」并持久化（只影响之后打开 / 新建的文档） */
@@ -3513,27 +4774,27 @@
   }
 
   /**
-   * 切换配置文件保存位置（系统目录 / 当前程序目录 / 指定目录）。
+   * 切换配置文件保存位置（系统目录 / 当前程序目录）。
    *
    * 流程：预检目标目录可读写 →（失败即提示并回退）→ 询问是否迁移数据 → 提交切换。
    * 预检与提交失败都不会改动当前配置，界面保持在修改前的状态。
    */
-  async function changeDataLocation(mode: DataLocationMode, path?: string): Promise<void> {
+  async function changeDataLocation(mode: DataLocationMode): Promise<void> {
     if (locationBusy) return;
-    // 已在该位置且没有换目录时直接返回（避免重复迁移）
-    if (mode === dataLocation && (mode !== "custom" || path === dataRootPath)) return;
+    // 已在该位置直接返回（避免重复迁移）
+    if (mode === dataLocation) return;
 
     locationBusy = true;
     locationTip = "";
 
     // 1. 预检目标目录可读写；失败：提示 + 回退（不改任何配置）
     try {
-      await checkDataLocation(mode, path ?? null);
+      await checkDataLocation(mode);
     } catch (e) {
       locationBusy = false;
       locationTipOk = false;
       locationTip = t(e instanceof Error ? e.message : String(e));
-      await showError(t("目标目录不可用，已保持原配置："), e);
+      await showError(t("The target folder is unavailable; the previous config was kept: "), e);
       return;
     }
 
@@ -3541,28 +4802,28 @@
     try {
       // 2. 询问是否迁移数据（取消则整体放弃）
       const answer = await askChoice(
-        t("是否把现有配置数据迁移到新位置？选择「迁移」会把设置、恢复草稿、主题与 Pandoc 复制到新目录，并在完整迁移后清理旧目录。"),
+        t("Migrate existing config data to the new location? Choosing \"Migrate\" copies settings, recovery drafts, themes and Pandoc to the new folder, then cleans up the old folder after a complete copy."),
         [
-          { label: t("迁移"), value: "migrate", primary: true },
-          { label: t("不迁移"), value: "keep" },
+          { label: t("Migrate"), value: "migrate", primary: true },
+          { label: t("Don't Migrate"), value: "keep" },
         ],
       );
       if (answer === null) return;
 
       // 3. 提交切换
-      const result = await setDataLocation(mode, path ?? null, answer === "migrate");
+      const result = await setDataLocation(mode, answer === "migrate");
       dataRootPath = result.root;
       dataLocation = mode;
       locationTipOk = true;
       locationTip =
         result.migrated && !result.complete
-          ? t("已切换，但迁移不完整，原目录已保留为备份，重启后生效")
-          : t("已切换，重启后生效");
+          ? t("Switched, but the migration was incomplete — the original folder was kept as a backup. Takes effect after restart")
+          : t("Switched — takes effect after restart");
       switched = true;
     } catch (e) {
       locationTipOk = false;
       locationTip = t(e instanceof Error ? e.message : String(e));
-      await showError(t("切换失败："), e);
+      await showError(t("Switch failed: "), e);
     } finally {
       locationBusy = false;
     }
@@ -3571,20 +4832,75 @@
     if (switched) await promptRestartAfterSwitch();
   }
 
-  /** 选择「指定目录」并切换过去 */
-  async function pickCustomLocation(): Promise<void> {
-    if (locationBusy) return;
+  // ---- 首次运行：配置位置引导（批次十三）----
+
+  /** 首次运行引导模态是否可见 */
+  let configSetupOpen = $state(false);
+  /** 引导提交中（禁用按钮，避免重复点击） */
+  let configSetupBusy = $state(false);
+  /** 引导失败提示（成功时为空） */
+  let configSetupTip = $state("");
+  /** 引导完成后的唤醒回调（不参与响应式；启动流程在此等待用户选定位置） */
+  let configSetupResolve: (() => void) | null = null;
+
+  /**
+   * 确保配置位置已确定，必要时等待用户在引导中选定。
+   *
+   * 启动时探测：程序目录 / 系统目录已有配置则直接返回；两处都没有（首次运行）则亮窗并
+   * 弹出引导模态，**阻塞等待**用户选定（`setup_config_location` 写入标记与初始配置并
+   * 立即生效、无需重启），之后启动流程再继续加载设置 / 主题 / 语言包。
+   */
+  async function ensureConfigReady(): Promise<void> {
+    let state: ConfigState;
     try {
-      const picked = await openDialog({
-        directory: true,
-        multiple: false,
-        title: t("选择配置文件保存目录"),
-      });
-      if (typeof picked !== "string") return; // 用户取消
-      await changeDataLocation("custom", picked);
+      state = await getConfigState();
+    } catch {
+      return; // 探测失败（极罕见）：退回默认流程，由后续命令自行兜底
+    }
+    if (state !== "unset") return;
+
+    // 未初始化：亮出窗口让用户看到引导（正常亮窗在设置加载之后，这里提前）
+    try {
+      await getCurrentWindow().show();
+    } catch {
+      // 无窗口环境（测试/无头）忽略
+    }
+    configSetupOpen = true;
+    await new Promise<void>((resolve) => {
+      configSetupResolve = resolve;
+    });
+  }
+
+  /**
+   * 引导里切换界面语言。
+   *
+   * 此刻数据根尚未确定，写设置会被 Rust 拒绝，所以这里只改内存状态（界面与 Vditor
+   * 立即跟随）；真正的持久化放在 chooseConfigLocation 里、位置落地成功之后。
+   */
+  function selectSetupLocale(next: Locale): void {
+    locale = next;
+    document.documentElement.lang = next;
+    void setEditorLocale(vditorLang(next));
+  }
+
+  /** 用户在引导中选定位置：写入初始配置后关闭模态、放行启动流程 */
+  async function chooseConfigLocation(mode: DataLocationMode): Promise<void> {
+    if (configSetupBusy) return;
+    configSetupBusy = true;
+    configSetupTip = "";
+    try {
+      const root = await setupConfigLocation(mode);
+      dataRootPath = root;
+      dataLocation = mode;
+      // 语言选择此刻才能落盘：数据根未定之前设置写入会被 Rust 拒绝
+      await saveSetting("locale", locale);
+      configSetupOpen = false;
+      configSetupResolve?.();
+      configSetupResolve = null;
     } catch (e) {
-      locationTipOk = false;
-      locationTip = t(e instanceof Error ? e.message : String(e));
+      configSetupTip = t(e instanceof Error ? e.message : String(e));
+    } finally {
+      configSetupBusy = false;
     }
   }
 
@@ -3622,10 +4938,10 @@
       if (anyTabDirty()) {
         const dirtyCount = tabs.filter((_t, i) => tabDirty(i)).length;
         const answer = await askChoice(
-          t("有 {n} 个文档尚未保存，是否保存后再重启？", { n: dirtyCount }),
+          t("{n} document(s) have unsaved changes. Save before restarting?", { n: dirtyCount }),
           [
-            { label: t("保存并重启"), value: "save", primary: true },
-            { label: t("不保存，直接重启"), value: "discard" },
+            { label: t("Save and Restart"), value: "save", primary: true },
+            { label: t("Restart Without Saving"), value: "discard" },
           ],
         );
         if (answer === null) return; // 取消重启
@@ -3635,7 +4951,7 @@
     } catch (e) {
       locationTipOk = false;
       locationTip = t(e instanceof Error ? e.message : String(e));
-      await showError(t("重启失败："), e);
+      await showError(t("Restart failed: "), e);
     } finally {
       locationBusy = false;
     }
@@ -3643,23 +4959,11 @@
 
   /** 切换配置位置后的「重启后生效」提示：确认即进入保存检查并重启 */
   async function promptRestartAfterSwitch(): Promise<void> {
-    const ok = await confirmDialog(t("配置位置已更新，需重启后生效。是否现在重启？"), {
+    const ok = await confirmDialog(t("The config location was updated and takes effect after a restart. Restart now?"), {
       title: "Sticho",
       kind: "info",
-      okLabel: t("立即重启"),
-      cancelLabel: t("稍后"),
-    });
-    if (ok) await restartWithSaveCheck();
-  }
-
-  /** 「立即重启」按钮：先确认，再做保存检查后重启 */
-  async function doRestart(): Promise<void> {
-    if (locationBusy) return;
-    const ok = await confirmDialog(t("重启后新的配置位置才会生效。是否现在重启？"), {
-      title: "Sticho",
-      kind: "info",
-      okLabel: t("立即重启"),
-      cancelLabel: t("取消"),
+      okLabel: t("Restart Now"),
+      cancelLabel: t("Later"),
     });
     if (ok) await restartWithSaveCheck();
   }
@@ -3678,7 +4982,6 @@
    */
   function syncToCloud(local: string): void {
     const cfg = davConfig;
-    const keep = davVersioning ? davKeep : 0;
     const policy = davConflictPolicy;
     const record = davSyncIndex[local];
     const prev = record ? { size: record.size, modified: record.modified } : null;
@@ -3687,7 +4990,7 @@
     davChain = davChain
       .then(async () => {
         try {
-          const result = await webdavUpload(cfg, local, keep, policy, prev);
+          const result = await webdavUpload(cfg, local, policy, prev);
           davSyncTip = result.message;
           davSyncState = "idle";
           if (result.status === "conflict") {
@@ -3702,6 +5005,8 @@
               [local]: { remote: result.remote, size: result.size, modified: result.modified },
             };
             void saveSetting("davSyncIndex", davSyncIndex);
+            // 该文档的云端内容已与本机对齐，撤销「云端有更新」的提示
+            cloudUpdates = cloudUpdates.filter((u) => u.remote !== result.remote);
           }
         } catch (e) {
           davSyncState = "error";
@@ -3714,26 +5019,29 @@
   }
 
   /**
-   * 打开云端文档 / 某个历史版本，一律作为**未命名文档**打开。
+   * 打开云端文档 / 某个历史版本。
    *
-   * 远端路径不是本地路径，直接塞进 currentPath 会让下一次保存写到错误的本地位置，
-   * 所以这里置空路径，让用户保存时走既有「另存为」流程落回本地。
+   * `bind` 决定是否把文档绑定到远端路径：
+   * - 侧边栏「云端」视图打开（bind=true）→ 绑定 remote，保存时按此路径就地写回云端；
+   * - 云端浏览模态打开 / 恢复历史版本（bind=false）→ 只取正文，作为未命名文档打开，
+   *   用户保存时走既有「另存为」流程落回本地，绝不误写云端。
    */
-  async function openCloudDoc(remote: string, content: string): Promise<void> {
+  async function openCloudContent(remote: string, content: string, bind: boolean): Promise<void> {
     const isHtml = /\.html?$/i.test(remote);
     await loadIntoFreshTab(async () => {
       currentPath = null;
+      currentRemote = bind ? remote : null; // 未绑定时置空：避免沿用上一个文档的云端路径
       setDocumentPath(null);
       dirty = false;
       encoding = "utf-8"; // 云端正文按 UTF-8 取回（非 UTF-8 已由 Rust 侧挡下）
+      docEol = detectEol(content); // 云端原文的行尾风格一并保留
       if (isHtml) {
         docKind = "html";
         htmlSource = content;
         previewDoc = content;
-        previewKey += 1;
-        previewMutated = false;
         htmlView = "preview";
-        htmlScripts = false;
+        setCurrentHtmlScripts(false);
+        rebuildPreview(content);
       } else if (isCodePath(remote)) {
         htmlSource = "";
         previewDoc = "";
@@ -3751,30 +5059,137 @@
     });
   }
 
-  /** 保存成功后清掉活跃标签的草稿（磁盘文件已是最新，草稿没意义了） */
-  function clearRecoveryDraft(): void {
-    const tab = activeTab();
-    if (!tab) return;
-    tab.draftHash = "";
-    void deleteRecovery(tab.draftId).catch(() => {});
+  /** 云端浏览模态 / 历史版本：作为未命名文档打开（不绑定远端路径） */
+  async function openCloudDoc(remote: string, content: string): Promise<void> {
+    await openCloudContent(remote, content, false);
+  }
+
+  /** 侧边栏「云端」视图：打开并绑定远端路径，保存时就地写回云端 */
+  async function openCloudBound(remote: string, content: string): Promise<void> {
+    await openCloudContent(remote, content, true);
   }
 
   /**
-   * 会话恢复出来的标签只带元信息，正文第一次被激活时才读盘。
+   * 保存绑定云端的文档（无本地文件）：按记录的远端路径直接写回。
+   *
+   * 与 syncToCloud 的差别：那里是本地保存的附带动作（不 await、不阻塞），
+   * 这里「写云端」本身就是保存动作，需要 await 并负责 dirty / 标题 / 提示；
+   * 版本留档与冲突策略与本地同步完全一致。
+   */
+  async function saveCloudBound(): Promise<void> {
+    const remote = currentRemote;
+    if (remote === null) return;
+    if (!davReady) {
+      await messageDialog(
+        t("WebDAV is not configured or the connection has not been tested, so the file cannot be saved to the cloud. Configure and test the connection under Settings → WebDAV."),
+        { title: "Sticho", kind: "info" },
+      );
+      return;
+    }
+    const wasBusy = busy;
+    busy = true;
+    try {
+      syncHtmlFromPreview(); // 预览里直接编辑的改动先落回源码
+      const cfg = davConfig;
+      const record = davSyncIndex[remote];
+      const prev = record ? { size: record.size, modified: record.modified } : null;
+      davSyncState = "busy";
+      davSyncTip = "";
+      const result = await webdavPut(cfg, remote, textForDisk(), davConflictPolicy, prev);
+      davSyncTip = result.message;
+      davSyncState = "idle";
+      dirty = false;
+      await updateTitle();
+      refreshSideNow();
+      clearRecoveryDraftsForDoc(null, remote); // 云端文档无本地路径：按远端路径清该文档全部草稿
+      if (result.status === "conflict") {
+        // 冲突：已在同目录另存副本，原远端文件（含对方的改动）完好；不回填索引，
+        // 下次保存仍会判定冲突并另存，直到用户自行合并。
+        void messageDialog(result.message, { title: "Sticho", kind: "warning" });
+      } else {
+        davSyncIndex = {
+          ...davSyncIndex,
+          [remote]: { remote: result.remote, size: result.size, modified: result.modified },
+        };
+        void saveSetting("davSyncIndex", davSyncIndex);
+        // 云端内容已与本机对齐，撤销「云端有更新」的提示
+        cloudUpdates = cloudUpdates.filter((u) => u.remote !== result.remote);
+      }
+    } catch (e) {
+      davSyncState = "error";
+      davSyncTip = e instanceof Error ? e.message : String(e);
+      await showError(t("Failed to save: "), e);
+    } finally {
+      busy = wasBusy;
+    }
+  }
+
+  /**
+   * 保存成功后清掉该文档的**全部**自动保存草稿（磁盘文件已是最新，草稿没意义了）。
+   *
+   * 需求：多版本控制只统计用户主动保存产生的版本，定时自动保存的草稿在保存后一律清空。
+   * 同一文件可能开在多个标签里（各有各的 draftId），故按 path / 远端路径 / 当前标签
+   * 三路命中标签，再用「已知 draftId」与「草稿元信息里的 path」删掉对应草稿。
+   */
+  function clearRecoveryDraftsForDoc(path: string | null, remote: string | null = null): void {
+    const active = activeTab();
+    // 命中的标签：当前标签必然算；本地文档按 path 匹配，云端文档按远端路径匹配
+    // （同一文件可能开在多个标签里，各有各的 draftId）
+    const hitTabs = tabs.filter(
+      (tb) => tb === active || (path !== null && tb.path === path) || (remote !== null && tb.remote === remote),
+    );
+    const ids = new Set(hitTabs.map((tb) => tb.draftId));
+    for (const tb of hitTabs) tb.draftHash = "";
+    void (async () => {
+      try {
+        const metas = await listRecovery();
+        for (const m of metas) {
+          // 草稿元信息记了原文件 path（无 remote 字段），故这里用「已知 draftId」+
+          // 「path」两条命中规则：前者覆盖仍在标签栏的同一文档，后者覆盖已关闭标签的残留草稿。
+          const hit = ids.has(m.id) || (path !== null && m.path === path);
+          if (hit) await deleteRecovery(m.id);
+        }
+      } catch {
+        // 静默：清草稿属收尾动作，失败不能影响保存本身
+      }
+    })();
+  }
+
+  /**
+   * 会话恢复出来的标签只带元信息，正文第一次被激活时才取回（本地读盘 / 云端下载）。
    *
    * 不在此处吞掉「文件已被删除」的异常：直接把路径清掉降级为未命名文档，
    * 用户至少能看到这个标签是空的，而不是启动时弹一串错误框。
    */
   async function loadTabContent(tab: DocTab): Promise<void> {
     tab.loaded = true;
-    if (!tab.path) return;
-    try {
-      const file = await readTextFile(tab.path);
-      tab.content = file.content;
-      tab.encoding = file.encoding;
-    } catch {
-      tab.content = "";
-      tab.path = null;
+    if (tab.path) {
+      try {
+        const file = await readTextFile(tab.path);
+        tab.content = file.content;
+        tab.encoding = file.encoding;
+        tab.eol = detectEol(file.content);
+      } catch {
+        // 文件已被删除 / 读不到：降级为未命名文档，别让标签停在会误导的空内容上
+        tab.content = "";
+        tab.path = null;
+      }
+      return;
+    }
+    // 绑定云端的文档（无本地文件）：正文不在本地，从远端重新取回。
+    // 取回失败则解除绑定：宁可降级为未命名文档，也不能让用户对着空正文保存、
+    // 把云端原内容覆盖成空。
+    if (tab.remote) {
+      try {
+        tab.content = await webdavDownload(
+          { url: davUrl.trim(), user: davUser, password: davPass },
+          tab.remote,
+        );
+        tab.eol = detectEol(tab.content);
+      } catch {
+        tab.content = "";
+        tab.remote = null;
+      }
     }
   }
 
@@ -3782,8 +5197,9 @@
    * 启动时恢复上次退出时的标签集（批次六）。
    *
    * 标签集与各标签的未保存正文是分开存的：元信息在 settings 的 "session" 键，
-   * 正文在各自的恢复草稿里。只有「至少有一个标签带未保存内容」时才弹框——
-   * 全是干净标签时静默跳过，免得每次启动都被一张「要不要恢复上次的窗口」打扰。
+   * 正文在各自的恢复草稿里。恢复**全部**标签（含已保存的干净标签）——正常关闭后再启动
+   * 应当还原上次打开的标签集；只有「存在未保存内容」时才弹框确认（那是需要用户担责的操作），
+   * 全是干净标签时静默恢复，免得每次启动都被一张「要不要恢复上次的窗口」打扰。
    * 返回 true 表示本次启动已按会话处理过（不再走单草稿的兜底提示）。
    */
   async function tryRestoreSession(): Promise<boolean> {
@@ -3791,17 +5207,19 @@
     const list = session?.tabs ?? [];
     if (list.length === 0) return false;
     const dirtyCount = list.filter((item) => item.dirty).length;
-    if (dirtyCount === 0) return false;
 
-    const ok = await confirmDialog(
-      t("检测到上次退出时有 {n} 个标签未保存（共 {total} 个标签）。是否恢复这些标签？", { n: dirtyCount, total: list.length }),
-      { title: "Sticho", kind: "warning", okLabel: t("恢复"), cancelLabel: t("丢弃") },
-    );
-    if (!ok) {
-      for (const item of list) void deleteRecovery(item.draftId).catch(() => {});
-      await saveSetting("session", { tabs: [], active: 0 });
-      lastSessionJson = "";
-      return true;
+    // 有未保存内容才弹确认框；否则直接静默恢复全部标签
+    if (dirtyCount > 0) {
+      const ok = await confirmDialog(
+        t("Found {n} unsaved tab(s) from your last session (out of {total} tabs). Restore them?", { n: dirtyCount, total: list.length }),
+        { title: "Sticho", kind: "warning", okLabel: t("Restore"), cancelLabel: t("Discard") },
+      );
+      if (!ok) {
+        for (const item of list) void deleteRecovery(item.draftId).catch(() => {});
+        await saveSetting("session", { tabs: [], active: 0 });
+        lastSessionJson = "";
+        return true;
+      }
     }
 
     const built: DocTab[] = [];
@@ -3811,7 +5229,9 @@
       tab.draftId = item.draftId; // 沿用旧草稿 id：恢复出来的标签继续往同一份草稿上写
       tab.kind = item.kind === "html" ? "html" : item.kind === "code" ? "code" : "markdown";
       tab.path = item.path;
+      tab.remote = item.remote ?? null;
       tab.encoding = item.encoding || "utf-8";
+      if (item.eol === "\r\n" || item.eol === "\n") tab.eol = item.eol;
       tab.htmlView = item.htmlView === "source" ? "source" : "preview";
       tab.dirty = !!item.dirty;
       tab.loaded = false; // 正文先不读：会话恢复只带元信息，等这个标签被激活时再读盘
@@ -3819,6 +5239,7 @@
       if (draft !== null) {
         tab.content = draft;
         tab.loaded = true;
+        if (item.eol === undefined) tab.eol = detectEol(draft); // 老会话无行尾字段：按草稿探测
       }
       built.push(tab);
     }
@@ -3843,8 +5264,8 @@
     const latest = drafts[0];
     const when = new Date(latest.saved_at * 1000).toLocaleString("zh-CN", { hour12: false });
     const ok = await confirmDialog(
-      t("检测到上次未正常退出的编辑内容（{title}，{when}）。是否恢复？", { title: latest.title, when }),
-      { title: "Sticho", kind: "warning", okLabel: t("恢复"), cancelLabel: t("丢弃") },
+      t("Found unsaved content from an abnormal exit ({title}, {when}). Restore it?", { title: latest.title, when }),
+      { title: "Sticho", kind: "warning", okLabel: t("Restore"), cancelLabel: t("Discard") },
     );
     if (!ok) {
       await deleteRecovery(latest.id).catch(() => {});
@@ -3862,11 +5283,13 @@
       } catch {
         // 原文件已被删除/移动：降级为未命名文档，内容仍要恢复
         currentPath = null;
+        currentRemote = null;
         setDocumentPath(null);
         diskMtime = null;
       }
     } else {
       currentPath = null;
+      currentRemote = null;
       setDocumentPath(null);
       diskMtime = null;
     }
@@ -3883,12 +5306,13 @@
       setEditorValue(content);
     }
     encoding = latest.encoding;
+    docEol = detectEol(content); // 恢复草稿的行尾风格
     dirty = true; // 恢复的是未保存内容，必须标记未保存
     // 接管这份草稿：否则下一轮会另写一份新 id 的草稿，旧的从此成了再也无人认领的孤儿
     const tab = activeTab();
     if (tab) {
       tab.draftId = latest.id;
-      tab.draftHash = `${content.length}:${content.slice(0, 64)}`;
+      tab.draftHash = recoveryFingerprint(content);
     }
     await updateTitle();
     refreshSideNow();
@@ -3909,13 +5333,16 @@
   $effect(() => {
     const md = docKind === "markdown";
     const code = docKind === "code";
-    const gutter = (md && (editorMode === "sv" || largeReading)) || codeLargeText !== null;
+    const gutter =
+      (md && (editorMode === "sv" || editorMode === "none" || largeReading)) || codeLargeText !== null;
     setLineNumbersVisible(showLineNumbers && gutter);
     setTypewriterMode(typewriterOn && md);
     setParagraphFocusVisible(paragraphFocus && md);
     setCodeTypewriter(typewriterOn && code);
     setCodeParagraphFocus(paragraphFocus && code);
     setCodeLineNumbers(showLineNumbers && code); // 未挂载时是 no-op
+    setCodeLineWrapping(autoWrap && code && codeLargeText === null);
+    setLargeReaderWrap(autoWrap);
   });
 
   // HTML 源码行号的叠层：叠层可见时量一次宽度并挂上 ResizeObserver（宽度随窗口 / 侧栏变化），
@@ -3932,10 +5359,14 @@
     return () => ro.disconnect();
   });
 
-  // 阅读排版：同样只服务 Markdown/TXT。HTML 文档显式传空设置（等价于移除样式），
-  // 保证自带颜色的 HTML 文档一个像素都不受影响；代码视图只消费字号与行距。
+  // 阅读排版按文档模式分流（需求约定）：
+  // - Markdown / 纯文本：字体、字号、行距、文字颜色、页面背景全部生效；
+  // - 代码视图：只字号、行距、页面背景生效（文字色交给语法高亮，字体固定等宽栈）；
+  // - HTML：自带样式，全部不生效（显式传空设置，等价于移除样式节点）。
   $effect(() => {
-    setReaderStyle(docKind === "markdown" ? readerStyle : {});
+    if (docKind === "markdown") setReaderStyle(readerStyle);
+    else if (docKind === "code") setReaderStyle({ background: readerStyle.background });
+    else setReaderStyle({});
     if (docKind === "code") applyCodeReaderStyle();
   });
 
@@ -3961,100 +5392,103 @@
   /**
    * 快捷键一览（帮助菜单）：用表格呈现，按分类分组，两列「快捷键 / 功能」便于速查。
    *
-   * 按键本身不翻译（键位跨语言一致），功能描述与分组名走 t()（中文原文即键）。
+   * 按键本身不翻译（键位跨语言一致），功能描述与分组名走 t()（英文原文即键）。
    */
   const SHORTCUT_GROUPS: { group: string; items: { keys: string; desc: string }[] }[] = [
     {
-      group: "文件",
+      group: "File",
       items: [
-        { keys: "Ctrl+N", desc: "新建标签" },
-        { keys: "Ctrl+O", desc: "打开…" },
-        { keys: "Ctrl+P", desc: "命令面板…" },
-        { keys: "Ctrl+S", desc: "保存" },
-        { keys: "Ctrl+Shift+S", desc: "另存为…" },
-        { keys: "Ctrl+,", desc: "设置" },
-        { keys: "Ctrl+Q", desc: "退出" },
+        { keys: "Ctrl+N", desc: "New Tab" },
+        { keys: "Ctrl+O", desc: "Open…" },
+        { keys: "Ctrl+P", desc: "Command Palette…" },
+        { keys: "Ctrl+S", desc: "Save" },
+        { keys: "Ctrl+Shift+S", desc: "Save As…" },
+        { keys: "Ctrl+,", desc: "Settings" },
+        { keys: "Ctrl+Q", desc: "Exit" },
       ],
     },
     {
-      group: "标签",
+      group: "Tabs",
       items: [
-        { keys: "Ctrl+W", desc: "关闭标签" },
-        { keys: "Ctrl+Tab", desc: "下一个标签" },
-        { keys: "Ctrl+Shift+Tab", desc: "上一个标签" },
-        { keys: "鼠标中键", desc: "点标签也可关闭" },
+        { keys: "Ctrl+W", desc: "Close Tab" },
+        { keys: "Ctrl+Tab", desc: "Next Tab" },
+        { keys: "Ctrl+Shift+Tab", desc: "Previous Tab" },
+        { keys: "Middle Click", desc: "Middle-clicking a tab also closes it" },
       ],
     },
     {
-      group: "导出",
+      group: "Export",
       items: [
-        { keys: "Ctrl+Shift+E", desc: "导出为 Word 文档" },
-        { keys: "Ctrl+Shift+P", desc: "导出为 PDF 文档" },
-        { keys: "Ctrl+Shift+H", desc: "导出为 HTML 文档" },
-        { keys: "Ctrl+Shift+T", desc: "导出为纯文本文件" },
+        { keys: "Ctrl+Shift+E", desc: "Export as Word Document" },
+        { keys: "Ctrl+Shift+P", desc: "Export as PDF Document" },
+        { keys: "Ctrl+Shift+H", desc: "Export as HTML Document" },
+        { keys: "Ctrl+Shift+T", desc: "Export as Plain Text File" },
       ],
     },
     {
-      group: "编辑",
+      group: "Edit",
       items: [
-        { keys: "Ctrl+Z", desc: "撤销" },
-        { keys: "Ctrl+Y", desc: "重做" },
-        { keys: "Ctrl+X", desc: "剪切" },
-        { keys: "Ctrl+C", desc: "复制" },
-        { keys: "Ctrl+V", desc: "粘贴" },
+        { keys: "Ctrl+Z", desc: "Undo" },
+        { keys: "Ctrl+Y", desc: "Redo" },
+        { keys: "Ctrl+X", desc: "Cut" },
+        { keys: "Ctrl+C", desc: "Copy" },
+        { keys: "Ctrl+V", desc: "Paste" },
+        { keys: "Ctrl+F2", desc: "Toggle Bookmark" },
+        { keys: "F4", desc: "Next Bookmark" },
+        { keys: "Shift+F4", desc: "Previous Bookmark" },
       ],
     },
     {
-      group: "查找",
+      group: "Find / Replace",
       items: [
-        { keys: "Ctrl+F", desc: "查找" },
-        { keys: "F3", desc: "查找下一个" },
-        { keys: "Shift+F3", desc: "查找上一个" },
-        { keys: "Ctrl+H", desc: "替换" },
+        { keys: "Ctrl+F", desc: "Find…" },
+        { keys: "F3", desc: "Find Next" },
+        { keys: "Shift+F3", desc: "Find Previous" },
+        { keys: "Ctrl+H", desc: "Replace" },
       ],
     },
     {
-      group: "段落",
+      group: "Paragraph",
       items: [
-        { keys: "Ctrl+1~6", desc: "标题 1~6 级" },
-        { keys: "Ctrl+0", desc: "正文" },
-        { keys: "Ctrl+Shift+[", desc: "有序列表" },
-        { keys: "Ctrl+Shift+]", desc: "无序列表" },
-        { keys: "Ctrl+[", desc: "增加缩进" },
-        { keys: "Ctrl+]", desc: "减少缩进" },
-        { keys: "Ctrl+Shift+Q", desc: "引用" },
+        { keys: "Ctrl+1~6", desc: "Heading 1-6" },
+        { keys: "Ctrl+0", desc: "Paragraph" },
+        { keys: "Ctrl+Shift+[", desc: "Ordered List" },
+        { keys: "Ctrl+Shift+]", desc: "Unordered List" },
+        { keys: "Ctrl+[", desc: "Increase Indent" },
+        { keys: "Ctrl+]", desc: "Decrease Indent" },
+        { keys: "Ctrl+Shift+Q", desc: "Blockquote" },
       ],
     },
     {
-      group: "格式",
+      group: "Format",
       items: [
-        { keys: "Ctrl+B", desc: "加粗" },
-        { keys: "Ctrl+I", desc: "斜体" },
-        { keys: "Ctrl+K", desc: "链接" },
-        { keys: "Ctrl+Shift+K", desc: "代码块" },
-        { keys: "Ctrl+Shift+`", desc: "行内代码" },
-        { keys: "Ctrl+Shift+M", desc: "行间公式" },
-        { keys: "Ctrl+Shift+I", desc: "插入图片" },
-        { keys: "Alt+Shift+5", desc: "删除线" },
+        { keys: "Ctrl+B", desc: "Bold" },
+        { keys: "Ctrl+I", desc: "Italic" },
+        { keys: "Ctrl+K", desc: "Link" },
+        { keys: "Ctrl+Shift+K", desc: "Code Block" },
+        { keys: "Ctrl+Shift+`", desc: "Inline Code" },
+        { keys: "Ctrl+Shift+M", desc: "Math Block" },
+        { keys: "Ctrl+Shift+I", desc: "Insert Image" },
+        { keys: "Alt+Shift+5", desc: "Strikethrough" },
       ],
     },
     {
-      group: "视图",
+      group: "View",
       items: [
-        { keys: "Ctrl+Shift+L", desc: "侧边栏" },
-        { keys: "Ctrl+Shift+1", desc: "文档大纲" },
-        { keys: "Ctrl+Shift+3", desc: "文件目录树" },
-        { keys: "F8", desc: "段落聚焦" },
-        { keys: "F9", desc: "打字机模式" },
-        { keys: "F11", desc: "沉浸式全屏编辑" },
-        { keys: "Ctrl+E", desc: "阅读模式" },
+        { keys: "Ctrl+Shift+L", desc: "Sidebar" },
+        { keys: "Ctrl+Shift+1", desc: "Document Outline" },
+        { keys: "Ctrl+Shift+3", desc: "File Tree" },
+        { keys: "F8", desc: "Paragraph Focus" },
+        { keys: "F9", desc: "Typewriter Mode" },
+        { keys: "F11", desc: "Immersive Fullscreen Editing" },
+        { keys: "Ctrl+E", desc: "Reading Mode" },
       ],
     },
     {
-      group: "其他",
+      group: "Other",
       items: [
-        { keys: "Alt+F/E/P/O/V/H", desc: "展开对应菜单" },
-        { keys: "Esc", desc: "关闭菜单与查找栏" },
+        { keys: "Alt+F/E/P/O/V/H", desc: "Open the corresponding menu" },
+        { keys: "Esc", desc: "Close the menu and the find bar" },
       ],
     },
   ];
@@ -4063,19 +5497,9 @@
     shortcutsOpen = true;
   }
 
-  async function showAbout(): Promise<void> {
-    await messageDialog(
-      [
-        `短笺 Sticho ${APP_VERSION}`,
-        "",
-        t("轻量级 Markdown / HTML 文档编辑器。"),
-        t("支持 Markdown、Word、PDF、HTML 互转，全部转换在本机完成。"),
-        "",
-        t("基于 Tauri + Svelte + Vditor 构建。"),
-        t("Word 转换由 Pandoc 独立进程完成（GPL-2.0，未随本程序分发）。"),
-      ].join("\n"),
-      { title: t("关于 Sticho"), kind: "info" },
-    );
+  // 用自绘模态替代原生消息框：原生弹窗无法放图片，应用图标只能自己画
+  function showAbout(): void {
+    aboutOpen = true;
   }
 
   // ---- 菜单模型（阶段 10）----
@@ -4098,24 +5522,25 @@
   type MenuDef = { id: string; label: string; key: string; items: MenuItem[]; readonlyLocked?: boolean };
 
   /**
-   * 「视图 → 语法高亮语言」的子菜单项：自动（按扩展名）/ 纯文本 / 各语言，单选。
+   * 「视图 → 纯文本模式」三级子菜单的子菜单项：自动（按扩展名）/ 纯文本 / 各语言，单选。
    *
    * 只在代码文件下有意义：Markdown 走 Lute、HTML 走文档模式，高亮与语言跟格式绑定。
    * 选中态与动作都在渲染/点击时求值（不在这里缓存路径），否则切换标签后圆点会指错文档。
+   * 动作统一走 applyCodeLang：先确保切到纯文本模式，再设置高亮语言。
    */
   function codeLangSubmenu(): MenuItem[] {
     const items: MenuItem[] = [
       {
-        label: t("自动（按扩展名）"),
+        label: t("Auto (by Extension)"),
         radio: true,
         checked: () => codeLangOverrides[codeLangKey(currentPath)] === undefined,
-        action: () => void setCodeLang(undefined),
+        action: () => void applyCodeLang(undefined),
       },
       {
-        label: t("纯文本"),
+        label: t("Plain Text"),
         radio: true,
         checked: () => codeLangOverrides[codeLangKey(currentPath)] === null,
-        action: () => void setCodeLang(null),
+        action: () => void applyCodeLang(null),
       },
       { sep: true },
     ];
@@ -4124,7 +5549,33 @@
         label: name,
         radio: true,
         checked: () => codeLangOverrides[codeLangKey(currentPath)] === id,
-        action: () => void setCodeLang(id),
+        action: () => void applyCodeLang(id),
+      });
+    }
+    return items;
+  }
+
+  /**
+   * 「文件 → 编码」子菜单：常表 + 当前编码。
+   *
+   * 自动检测可能给出常表之外的编码（windows-1251 / euc-jp / ISO-8859-x …），
+   * 不把它补进列表的话，用户既看不到当前选中态、也没法把编码切回这一项。
+   * 这里读 `encoding`，故本函数在 $derived 的 MENUS 里被调用时会注册依赖，
+   * 编码一变就自动重建菜单（按原样只用 ✓ 勾选，与其余子菜单保持一致）。
+   */
+  function encodingSubmenu(): MenuItem[] {
+    const items: MenuItem[] = [
+      { label: t("Auto-detect"), action: () => applyEncoding(null) },
+      { sep: true },
+    ];
+    const list = ENCODINGS.some((e) => e.id === encoding)
+      ? ENCODINGS
+      : [...ENCODINGS, { id: encoding, label: encoding }];
+    for (const enc of list) {
+      items.push({
+        label: t(enc.label),
+        checked: () => encoding === enc.id,
+        action: () => applyEncoding(enc.id),
       });
     }
     return items;
@@ -4134,76 +5585,76 @@
   const MENUS: MenuDef[] = $derived([
     {
       id: "file",
-      label: t("文件"),
+      label: t("File"),
       key: "f",
       items: [
-        { label: t("新建标签"), shortcut: "Ctrl+N", disabled: () => busy, action: newTab },
-        { label: t("打开…"), shortcut: "Ctrl+O", disabled: () => busy, action: openFile },
+        { label: t("New Tab"), shortcut: "Ctrl+N", disabled: () => busy, action: newTab },
+        { label: t("Open…"), shortcut: "Ctrl+O", disabled: () => busy, action: openFile },
         // 命令面板对齐 Typora 的「快速打开」（Ctrl+P）：同一处肌肉记忆，也顺手挡住 WebView2 的打印弹窗
-        { label: t("命令面板…"), shortcut: "Ctrl+P", action: openCommandPalette },
+        { label: t("Command Palette…"), shortcut: "Ctrl+P", action: openCommandPalette },
         {
-          label: t("打开最近文件"),
+          label: t("Open Recent"),
           disabled: () => recentFiles.length === 0,
           dynamic: () => [
             ...recentFiles.map((p) => ({ label: fileName(p), action: () => openRecent(p) })),
             { sep: true },
-            { label: t("清除最近文件列表"), action: clearRecentFiles },
+            { label: t("Clear Recent Files"), action: clearRecentFiles },
           ],
         },
         { sep: true },
-        { label: t("保存"), shortcut: "Ctrl+S", disabled: () => busy, action: saveFile },
-        { label: t("另存为…"), shortcut: "Ctrl+Shift+S", disabled: () => busy, action: saveFileAs },
+        { label: t("Save"), shortcut: "Ctrl+S", disabled: () => busy, action: saveFile },
+        { label: t("Save As…"), shortcut: "Ctrl+Shift+S", disabled: () => busy, action: saveFileAs },
         { sep: true },
-        { label: t("关闭标签"), shortcut: "Ctrl+W", disabled: () => busy, action: () => closeTab(activeIndex) },
-        { label: t("下一个标签"), shortcut: "Ctrl+Tab", disabled: () => tabs.length < 2, action: () => cycleTab(1) },
-        { label: t("上一个标签"), shortcut: "Ctrl+Shift+Tab", disabled: () => tabs.length < 2, action: () => cycleTab(-1) },
-        { label: t("关闭其他标签"), disabled: () => busy || tabs.length < 2, action: () => closeOtherTabs() },
-        { sep: true },
+        // 标签操作归入子菜单，避免「文件」一级菜单过长；各项快捷键保持不变
         {
-          label: t("导入"),
-          disabled: () => busy,
+          label: t("Tabs"),
           sub: [
-            { label: t("导入 Word…"), action: importWord },
-            { label: t("导入 PDF…"), action: importPdfFile },
-            { label: t("导入 HTML 并转为 Markdown…"), action: importHtml },
-          ],
-        },
-        {
-          label: t("导出"),
-          disabled: () => busy,
-          sub: [
-            { label: t("导出为 Word"), shortcut: "Ctrl+Shift+E", action: exportWord },
-            { label: t("导出为 PDF"), shortcut: "Ctrl+Shift+P", action: exportPdfFile },
-            { label: t("导出为 HTML"), shortcut: "Ctrl+Shift+H", action: exportHtmlFile },
-            { label: t("导出为纯文本"), shortcut: "Ctrl+Shift+T", action: exportTxtFile },
+            { label: t("Close Tab"), shortcut: "Ctrl+W", disabled: () => busy, action: () => closeTab(activeIndex) },
+            { label: t("Close Other Tabs"), disabled: () => busy || tabs.length < 2, action: () => closeOtherTabs() },
             { sep: true },
-            { label: t("导出为 LaTeX（.tex）"), action: exportLatexFile },
-            { label: t("导出为 Epub（.epub）"), action: exportEpubFile },
+            { label: t("Next Tab"), shortcut: "Ctrl+Tab", disabled: () => tabs.length < 2, action: () => cycleTab(1) },
+            { label: t("Previous Tab"), shortcut: "Ctrl+Shift+Tab", disabled: () => tabs.length < 2, action: () => cycleTab(-1) },
           ],
         },
-        { label: t("打印…"), action: () => void printDoc() },
         { sep: true },
         {
-          label: t("编码"),
+          label: t("Import"),
           disabled: () => busy,
           sub: [
-            { label: t("自动检测"), action: () => applyEncoding(null) },
-            { sep: true },
-            ...ENCODINGS.map((enc) => ({
-              label: enc.label,
-              checked: () => encoding === enc.id,
-              action: () => applyEncoding(enc.id),
-            })),
+            { label: t("Import Word…"), action: importWord },
+            { label: t("Import PDF…"), action: importPdfFile },
+            { label: t("Import HTML as Markdown…"), action: importHtml },
+            { label: t("Convert to Markdown to Edit"), disabled: () => docKind !== "html", action: () => void convertToMarkdown() },
           ],
         },
-        { label: t("文件属性…"), action: showFileInfo },
+        {
+          label: t("Export"),
+          disabled: () => busy,
+          sub: [
+            { label: t("Export as Word"), shortcut: "Ctrl+Shift+E", action: exportWord },
+            { label: t("Export as PDF"), shortcut: "Ctrl+Shift+P", action: exportPdfFile },
+            { label: t("Export as HTML"), shortcut: "Ctrl+Shift+H", action: exportHtmlFile },
+            { label: t("Export as Plain Text"), shortcut: "Ctrl+Shift+T", action: exportTxtFile },
+            { sep: true },
+            { label: t("Export as LaTeX (.tex)"), action: exportLatexFile },
+            { label: t("Export as Epub (.epub)"), action: exportEpubFile },
+          ],
+        },
+        { label: t("Print…"), action: () => void printDoc() },
+        { sep: true },
+        {
+          label: t("Encoding"),
+          disabled: () => busy,
+          sub: encodingSubmenu(),
+        },
+        { label: t("File Properties…"), action: showFileInfo },
         {
           // 本地版本历史：保存覆盖前自动留档，误改可就地回滚（离线、无需配置）
-          label: t("文件历史"),
+          label: t("File History"),
           disabled: () => busy || !currentPath || docKind === "code",
           dynamic: () =>
             historyEntries.length === 0
-              ? [{ label: t("（暂无历史版本）"), disabled: () => true }]
+              ? [{ label: t("(No version history yet)"), disabled: () => true }]
               : historyEntries.map((h) => ({
                   label: `${formatStamp(h.saved_at)} · ${formatSize(h.size)}`,
                   action: () => void historyVersionMenu(h.file),
@@ -4211,228 +5662,264 @@
         },
         {
           // 恢复中心：统一浏览恢复草稿与全部文档的本地版本历史，可预览后恢复 / 另存 / 删除
-          label: t("恢复中心…"),
+          label: t("Recovery Center…"),
           action: () => {
             recoveryOpen = true;
           },
         },
         { sep: true },
-        // HTML 文档专属操作（从「视图」迁来）：只在打开 .html 时可用，编辑 Markdown 时整组置灰
-        { label: t("HTML 预览"), disabled: () => docKind !== "html", checked: () => docKind === "html" && htmlView === "preview", action: () => setHtmlView("preview") },
-        { label: t("HTML 源码"), disabled: () => docKind !== "html", checked: () => docKind === "html" && htmlView === "source", action: () => setHtmlView("source") },
-        {
-          label: t("执行文档脚本（JavaScript）"),
-          disabled: () => docKind !== "html",
-          checked: () => htmlScripts,
-          action: toggleHtmlScripts,
-        },
-        { label: t("转为 Markdown 编辑"), disabled: () => docKind !== "html", action: () => void convertToMarkdown() },
-        { sep: true },
         // 偏好设置对齐 Typora：放在「文件」菜单末尾、Ctrl+,
-        { label: t("设置…"), shortcut: "Ctrl+,", action: () => { settingsOpen = true; } },
+        { label: t("Settings…"), shortcut: "Ctrl+,", action: () => { settingsOpen = true; } },
         { sep: true },
-        { label: t("退出程序"), shortcut: "Ctrl+Q", action: exitApp },
+        { label: t("Quit"), shortcut: "Ctrl+Q", action: exitApp },
       ],
     },
     {
       id: "edit",
-      label: t("编辑"),
+      label: t("Edit"),
       key: "e",
       items: [
-        { label: t("撤销"), shortcut: "Ctrl+Z", disabled: () => docKind === "html" || browseMode, action: undoEditor },
-        { label: t("重做"), shortcut: "Ctrl+Y", disabled: () => docKind === "html" || browseMode, action: redoEditor },
+        { label: t("Undo"), shortcut: "Ctrl+Z", disabled: () => docKind === "html" || browseMode, action: undoEditor },
+        { label: t("Redo"), shortcut: "Ctrl+Y", disabled: () => docKind === "html" || browseMode, action: redoEditor },
         { sep: true },
-        { label: t("剪切"), shortcut: "Ctrl+X", disabled: () => docKind === "html" || browseMode, action: cutSelection },
-        { label: t("复制"), shortcut: "Ctrl+C", disabled: () => docKind === "html", action: copySelection },
-        { label: t("粘贴"), shortcut: "Ctrl+V", disabled: () => docKind === "html" || browseMode, action: pasteClipboard },
+        { label: t("Cut"), shortcut: "Ctrl+X", disabled: () => docKind === "html" || browseMode, action: cutSelection },
+        { label: t("Copy"), shortcut: "Ctrl+C", disabled: () => docKind === "html", action: copySelection },
+        { label: t("Paste"), shortcut: "Ctrl+V", disabled: () => docKind === "html" || browseMode, action: pasteClipboard },
         { sep: true },
         // HTML 文档模式下这几项由 textarea / 预览原生行为承担，查找替换三种视图均可用
-        { label: t("查找…"), shortcut: "Ctrl+F", action: openFind },
-        { label: t("查找下一个"), shortcut: "F3", action: () => findNext(false) },
-        { label: t("查找上一个"), shortcut: "Shift+F3", action: () => findNext(true) },
-        { label: t("替换…"), shortcut: "Ctrl+H", action: openFind },
+        { label: t("Find…"), shortcut: "Ctrl+F", action: openFind },
+        { label: t("Find Next"), shortcut: "F3", action: () => findNext(false) },
+        { label: t("Find Previous"), shortcut: "Shift+F3", action: () => findNext(true) },
+        { label: t("Replace…"), shortcut: "Ctrl+H", action: openFind },
+        { sep: true },
+        { label: t("Toggle Bookmark"), shortcut: "Ctrl+F2", disabled: () => !bookmarksAllowed(), action: toggleBookmark },
+        { label: t("Next Bookmark"), shortcut: "F4", disabled: () => !bookmarksAllowed(), action: () => void nextBookmark(1) },
+        { label: t("Previous Bookmark"), shortcut: "Shift+F4", disabled: () => !bookmarksAllowed(), action: () => void nextBookmark(-1) },
+        { label: t("Clear Bookmarks"), disabled: () => !bookmarksAllowed(), action: clearBookmarks },
+        { sep: true },
+        {
+          // 只服务代码视图：美化 / 压缩按扩展名选工具，小工具面板与语言无关
+          label: t("Code Tools"),
+          // 超大代码文件走只读分节纯文本，没有 CodeMirror 可改写，整组置灰
+          disabled: () => browseMode || docKind !== "code" || codeLargeText !== null,
+          sub: [
+            { label: t("Beautify JSON"), action: () => applyCodeTool(prettyJson) },
+            { label: t("Minify JSON"), action: () => applyCodeTool(minifyJson) },
+            { sep: true },
+            { label: t("Beautify CSS"), action: () => applyCodeTool(prettyCss) },
+            { label: t("Minify CSS"), action: () => applyCodeTool(minifyCss) },
+            { sep: true },
+            // JS 走安全子集：只重排缩进 / 只删空行，绝不合并行（见 lib/codeTools.ts）
+            { label: t("Beautify JS (safe subset)"), action: () => applyCodeTool(prettyJs) },
+            { label: t("Minify JS (safe subset)"), action: () => applyCodeTool(minifyJs) },
+            { sep: true },
+            { label: t("Utilities…"), action: () => (codeToolsOpen = true) },
+          ],
+        },
+        {
+          // 文本工具：面向整篇文档的排版清洗，三种文档模式都可用
+          // （超大代码文件是只读分节视图，无可改写，整组置灰）
+          label: t("Text Tools"),
+          disabled: () => browseMode || busy || codeLargeText !== null,
+          sub: [
+            { label: t("Remove Blank Lines"), action: () => applyTextTool(removeBlankLines) },
+            { label: t("Trim Trailing Spaces"), action: () => applyTextTool(removeTrailingSpaces) },
+            { label: t("Collapse Inner Spaces"), action: () => applyTextTool(collapseInnerSpaces) },
+            { sep: true },
+            { label: t("Add Space Between CJK and Latin"), action: () => applyTextTool(cjkLatinAddSpace) },
+            { label: t("Remove Space Between CJK and Latin"), action: () => applyTextTool(cjkLatinRemoveSpace) },
+          ],
+        },
       ],
     },
     {
       id: "paragraph",
-      label: t("段落"),
+      label: t("Paragraph"),
       key: "p",
       readonlyLocked: true,
       items: [
         {
-          label: t("标题"),
+          label: t("Heading"),
           sub: [1, 2, 3, 4, 5, 6].map((n) => ({
-            label: t("{n} 级标题", { n }),
+            label: t("Heading {n}", { n }),
             shortcut: `Ctrl+${n}`,
             action: () => applyHeading(n),
           })),
         },
         // 正文对齐 Typora 的 Ctrl+0：清掉当前行的标题，回到普通段落
-        { label: t("正文"), shortcut: "Ctrl+0", action: clearHeading },
+        { label: t("Paragraph"), shortcut: "Ctrl+0", action: clearHeading },
         { sep: true },
-        { label: t("无序列表"), shortcut: "Ctrl+Shift+]", action: () => applyFormat("list") },
-        { label: t("有序列表"), shortcut: "Ctrl+Shift+[", action: () => applyFormat("ordered-list") },
-        { label: t("任务列表"), action: () => applyFormat("check") },
+        { label: t("Unordered List"), shortcut: "Ctrl+Shift+]", action: () => applyFormat("list") },
+        { label: t("Ordered List"), shortcut: "Ctrl+Shift+[", action: () => applyFormat("ordered-list") },
+        { label: t("Task List"), action: () => applyFormat("check") },
         { sep: true },
-        { label: t("增加缩进"), shortcut: "Ctrl+[", action: () => applyFormat("indent") },
-        { label: t("减少缩进"), shortcut: "Ctrl+]", action: () => applyFormat("outdent") },
+        { label: t("Increase Indent"), shortcut: "Ctrl+[", action: () => applyFormat("indent") },
+        { label: t("Decrease Indent"), shortcut: "Ctrl+]", action: () => applyFormat("outdent") },
         { sep: true },
-        { label: t("引用"), shortcut: "Ctrl+Shift+Q", action: () => applyFormat("quote") },
-        { label: t("分隔线"), action: () => applyFormat("line") },
+        { label: t("Blockquote"), shortcut: "Ctrl+Shift+Q", action: () => applyFormat("quote") },
+        { label: t("Horizontal Rule"), action: () => applyFormat("line") },
         {
           // 批次七：Vditor 只在 IR 模式的快捷键里提供整列对齐，这里提到菜单中
-          label: t("对齐整列"),
+          label: t("Align Column"),
           disabled: () => docKind !== "markdown",
           sub: [
-            { label: t("左对齐"), action: () => void alignTable("left") },
-            { label: t("居中对齐"), action: () => void alignTable("center") },
-            { label: t("右对齐"), action: () => void alignTable("right") },
+            { label: t("Align Left"), action: () => void alignTable("left") },
+            { label: t("Align Center"), action: () => void alignTable("center") },
+            { label: t("Align Right"), action: () => void alignTable("right") },
           ],
         },
       ],
     },
     {
       id: "format",
-      label: t("格式"),
+      label: t("Format"),
       key: "o",
       readonlyLocked: true,
       items: [
-        { label: t("加粗"), shortcut: "Ctrl+B", action: () => applyFormat("bold") },
-        { label: t("斜体"), shortcut: "Ctrl+I", action: () => applyFormat("italic") },
-        { label: t("删除线"), shortcut: "Alt+Shift+5", action: () => applyFormat("strike") },
-        { label: t("行内代码"), shortcut: "Ctrl+Shift+`", action: () => applyFormat("inline-code") },
+        { label: t("Bold"), shortcut: "Ctrl+B", action: () => applyFormat("bold") },
+        { label: t("Italic"), shortcut: "Ctrl+I", action: () => applyFormat("italic") },
+        { label: t("Strikethrough"), shortcut: "Alt+Shift+5", action: () => applyFormat("strike") },
+        { label: t("Inline Code"), shortcut: "Ctrl+Shift+`", action: () => applyFormat("inline-code") },
         { sep: true },
-        { label: t("链接"), shortcut: "Ctrl+K", action: () => applyFormat("link") },
-        { label: t("插入图片"), shortcut: "Ctrl+Shift+I", action: () => insertLocalImage() },
-        { label: t("表情"), action: () => applyFormat("emoji") },
+        { label: t("Link"), shortcut: "Ctrl+K", action: () => applyFormat("link") },
+        { label: t("Insert Image"), shortcut: "Ctrl+Shift+I", action: () => insertLocalImage() },
+        { label: t("Emoji"), action: () => applyFormat("emoji") },
         { sep: true },
-        { label: t("代码块"), shortcut: "Ctrl+Shift+K", action: () => applyFormat("code") },
-        { label: t("行间公式"), shortcut: "Ctrl+Shift+M", action: insertMathBlock },
-        { label: t("Mermaid 图"), action: insertMermaidBlock },
-        { label: t("表格"), action: () => applyFormat("table") },
-        { sep: true },
-        {
-          // 只服务代码视图：美化 / 压缩按扩展名选工具，小工具面板与语言无关
-          label: t("代码工具"),
-          // 超大代码文件走只读分节纯文本，没有 CodeMirror 可改写，整组置灰
-          disabled: () => docKind !== "code" || codeLargeText !== null,
-          sub: [
-            { label: t("JSON 美化"), action: () => applyCodeTool(prettyJson) },
-            { label: t("JSON 压缩"), action: () => applyCodeTool(minifyJson) },
-            { sep: true },
-            { label: t("CSS 美化"), action: () => applyCodeTool(prettyCss) },
-            { label: t("CSS 压缩"), action: () => applyCodeTool(minifyCss) },
-            { sep: true },
-            // JS 走安全子集：只重排缩进 / 只删空行，绝不合并行（见 lib/codeTools.ts）
-            { label: t("JS 美化（安全子集）"), action: () => applyCodeTool(prettyJs) },
-            { label: t("JS 压缩（安全子集）"), action: () => applyCodeTool(minifyJs) },
-            { sep: true },
-            { label: t("小工具…"), action: () => (codeToolsOpen = true) },
-          ],
-        },
+        { label: t("Code Block"), shortcut: "Ctrl+Shift+K", action: () => applyFormat("code") },
+        { label: t("Math Block"), shortcut: "Ctrl+Shift+M", action: insertMathBlock },
+        { label: t("Mermaid Diagram"), action: insertMermaidBlock },
+        { label: t("Table"), action: () => applyFormat("table") },
       ],
     },
     {
       id: "view",
-      label: t("视图"),
+      label: t("View"),
       key: "v",
       items: [
-        // 阅读 / 编辑：只读开关，最常用，单独置顶
-        { label: t("阅读模式"), shortcut: "Ctrl+E", checked: () => browseMode, action: () => void setBrowseMode(!browseMode) },
-        { sep: true },
-        // 文档模式：纯文本 / Markdown / HTML，三选一，决定用哪个渲染器。
-        // 默认由后缀决定（见 openPath/openHtmlPath/openCodePath），这里可手动改当前标签；
+        // 文档模式：纯文本 / Markdown / HTML，三选一（二级项）；各自的下级菜单（三级）
+        // 承载该模式特有的渲染/高亮选项。默认由后缀决定（见 openPath/openHtmlPath/openCodePath）；
         // 超大代码文件是只读分节视图，无可切换的渲染器，整组置灰。
         {
-          label: t("文档模式"),
+          label: t("Plain Text Mode"),
+          radio: true,
+          disabled: () => busy || codeLargeText !== null,
+          checked: () => docKind === "code",
+          // 点击父项本身也能选中（切换为纯文本模式），子菜单照常展开
+          action: () => void setDocMode("code"),
           sub: [
-            { label: t("纯文本模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "code", action: () => void setDocMode("code") },
-            { label: t("Markdown 模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "markdown", action: () => void setDocMode("markdown") },
-            { label: t("HTML 模式"), radio: true, disabled: () => busy || codeLargeText !== null, checked: () => docKind === "html", action: () => void setDocMode("html") },
-          ],
-        },
-        // 渲染模式：仅 Markdown 有效（IR / 所见即所得 / 分屏预览），三选一
-        {
-          label: t("渲染模式"),
-          sub: [
-            { label: t("即时渲染（IR）"), radio: true, disabled: () => docKind !== "markdown", checked: () => editorMode === "ir", action: () => switchEditorMode("ir") },
-            { label: t("所见即所得（WYSIWYG）"), radio: true, disabled: () => docKind !== "markdown", checked: () => editorMode === "wysiwyg", action: () => switchEditorMode("wysiwyg") },
-            { label: t("分屏预览（SV）"), radio: true, disabled: () => docKind !== "markdown", checked: () => editorMode === "sv", action: () => switchEditorMode("sv") },
-          ],
-        },
-        { sep: true },
-        // 侧边栏：显示开关 + 四个面板各自的勾选开关（默认全开；全关则侧边栏自动收起）
-        {
-          label: t("侧边栏"),
-          sub: [
-            {
-              label: t("显示侧边栏"),
-              shortcut: "Ctrl+Shift+L",
-              checked: () => sidebarVisible,
-              disabled: () => !sidebarVisible && enabledSidebarViews.length === 0,
-              action: toggleSidebar,
-            },
+            // 首行：父项本身只负责展开子菜单，这里给一个直接「启用纯文本模式」的入口
+            { label: t("Enable Plain Text Mode"), disabled: () => busy || codeLargeText !== null || docKind === "code", action: () => void setDocMode("code") },
             { sep: true },
-            { label: t("文件目录树"), shortcut: "Ctrl+Shift+3", checked: () => sidebarPanels.tree, action: () => void toggleSidebarPanel("tree") },
-            { label: t("文档大纲"), shortcut: "Ctrl+Shift+1", checked: () => sidebarPanels.outline, action: () => void toggleSidebarPanel("outline") },
-            { label: t("文件属性"), checked: () => sidebarPanels.props, action: () => void toggleSidebarPanel("props") },
-            { label: t("跨文件搜索"), checked: () => sidebarPanels.search, action: () => void toggleSidebarPanel("search") },
+            ...codeLangSubmenu(),
+          ],
+        },
+        {
+          label: t("Markdown Mode"),
+          radio: true,
+          disabled: () => busy || codeLargeText !== null,
+          checked: () => docKind === "markdown",
+          // 点击父项本身也能选中（切换为 Markdown 模式），子菜单照常展开
+          action: () => void setDocMode("markdown"),
+          sub: [
+            // 首行：直接启用 Markdown 模式（保留当前渲染方式，若当前不是 Markdown 则切过来）
+            { label: t("Enable Markdown Mode"), disabled: () => busy || codeLargeText !== null || docKind === "markdown", action: () => void setDocMode("markdown") },
+            { sep: true },
+            { label: t("Instant Rendering (IR)"), radio: true, disabled: () => docKind !== "markdown", checked: () => docKind === "markdown" && editorMode === "ir", action: () => void applyMarkdownRender("ir") },
+            { label: t("WYSIWYG"), radio: true, disabled: () => docKind !== "markdown", checked: () => docKind === "markdown" && editorMode === "wysiwyg", action: () => void applyMarkdownRender("wysiwyg") },
+            { label: t("Split View (SV)"), radio: true, disabled: () => docKind !== "markdown", checked: () => docKind === "markdown" && editorMode === "sv", action: () => void applyMarkdownRender("sv") },
+            { label: t("No Render"), radio: true, disabled: () => docKind !== "markdown", checked: () => docKind === "markdown" && editorMode === "none", action: () => void applyMarkdownRender("none") },
+            { sep: true },
+            // 排版工具栏是 Markdown 模式独有的功能，故随该模式的二级菜单一起出现
+            // （与 HTML 模式的「执行文档脚本」同一层级）
+            {
+              label: t("Show Formatting Toolbar"),
+              checked: () => showToolbar,
+              disabled: () => docKind !== "markdown",
+              action: toggleEditorToolbar,
+            },
+          ],
+        },
+        {
+          label: t("HTML Mode"),
+          radio: true,
+          disabled: () => busy || codeLargeText !== null,
+          checked: () => docKind === "html",
+          // 点击父项本身也能选中（切换为 HTML 模式），子菜单照常展开
+          action: () => void setDocMode("html"),
+          sub: [
+            // 首行：直接启用 HTML 模式（默认进预览视图）
+            { label: t("Enable HTML Mode"), disabled: () => busy || codeLargeText !== null || docKind === "html", action: () => void setDocMode("html") },
+            { sep: true },
+            { label: t("Preview"), radio: true, disabled: () => docKind !== "html", checked: () => docKind === "html" && htmlView === "preview", action: () => void applyHtmlMode("preview") },
+            { label: t("Source"), radio: true, disabled: () => docKind !== "html", checked: () => docKind === "html" && htmlView === "source", action: () => void applyHtmlMode("source") },
+            { sep: true },
+            { label: t("Run Document Scripts (JavaScript)"), checked: () => htmlScripts, disabled: () => docKind !== "html", action: () => void applyHtmlScriptToggle() },
           ],
         },
         { sep: true },
-        // 编辑器显示：排版工具栏（仅 Markdown）/ 行号 / 语法高亮（仅纯文本）
+        // 侧边栏：六个面板各自的勾选开关——点击即勾选 / 取消，勾选即把侧边栏显示出来并切到该面板；
+        // 全部取消则侧边栏自动收起。显示 / 隐藏侧边栏仍可用 Ctrl+Shift+L 或侧边栏上的关闭按钮。
         {
-          label: t("显示排版工具栏"),
-          checked: () => showToolbar,
-          disabled: () => docKind !== "markdown",
-          action: toggleEditorToolbar,
-          tip: t("仅在 Markdown 模式下可用：显示或隐藏正文上方的排版工具栏。"),
+          label: t("Sidebar"),
+          // 点击父项本身也能切换侧边栏显隐，子菜单照常展开
+          action: toggleSidebar,
+          sub: [
+            // 首行：侧边栏总开关——勾选=显示侧边栏、取消=隐藏（与下面各面板是否勾选无关）
+            { label: t("Enable Sidebar"), shortcut: "Ctrl+Shift+L", checked: () => sidebarVisible, action: toggleSidebar },
+            { sep: true },
+            { label: t("File Tree"), shortcut: "Ctrl+Shift+3", checked: () => sidebarPanels.tree, action: () => void toggleSidebarPanel("tree") },
+            { label: t("Document Outline"), shortcut: "Ctrl+Shift+1", checked: () => sidebarPanels.outline, disabled: () => docKind === "code", action: () => void toggleSidebarPanel("outline") },
+            { label: t("Bookmarks"), checked: () => sidebarPanels.bookmarks, action: () => void toggleSidebarPanel("bookmarks") },
+            { label: t("File Properties"), checked: () => sidebarPanels.props, action: () => void toggleSidebarPanel("props") },
+            { label: t("Search in Files"), checked: () => sidebarPanels.search, action: () => void toggleSidebarPanel("search") },
+            { label: t("Cloud Folder"), checked: () => sidebarPanels.cloud, action: () => void toggleSidebarPanel("cloud") },
+          ],
         },
+        // 阅读 / 编辑：只读开关（打开 / 新建 / 导入后先进阅读模式还是直接编辑，由「设置 → 打开」决定）
+        { label: t("Reading Mode"), shortcut: "Ctrl+E", checked: () => browseMode, action: () => void setBrowseMode(!browseMode) },
         {
-          label: t("显示行号"),
+          label: t("Wrap Long Lines"),
+          checked: () => autoWrap,
+          action: toggleAutoWrap,
+        },
+        // 编辑器显示：行号（排版工具栏已移入「Markdown 模式」二级菜单，它是该模式独有的功能）
+        {
+          label: t("Show Line Numbers"),
           checked: () => showLineNumbers && lineNumbersSupported,
           disabled: () => !lineNumbersSupported,
           action: toggleLineNumbers,
-          tip: lineNumbersSupported
-            ? t("在正文左侧显示行号。")
-            : t("当前模式不支持行号显示（仅纯文本、Markdown 分屏预览与 HTML 源码视图支持）。"),
-        },
-        {
-          label: t("语法高亮语言"),
-          disabled: () => docKind !== "code" || codeLargeText !== null,
-          sub: codeLangSubmenu(),
-          tip: t("仅在纯文本模式下可用：指定代码着色的语言，「自动」按文件扩展名判断。"),
         },
         { sep: true },
         // 专注写作：打字机 / 段落聚焦 / 沉浸式全屏，都是「让注意力回到正文」的显示模式
         {
-          label: t("打字机模式"),
+          label: t("Typewriter Mode"),
           shortcut: "F9",
           checked: () => typewriterOn && docKind !== "html",
           disabled: () => docKind === "html",
           action: toggleTypewriter,
         },
         {
-          label: t("段落聚焦"),
+          label: t("Paragraph Focus"),
           shortcut: "F8",
           checked: () => paragraphFocus && docKind !== "html",
           disabled: () => docKind === "html",
           action: toggleParagraphFocus,
         },
-        { label: t("沉浸式全屏编辑"), shortcut: "F11", checked: () => isEditorFullscreen(), action: toggleEditorFullscreen },
+        { label: t("Immersive Fullscreen Editing"), shortcut: "F11", checked: () => isEditorFullscreen(), action: toggleEditorFullscreen },
       ],
     },
     {
       id: "help",
-      label: t("帮助"),
+      label: t("Help"),
       key: "h",
       items: [
-        { label: t("入门指南…"), action: () => (welcomeOpen = true) },
-        { label: t("快捷键一览…"), action: showShortcuts },
+        { label: t("Getting Started…"), action: () => (welcomeOpen = true) },
+        { label: t("Keyboard Shortcuts…"), action: showShortcuts },
         { sep: true },
-        { label: t("导出诊断信息…"), action: exportDiagnosticsReport },
+        { label: t("Download Support Components…"), action: downloadSupportComponents },
+        { label: t("Export Diagnostics…"), action: exportDiagnosticsReport },
         { sep: true },
-        { label: t("关于 Sticho…"), action: showAbout },
+        { label: t("About Sticho…"), action: showAbout },
       ],
     },
   ]);
@@ -4441,6 +5928,7 @@
     const willOpen = menuOpen !== id;
     menuOpen = willOpen ? id : null;
     subOpen = null;
+    subOpen2 = null;
     // 展开「文件」菜单时刷新历史版本列表，供「文件历史」动态子菜单使用
     if (willOpen && id === "file") void refreshHistory();
   }
@@ -4451,6 +5939,7 @@
     if (item.disabled?.()) return;
     menuOpen = null;
     subOpen = null;
+    subOpen2 = null;
     void item.action?.();
   }
 
@@ -4462,7 +5951,6 @@
    */
   function flatMenuItems(): PaletteCommand[] {
     const out: PaletteCommand[] = [];
-    let seq = 0;
     const walk = (items: MenuItem[], category: string): void => {
       for (const item of items) {
         if (item.sep || !item.label) continue;
@@ -4478,8 +5966,10 @@
           continue;
         }
         if (!item.action || item.disabled?.()) continue;
+        // 稳定 id：由「分类 + 标签」组成（同一面板内唯一）。此前用自增序号，
+        // 每次重建列表 id 都变，keyed each 会把节点全部重建，高亮 / 滚动位置随之丢失。
         out.push({
-          id: `cmd-${seq++}`,
+          id: `${category}|${item.label}`,
           label: item.label,
           category,
           shortcut: item.shortcut,
@@ -4494,6 +5984,7 @@
   function openCommandPalette(): void {
     menuOpen = null;
     subOpen = null;
+    subOpen2 = null;
     paletteCommands = flatMenuItems();
     paletteOpen = true;
   }
@@ -4549,13 +6040,13 @@
     let needle = query;
     if (regex) {
       if (!re) {
-        clear(t("正则表达式语法有误。"));
+        clear(t("Invalid regular expression."));
         return;
       }
       needle = literalAnchor(query);
       if (needle === "") {
         clear(
-          t("该正则里没有可直接搜索的字面量（文字 / 数字 / 符号），无法先缩小范围。请在正则里补上一段确定的文字。"),
+          t("This regex contains no searchable literal text (letters / digits / symbols), so the scope cannot be narrowed first. Add a fixed piece of text to the regex."),
         );
         return;
       }
@@ -4600,7 +6091,7 @@
       else await loadIntoFreshTab(() => openPath(hit.path));
       await revealSearchHit(hit);
     } catch (e) {
-      await showError(t("打开失败："), e);
+      await showError(t("Failed to open: "), e);
     } finally {
       busy = false;
     }
@@ -4674,9 +6165,13 @@
       } else if (tabMenu) {
         tabMenu = null;
         e.preventDefault();
+      } else if (docMenu) {
+        docMenu = null;
+        e.preventDefault();
       } else if (menuOpen) {
         menuOpen = null;
         subOpen = null;
+        subOpen2 = null;
         e.preventDefault();
       } else if (skinOpen) {
         skinOpen = false;
@@ -4699,10 +6194,11 @@
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
       const hit = MENUS.find((m) => m.key === e.key.toLowerCase());
       if (hit) {
+        // 只有真正命中菜单项才拦截并吞掉事件；未命中时放行，别把所有 Alt 组合键一并吞掉
         e.preventDefault();
         toggleMenu(hit.id);
+        return;
       }
-      return;
     }
 
     // 功能键：F3 查找下一个 / F8 段落聚焦 / F9 打字机 / F11 沉浸式全屏（对齐 Typora）
@@ -4730,8 +6226,20 @@
       return;
     }
 
+    if (e.key === "F4") {
+      e.preventDefault();
+      nextBookmark(e.shiftKey ? -1 : 1);
+      return;
+    }
+
     if (!(e.ctrlKey || e.metaKey)) return;
     const key = e.key.toLowerCase();
+
+    if (e.key === "F2") {
+      e.preventDefault();
+      toggleBookmark();
+      return;
+    }
 
     // 方括号 / 反引号 / 数字键按住 Shift 时 e.key 会变成 { } ~ ! #，用字符比较会漏判，
     // 这几组一律按物理键位 e.code 判定（对齐 Typora 的方括号与反引号组合）
@@ -4854,9 +6362,11 @@
 
   // 点击菜单栏/面板外部时收起
   function onWindowClick(e: MouseEvent): void {
+    hideTip(); // 点击任意处先收起提示浮窗，避免残留在画面上
     if (!(e.target as Element | null)?.closest?.(".menu-root")) {
       menuOpen = null;
       subOpen = null;
+      subOpen2 = null;
     }
     if (!(e.target as Element | null)?.closest?.(".skin-root")) {
       skinOpen = false;
@@ -4867,37 +6377,47 @@
     if (!(e.target as Element | null)?.closest?.(".lang-wrap")) {
       codeLangOpen = false;
     }
+    if (!(e.target as Element | null)?.closest?.(".mode-wrap")) {
+      modeOpen = false;
+    }
     if (!(e.target as Element | null)?.closest?.(".tab-menu")) {
       tabMenu = null;
+      docMenu = null;
     }
   }
 
   // ---- 拖拽导入（阶段 7）：md/html 直接打开，docx/pdf 走导入管道 ----
   async function handleDroppedFiles(paths: string[]): Promise<void> {
     if (busy || paths.length === 0) return;
-    const path = paths[0]!;
-    const ext = extOf(path);
     busy = true;
     try {
-      if (ext === "md" || ext === "markdown") {
-        await loadIntoFreshTab(() => openPath(path));
-      } else if (ext === "html" || ext === "htm") {
-        await loadIntoFreshTab(() => openHtmlPath(path));
-      } else if (isCodePath(path)) {
-        await loadIntoFreshTab(() => openCodePath(path));
-      } else if (ext === "docx") {
-        await importWordPath(path);
-      } else if (ext === "pdf") {
-        // 拖拽即意图明确：跳过「继续吗」确认，仅保留结果/错误提示
-        await importPdfPath(path);
-      } else {
-        await messageDialog(t("暂不支持该文件类型（.{ext}），仅支持 md / html / docx / pdf / 代码文件。", { ext }), {
-          title: "Sticho",
-          kind: "info",
-        });
+      // 逐个打开全部路径：拖拽多个文件、以及单实例转发（open-file 回调）传来一批路径时，
+      // 此前只处理 paths[0]，其余被静默丢弃。
+      // 每个文件各自 try/catch：某个不支持 / 打开失败不会中断其余文件。
+      for (const path of paths) {
+        const ext = extOf(path);
+        try {
+          if (ext === "md" || ext === "markdown") {
+            await loadIntoFreshTab(() => openPath(path));
+          } else if (ext === "html" || ext === "htm") {
+            await loadIntoFreshTab(() => openHtmlPath(path));
+          } else if (isCodePath(path)) {
+            await loadIntoFreshTab(() => openCodePath(path));
+          } else if (ext === "docx") {
+            await importWordPath(path);
+          } else if (ext === "pdf") {
+            // 拖拽即意图明确：跳过「继续吗」确认，仅保留结果/错误提示
+            await importPdfPath(path);
+          } else {
+            await messageDialog(t("Unsupported file type (.{ext}); only md / html / docx / pdf / code files are supported.", { ext }), {
+              title: "Sticho",
+              kind: "info",
+            });
+          }
+        } catch (e) {
+          await showError(t("Failed to open: "), e);
+        }
       }
-    } catch (e) {
-      await showError(t("打开失败："), e);
     } finally {
       busy = false;
     }
@@ -4908,55 +6428,69 @@
     const win = getCurrentWindow();
 
     void (async () => {
+      // 配置位置引导（批次十三）：首次运行时先让用户选定数据根目录，否则后续
+      // loadAllSettings / 主题 / 日志等命令都拿不到位置（Rust 侧会拒绝写入）。
+      await ensureConfigReady();
       // 启动配置一次性读回：此前二十个键逐个 await 是二十次串行 IPC，整体拖慢首帧
       const s = await loadAllSettings();
-      // 启动配置：主题（显式设置 > 系统偏好）、最近文件、侧边栏、文件关联
-      const savedTheme = s["theme"] as "light" | "dark" | undefined;
-      // savedTheme 是字符串 "light"/"dark"，不能直接当布尔用："light" 同样是真值，
-      // 原写法 savedTheme ?? matchMedia(...) 会让「存过浅色」也走 applyAppTheme(true) 渲染成深色。
-      // 这里显式换算：设置里只有明确存了 light/dark 才算用户显式选择，否则跟随系统。
-      userThemeSet = savedTheme === "light" || savedTheme === "dark";
-      applyAppTheme(
-        userThemeSet
-          ? savedTheme === "dark"
-          : window.matchMedia("(prefers-color-scheme: dark)").matches,
-      );
-      // 界面语言（批次八）：先读设置再初始化编辑器，让 Vditor 一次就用对语言
-      locale = (s["locale"] as Locale | undefined) ?? "zh-CN";
-      setEditorLocale(vditorLang(locale));
-      document.documentElement.lang = locale;
+      // 启动配置：外观（主题统一决定）、最近文件、侧边栏、文件关联
+      // 外观已并入「主题」：未选主题 = 内置浅色默认；选中主题按自身 color-scheme 定深浅
+      // （见 refreshThemes）。这里先落默认浅色，深色主题随后由 refreshThemes 切换。
       userTheme = (s["userTheme"] as string | undefined) ?? null;
+      // 旧配置里显式选过「深色」的，迁移到内置深色主题「暗墨」，避免升级后莫名变浅色
+      if (userTheme === null && (s["theme"] as string | undefined) === "dark") {
+        userTheme = INK_DARK_THEME_FILE;
+        void saveSetting("userTheme", userTheme);
+        // 旧键 theme 必须一并删除：它是「外观三选（浅/深/跟随系统）」的遗留控制位，
+        // 留着的话用户显式清掉主题后，下次启动会被这里再次强制拉回「暗墨」。
+        void deleteSetting("theme");
+      }
+      applyAppTheme(false);
+      // 界面语言（批次八；批次十五起默认中文）：先读设置再初始化编辑器，让 Vditor 一次就用对语言
+      locale = (s["locale"] as Locale | undefined) ?? "zh-CN";
+      void setEditorLocale(vditorLang(locale));
+      document.documentElement.lang = locale;
       recentFiles = (s["recentFiles"] as string[] | undefined) ?? [];
       sidebarVisible = (s["sidebarVisible"] as boolean | undefined) ?? true;
       sidebarView = (s["sidebarView"] as SidebarView | undefined) ?? "outline";
-      // 面板开关：与默认值合并，兼容旧配置（没有该键时四项全开）
-      sidebarPanels = { tree: true, outline: true, props: true, search: true, ...(s["sidebarPanels"] as Partial<Record<SidebarView, boolean>> | undefined) };
-      // 四个面板全关时侧边栏没有内容可显示，强制收起（旧配置可能存着 sidebarVisible=true）
+      // 面板开关：与默认值合并，兼容旧配置（没有该键时只开文件树/大纲/书签，属性/搜索/云端默认关）
+      sidebarPanels = { tree: true, outline: true, bookmarks: true, props: false, search: false, cloud: false, ...(s["sidebarPanels"] as Partial<Record<SidebarView, boolean>> | undefined) };
+      // 全部面板关闭时侧边栏没有内容可显示，强制收起（旧配置可能存着 sidebarVisible=true）
       if (enabledSidebarViews.length === 0) sidebarVisible = false;
       // 上次停留的面板被关掉时，落回第一个仍开启的面板
       else if (!sidebarPanels[sidebarView]) sidebarView = enabledSidebarViews[0]!;
       // 行号的开合统一由下方按「当前视图是否支持」的门控 $effect 落地，这里只取值，
       // 否则会在 IR / 所见即所得这类不支持行号的视图里把它硬打开
       showLineNumbers = (s["lineNumbers"] as boolean | undefined) ?? true;
+      autoWrap = (s["wrapLongLines"] as boolean | undefined) ?? true;
       typewriterOn = (s["typewriterMode"] as boolean | undefined) ?? false;
       paragraphFocus = (s["paragraphFocus"] as boolean | undefined) ?? false;
       setTypewriterMode(typewriterOn);
       setParagraphFocusVisible(paragraphFocus);
-      // 阅读排版（字体 / 字号 / 行距 / 文字色 / 护眼底色）：只对 Markdown / 纯文本生效
+      // 阅读排版（字体 / 字号 / 行距 / 文字色 / 护眼底色）：按文档模式分流见下方 $effect
       readerStyle = (s["readerStyle"] as ReaderStyle | undefined) ?? {};
       autoSaveEnabled = (s["autoSave"] as boolean | undefined) ?? true;
-      defaultOpenMode = (s["defaultOpenMode"] as "read" | "edit" | undefined) ?? "read";
+      autoSaveIntervalMin = (s["autoSaveIntervalMin"] as number | undefined) ?? 1;
+      defaultOpenMode = (s["defaultOpenMode"] as "read" | "edit" | undefined) ?? "edit";
+      // 顶栏自定义按钮开关：与默认值（全关）合并，兼容旧配置
+      toolbarButtons = { find: false, undo: false, redo: false, save: false, recovery: false, fullscreen: false, ...(s["toolbarButtons"] as Partial<Record<ToolbarButtonId, boolean>> | undefined) };
       findCase = (s["findCase"] as boolean | undefined) ?? false;
       findWord = (s["findWord"] as boolean | undefined) ?? false;
       findRegex = (s["findRegex"] as boolean | undefined) ?? false;
       // WebDAV 云同步（批次九）：连接参数与开关；davVerified 不持久化见状态声明处的说明
       davUrl = (s["davUrl"] as string | undefined) ?? "";
+      // HTTPS 开关：旧配置没有该键时，按已存地址的协议推断（http:// 视为关）
+      davUseHttps =
+        (s["davUseHttps"] as boolean | undefined) ?? !davUrl.trim().toLowerCase().startsWith("http://");
       davUser = (s["davUser"] as string | undefined) ?? "";
       davRoot = (s["davRoot"] as string | undefined) ?? "/Sticho";
       davEnabled = (s["davEnabled"] as boolean | undefined) ?? false;
-      davVersioning = (s["davVersioning"] as boolean | undefined) ?? false;
-      davKeep = (s["davKeep"] as number | undefined) ?? 3;
       historyKeep = (s["historyKeep"] as number | undefined) ?? 20;
+      historyCountLimitOn = (s["historyCountLimitOn"] as boolean | undefined) ?? true;
+      historySizeLimitOn = (s["historySizeLimitOn"] as boolean | undefined) ?? false;
+      historyMaxSizeMb = (s["historyMaxSizeMb"] as number | undefined) ?? 100;
+      historyAgeLimitOn = (s["historyAgeLimitOn"] as boolean | undefined) ?? false;
+      historyMaxAgeDays = (s["historyMaxAgeDays"] as number | undefined) ?? 30;
       davConflictPolicy = (s["davConflictPolicy"] as "copy" | "overwrite" | undefined) ?? "copy";
       davSyncIndex =
         (s["davSyncIndex"] as
@@ -4974,21 +6508,35 @@
         win.show().catch((e) => console.error("[sticho] 亮窗失败：", e));
       }, 0);
 
-      // 自定义主题（批次八）：读主题目录，已选主题立即注入 head
+      // 编辑器运行时（Vditor 本体 + i18n）先预取：与下面几次目录 IPC 并行下载 / 解析，
+      // 不必等目录就绪才开始 import，编辑器就绪时间随之提前（失败无妨，initEditor 会重拉）。
+      void preloadEditor();
+
+      // 自定义主题（批次八）：读主题目录，已选主题立即注入 head（须在编辑器绘制前完成）；
+      // 语言包 / 字体包（批次十二）：释放默认包 → 加载词表与字体，失败也不阻挡启动。
+      // 顺序不能并行：内置「暗墨」等主题文件要先由 initPacks 落盘，refreshThemes 才能把
+      // 用户选中的主题认出来，否则会被当成「文件已被删除」而回落默认。
+      await initPacks();
       await refreshThemes();
-      // 密码走加密存储，并顺带把旧版留在 settings.json 里的明文迁移走
-      await restoreDavPassword();
-      // 配置文件保存位置（批次十）：只读展示当前根目录，位置本身由 Rust 引导文件决定
-      await refreshDataLocation();
 
       const host = document.getElementById("editor-host")!;
       // 打开即阅读模式：先把只读意图写进编辑器层（此时正文元素还没建好，
       // 真正的 disabled() 由 editor.ts 在就绪回调里补一次）
       setEditorReadonly(true);
-      void initEditor(host, WELCOME, theme === "dark");
+      // 欢迎正文在 initPacks 之后才拿得到（要等 docs/Welcome.<locale>.md 释放并读回），
+      // 而初始标签是脚本顶层用内置文案建的：这里把还没被动过的初始标签正文对齐成最终内容，
+      // 否则它和编辑器里显示的内容会不一致（后续同步会把旧文案写回去）。
+      const initial = welcomeText();
+      const firstTab = tabs[activeIndex];
+      if (firstTab && firstTab.path === null && !firstTab.dirty) firstTab.content = initial;
+      void initEditor(host, initial, theme === "dark");
       onEditorChange(() => syncFromEditor());
       // 渲染模式变化（工具栏下拉或菜单）：同步状态栏图标与视图菜单复选
-      onEditorModeChange((mode) => (editorMode = mode));
+      onEditorModeChange((mode) => {
+        // 「不渲染」是我们主动切到 sv 的结果，不要被同步覆盖回 sv
+        if (editorMode === "none" && mode === "sv") return;
+        editorMode = mode;
+      });
       // 大文档走分节渲染通路时（editor.ts 自动判定），把应用层拉回阅读模式：
       // 那条通路只有只读的分节正文，界面必须如实反映「现在是阅读态」。
       onLargeModeChange((active) => {
@@ -4997,7 +6545,14 @@
       });
       // 大文档的正文随滚动挂载 / 卸载分节，查找高亮的 Range 会随之失效，重画一次
       onLargeRenderChange(() => scheduleLargeFindRepaint());
-      await updateTitle();
+      // 与编辑器首屏无关的启动收尾：全部不 await，趁 Vditor 还在加载资源的窗口并行铺开，
+      // 不再串行堆在 initEditor 前面（此前是 4 次串行 IPC 才轮到编辑器开始加载）。
+      void updateTitle();
+      // 密码走加密存储，并顺带把旧版留在 settings.json 里的明文迁移走；云同步其后初始化
+      // （后台静默验证连接 + 检查云端变更，网络慢不该拖住启动）
+      void restoreDavPassword().finally(() => void initCloud());
+      // 配置文件保存位置（批次十）：只读展示当前根目录，位置本身由 Rust 引导文件决定
+      void refreshDataLocation();
       void loadAssocState();
 
       // Vditor 异步加载资源，初始化完成前读写内容会抛错（侧边栏大纲、启动文件都要用到）
@@ -5016,7 +6571,7 @@
             else await openPath(startup);
           });
         } catch (e) {
-          await showError(t("打开启动文件失败："), e);
+          await showError(t("Failed to open the startup file: "), e);
         }
       } else if (!(await tryRestoreSession())) {
         // 没有指定启动文件时才查恢复内容：双击文档进来的是「开这篇文件」的意图，
@@ -5033,12 +6588,9 @@
       if (!welcomeShown) welcomeOpen = true;
     })();
 
-    // 自动保存定时器：30 秒一轮，按标签落草稿并记录会话（内容没变时跳过写盘）
-    const autoSaveTimer = window.setInterval(() => void tickAutoSave(), 30_000);
-
-    // 外部变更轮询（批次七）：5 秒一轮，只在有路径且非 busy 时真正发起查询；
+    // 外部变更轮询（批次七）：只在有路径且非 busy 时真正发起查询；
     // 窗口不可见时 checkExternalChange 会直接跳过（见其内部注释）
-    const externalTimer = window.setInterval(() => void checkExternalChange(), 5000);
+    const stopExternalPoll = startPolling(EXTERNAL_POLL_INTERVAL_MS, () => void checkExternalChange());
 
     // 恢复可见时立刻补查一次，不必干等下一个 5 秒
     const onVisibilityChange = () => {
@@ -5046,88 +6598,96 @@
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
-    // 用户未显式设置主题时，跟随系统深浅色变化
-    const schemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
-    const onSchemeChange = (e: MediaQueryListEvent) => {
-      if (!userThemeSet) applyAppTheme(e.matches);
-    };
-    schemeQuery.addEventListener("change", onSchemeChange);
-
     // Tauri 的事件监听返回解绑函数（异步 resolve），要在卸载时调用，否则监听器会随
     // 组件重建不断累积——旧闭包仍持有已失效的状态。
-    let unlistenClose: (() => void) | undefined;
-    let unlistenDrop: (() => void) | undefined;
-    let unlistenOpenFile: (() => void) | undefined;
+    // 直接持有各监听的 Promise（而非 resolve 后才赋值的局部变量）：若组件在 resolve
+    // 之前就卸载，解绑函数还没拿到，旧写法会漏解绑；统一在 cleanup 里等 Promise 再解绑。
+    const unlisteners: Promise<() => void>[] = [];
 
     // 未保存关闭拦截（preventDefault 必须同步调用，确认框异步进行）
     let closing = false;
-    void win.onCloseRequested((event) => {
-      captureActiveTab();
-      if (!anyTabDirty() || closing) return;
-      closing = true;
-      event.preventDefault();
-      void (async () => {
-        const dirtyCount = tabs.filter((_t, i) => tabDirty(i)).length;
-        const ok = await confirmDialog(
-          dirtyCount > 1
-            ? t("有 {n} 个标签存在未保存的修改，退出将丢弃这些修改。确定退出吗？", { n: dirtyCount })
-            : t("当前文档有未保存的修改，退出将丢弃这些修改。确定退出吗？"),
-          {
-            title: "Sticho",
-            kind: "warning",
-            okLabel: t("退出"),
-            cancelLabel: t("取消"),
-          },
-        );
-        if (ok) {
-          // 退出前最后落一份草稿与会话：定时器可能刚好还没轮到（tickAutoSave 已吞掉所有异常）
-          await tickAutoSave();
-          await win.destroy();
-        } else closing = false;
-      })();
-    }).then((fn) => {
-      unlistenClose = fn;
-    });
+    unlisteners.push(
+      win.onCloseRequested((event) => {
+        captureActiveTab();
+        // 第一次请求已弹出确认框。确认框未决期间用户再点一次「×」若直接放行，
+        // 窗口会在确认框还在的情况下关掉——未保存内容随之丢失。这里必须继续拦截。
+        if (closing) {
+          event.preventDefault();
+          return;
+        }
+        closing = true;
+        event.preventDefault();
+        void (async () => {
+          try {
+            if (anyTabDirty()) {
+              const dirtyCount = tabs.filter((_t, i) => tabDirty(i)).length;
+              const ok = await confirmDialog(
+                dirtyCount > 1
+                  ? t("{n} tabs have unsaved changes that will be discarded on exit. Exit anyway?", { n: dirtyCount })
+                  : t("The current document has unsaved changes that will be discarded on exit. Exit anyway?"),
+                {
+                  title: "Sticho",
+                  kind: "warning",
+                  okLabel: t("Exit"),
+                  cancelLabel: t("Cancel"),
+                },
+              );
+              if (!ok) return; // finally 会复位 closing，用户可以再来一次
+            }
+            // 退出前最后落一份草稿与会话：定时器可能刚好还没轮到，且关闭自动保存时
+            // tickAutoSave 是空转，这里显式 saveSession 保证标签集/顺序/活跃项不丢。
+            await tickAutoSave();
+            await saveSession();
+            await win.destroy();
+          } finally {
+            closing = false; // 未走 destroy 的路径（取消/异常）复位，避免窗口永远关不掉
+          }
+        })();
+      }),
+    );
 
     // 拖拽文件到窗口（enter/leave 控制高亮，drop 分发到对应处理管道）
-    void win.onDragDropEvent((event) => {
-      const payload = event.payload;
-      if (payload.type === "enter") {
-        dragOver = true;
-      } else if (payload.type === "leave") {
-        dragOver = false;
-      } else if (payload.type === "drop") {
-        dragOver = false;
-        void handleDroppedFiles(payload.paths);
-      }
-    }).then((fn) => {
-      unlistenDrop = fn;
-    });
+    unlisteners.push(
+      win.onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter") {
+          dragOver = true;
+        } else if (payload.type === "leave") {
+          dragOver = false;
+        } else if (payload.type === "drop") {
+          dragOver = false;
+          void handleDroppedFiles(payload.paths);
+        }
+      }),
+    );
 
     // 单实例转发（文件关联后双击文档时，程序已在运行）：Rust 侧把第二次启动的
     // 文件路径通过 open-file 事件发过来，复用拖拽导入的分发逻辑新开标签页。
-    void listen<string[]>("open-file", (event) => {
-      const paths = event.payload ?? [];
-      if (paths.length > 0) void handleDroppedFiles(paths);
-    }).then((fn) => {
-      unlistenOpenFile = fn;
-    });
+    unlisteners.push(
+      listen<string[]>("open-file", (event) => {
+        const paths = event.payload ?? [];
+        if (paths.length > 0) void handleDroppedFiles(paths);
+      }),
+    );
 
     return () => {
-      window.clearInterval(autoSaveTimer);
-      window.clearInterval(externalTimer);
-      schemeQuery.removeEventListener("change", onSchemeChange);
+      stopExternalPoll();
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      unlistenClose?.();
-      unlistenDrop?.();
-      unlistenOpenFile?.();
+      // 定时器也要清掉：否则组件（开发期热重载）重建后旧定时器仍会触发，
+      // 闭包持有已失效的状态。只在触发时清零是不够的——挂起中的定时器不会被触发。
+      if (outlineTimer !== undefined) clearTimeout(outlineTimer);
+      if (largeFindTimer !== null) clearTimeout(largeFindTimer);
+      if (tipShowTimer !== 0) clearTimeout(tipShowTimer);
+      if (tipHideTimer !== 0) clearTimeout(tipHideTimer);
+      // 监听可能还没 resolve 就卸载：统一等 Promise 再解绑，避免漏解绑
+      void Promise.all(unlisteners).then((fns) => fns.forEach((fn) => fn()));
     };
   });
 </script>
 
 <svelte:window onkeydown={onKeydown} onclick={onWindowClick} />
 
-<div class="app" class:drag-over={dragOver}>
+<div class="app" class:drag-over={dragOver} class:md-source-only={mdSourceOnly} class:read-mode={browseMode}>
   <!-- 菜单栏（阶段 10）：一级菜单 文件/编辑/段落/格式/视图/帮助 -->
   <header class="menubar">
     {#each MENUS as menu (menu.id)}
@@ -5156,7 +6716,10 @@
                     // 不可用的父项不展开子菜单（否则灰掉的项一悬停就弹出面板）
                     if (!locked && !item.disabled?.()) subOpen = item.label ?? null;
                   }}
-                  onmouseleave={() => (subOpen = null)}
+                  onmouseleave={() => {
+                    subOpen = null;
+                    subOpen2 = null;
+                  }}
                 >
                   <button
                     class="menu-item"
@@ -5164,10 +6727,14 @@
                     aria-disabled={locked || item.disabled?.()}
                     title={item.tip}
                     onclick={() => {
-                      if (!locked && !item.disabled?.()) subOpen = item.label ?? null;
+                      if (locked || item.disabled?.()) return;
+                      // 带 action 的父项（纯文本 / Markdown / HTML 模式、侧边栏）：点击即选中并执行，
+                      // 同时照常展开子菜单；其余父项仍只负责展开
+                      if (item.action) void item.action();
+                      subOpen = item.label ?? null;
                     }}
                   >
-                    <span class="mark"></span>
+                    <span class="mark">{item.radio ? (item.checked?.() ? "●" : "") : (item.checked?.() ? "✓" : "")}</span>
                     <span class="label">{item.label}</span>
                     <span class="arrow">›</span>
                   </button>
@@ -5176,6 +6743,55 @@
                       {#each children as child, j (j)}
                         {#if child.sep}
                           <div class="menu-sep"></div>
+                        {:else if child.sub || child.dynamic}
+                          {@const grandchildren = child.sub ?? child.dynamic?.() ?? []}
+                          <div
+                            class="menu-sub"
+                            role="none"
+                            onmouseenter={() => {
+                              if (!locked && !child.disabled?.()) subOpen2 = child.label ?? null;
+                            }}
+                            onmouseleave={() => {
+                              subOpen2 = null;
+                            }}
+                          >
+                            <button
+                              class="menu-item"
+                              class:is-disabled={locked || child.disabled?.()}
+                              aria-disabled={locked || child.disabled?.()}
+                              title={child.tip}
+                              onclick={() => {
+                                if (!locked && !child.disabled?.()) {
+                                  runMenuItem(child);
+                                  subOpen2 = child.label ?? null;
+                                }
+                              }}
+                            >
+                              <span class="mark">{child.radio ? (child.checked?.() ? "●" : "") : (child.checked?.() ? "✓" : "")}</span>
+                              <span class="label">{child.label}</span>
+                              <span class="arrow">›</span>
+                            </button>
+                            {#if subOpen2 === child.label}
+                              <div class="menu-panel sub-panel">
+                                {#each grandchildren as g, k (k)}
+                                  {#if g.sep}
+                                    <div class="menu-sep"></div>
+                                  {:else}
+                                    <button
+                                      class="menu-item"
+                                      class:is-disabled={locked || g.disabled?.()}
+                                      aria-disabled={locked || g.disabled?.()}
+                                      onclick={() => runMenuItem(g)}
+                                    >
+                                      <span class="mark">{g.radio ? (g.checked?.() ? "●" : "") : (g.checked?.() ? "✓" : "")}</span>
+                                      <span class="label" title={g.tip}>{g.label}</span>
+                                      {#if g.shortcut}<span class="shortcut">{g.shortcut}</span>{/if}
+                                    </button>
+                                  {/if}
+                                {/each}
+                              </div>
+                            {/if}
+                          </div>
                         {:else}
                           <button
                             class="menu-item"
@@ -5184,7 +6800,7 @@
                             onclick={() => runMenuItem(child)}
                           >
                             <span class="mark">{child.radio ? (child.checked?.() ? "●" : "") : (child.checked?.() ? "✓" : "")}</span>
-                            <span class="label" title={child.tip ?? child.label}>{child.label}</span>
+                            <span class="label" title={child.tip}>{child.label}</span>
                             {#if child.shortcut}<span class="shortcut">{child.shortcut}</span>{/if}
                           </button>
                         {/if}
@@ -5221,7 +6837,7 @@
           class="tab"
           class:active={i === activeIndex}
           data-index={i}
-          title={i === activeIndex ? currentPath ?? t("尚未保存到磁盘") : tab.path ?? t("尚未保存到磁盘")}
+          title={i === activeIndex ? currentPath ?? t("Not saved to disk yet") : tab.path ?? t("Not saved to disk yet")}
           onclick={() => void switchTab(i)}
           oncontextmenu={(e) => openTabMenu(e, i)}
           onauxclick={(e) => {
@@ -5232,11 +6848,12 @@
             }
           }}
         >
-          <span class="tab-label">{tabTitle(i)}{tabDirty(i) ? " ●" : ""}</span>
+          <span class="tab-label">{tabTitle(i)}</span>
+          {#if tabDirty(i)}<span class="tab-dot" aria-hidden="true">●</span>{/if}
           <span
             class="tab-close"
             role="none"
-            title={t("关闭标签")}
+            title={t("Close Tab")}
             onclick={(e) => {
               e.stopPropagation();
               void closeTab(i);
@@ -5249,12 +6866,40 @@
     <!-- 右上角图标按钮（阶段 12）：皮肤设置（衣服）/ 软件设置（齿轮）。
          阅读 / 编辑模式开关已移到状态栏（见 StatusBar.svelte） -->
     <div class="corner-tools">
+      <!-- 工具栏自定义按钮：勾选项按顺序排在皮肤按钮左侧，样式与皮肤按钮一致 -->
+      {#each TOOLBAR_BUTTONS as btn (btn.id)}
+        {#if toolbarButtons[btn.id]}
+          <button
+            class="icon-btn"
+            title={t(btn.label)}
+            aria-label={t(btn.label)}
+            disabled={btn.disabled()}
+            onclick={btn.run}
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              {#if btn.id === "find"}
+                <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+              {:else if btn.id === "undo"}
+                <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+              {:else if btn.id === "redo"}
+                <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              {:else if btn.id === "save"}
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" />
+              {:else if btn.id === "recovery"}
+                <path d="M3 12a9 9 0 1 0 2.6-6.4L3 8" /><polyline points="3 3 3 8 8 8" /><polyline points="12 7.5 12 12 15 13.8" />
+              {:else}
+                <path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+              {/if}
+            </svg>
+          </button>
+        {/if}
+      {/each}
       <div class="menu-root skin-root">
         <button
           class="icon-btn"
           class:open={skinOpen}
-          title={t("皮肤设置")}
-          aria-label={t("皮肤设置")}
+          title={t("Skin Settings")}
+          aria-label={t("Skin Settings")}
           onclick={toggleSkin}
         >
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -5265,41 +6910,54 @@
 
         {#if skinOpen}
           <div class="menu-panel skin-panel">
-            <!-- 外观：明/暗档位（用户显式选择优先，未设置时跟随系统） -->
+            <!-- 工具栏自定义：勾选的按钮以小图标显示在顶栏右侧（皮肤按钮左边） -->
             <section class="set-group">
-              <h3>{t("外观")}</h3>
-              <div class="set-choices">
-                <button class:active={userThemeSet && theme === "light"} onclick={() => void setThemeChoice("light")}>{t("浅色")}</button>
-                <button class:active={userThemeSet && theme === "dark"} onclick={() => void setThemeChoice("dark")}>{t("深色")}</button>
-                <button class:active={!userThemeSet} onclick={() => void setThemeChoice("system")}>{t("跟随系统")}</button>
+              <div class="set-head">
+                <h3>{t("Toolbar")}</h3>
+              </div>
+              <div class="set-checks">
+                {#each TOOLBAR_BUTTONS as btn (btn.id)}
+                  <label class="set-check">
+                    <input
+                      type="checkbox"
+                      checked={toolbarButtons[btn.id]}
+                      onchange={() => void toggleToolbarButton(btn.id)}
+                    />
+                    <span>{t(btn.label)}</span>
+                  </label>
+                {/each}
               </div>
             </section>
 
-            <!-- 主题：主题文件夹里的自定义 .css，叠加在当前明/暗档位之上 -->
+            <!-- 外观（主题统一决定）：选主题即改整份配色，并按其 color-scheme 定编辑器 / 代码高亮深浅 -->
             <section class="set-group">
-              <h3>{t("主题")}</h3>
-              <p class="set-tip">{t("把任意 .css 放进主题文件夹，即可在此选用（叠加在当前明/暗档位之上）。")}</p>
-              {#if themeFiles.length > 0}
-                <div class="set-choices set-choices--wrap">
-                  <button class:active={userTheme === null} onclick={() => void selectUserTheme(null)}>{t("默认")}</button>
+              <div class="set-head">
+                <h3 data-tip={t("Appearance is set here: “Light (Default)” is the built-in light theme; picking a theme applies its colors and switches the editor / code highlighting to match — a theme counts as dark when its CSS declares color-scheme: dark. Put any .css file in the themes folder to use it here.")}>{t("Theme")}</h3>
+                <button class="set-action" onclick={() => void openThemesFolder()}>{t("Open Themes Folder")}</button>
+              </div>
+              <div class="set-row">
+                <select
+                  class="set-select"
+                  value={userTheme ?? ""}
+                  onchange={(e) => void selectUserTheme(e.currentTarget.value === "" ? null : e.currentTarget.value)}
+                >
+                  <option value="">{t("Light (Default)")}</option>
                   {#each themeFiles as file (file.name)}
-                    <button
-                      class:active={userTheme === file.name}
-                      onclick={() => void selectUserTheme(file.name)}
-                    >{file.name.replace(/\.css$/i, "")}</button>
+                    <option value={file.name}>{file.name.replace(/\.css$/i, "")}</option>
                   {/each}
-                </div>
-              {/if}
-              <button class="set-action" onclick={() => void openThemesFolder()}>{t("打开主题文件夹")}</button>
+                </select>
+              </div>
             </section>
 
-            <!-- 阅读排版：只服务 Markdown / 纯文本，HTML 文档自带样式不受影响 -->
+            <!-- 阅读排版：Markdown/纯文本全量生效，代码视图仅字号/行距/背景，HTML 不受影响 -->
             <section class="set-group">
-              <h3>{t("阅读排版")}</h3>
-              <p class="set-tip">{t("只作用于 Markdown / 纯文本文档；HTML 文档自带样式，不受这里影响。")}</p>
+              <div class="set-head">
+                <h3 data-tip={t("Scope: font, size, line height and text color apply to Markdown / plain text only; the code view honors only font size, line height and page background (text color is handled by syntax highlighting); HTML documents keep their own styles and are unaffected.")}>{t("Reading Typography")}</h3>
+                <button class="set-action" onclick={() => void openFontsFolder()}>{t("Open Fonts Folder")}</button>
+              </div>
 
               <label class="set-row">
-                <span class="set-label">{t("字体")}</span>
+                <span class="set-label" data-tip={t("Font packs: put .ttf / .otf / .woff2 files into the “fonts folder” to use them in the font list above.")}>{t("Font")}</span>
                 <select
                   class="set-select"
                   value={readerStyle.fontFamily ?? ""}
@@ -5312,13 +6970,13 @@
               </label>
 
               <label class="set-row">
-                <span class="set-label">{t("字号")}</span>
+                <span class="set-label">{t("Font Size")}</span>
                 <select
                   class="set-select"
                   value={readerStyle.fontSize ?? ""}
                   onchange={(e) => void setReaderOption("fontSize", e.currentTarget.value)}
                 >
-                  <option value="">{t("默认")}</option>
+                  <option value="">{t("Default")}</option>
                   {#each READER_SIZES as size (size)}
                     <option value={size}>{size}</option>
                   {/each}
@@ -5326,13 +6984,13 @@
               </label>
 
               <label class="set-row">
-                <span class="set-label">{t("行距")}</span>
+                <span class="set-label">{t("Line Height")}</span>
                 <select
                   class="set-select"
                   value={readerStyle.lineHeight ?? ""}
                   onchange={(e) => void setReaderOption("lineHeight", e.currentTarget.value)}
                 >
-                  <option value="">{t("默认")}</option>
+                  <option value="">{t("Default")}</option>
                   {#each READER_LINES as lh (lh)}
                     <option value={lh}>{lh}</option>
                   {/each}
@@ -5340,10 +6998,10 @@
               </label>
 
               <div class="set-row set-row--stack">
-                <span class="set-label">{t("文字颜色")}</span>
+                <span class="set-label">{t("Text Color")}</span>
                 <div class="reader-swatches">
-                  <button class:active={!readerStyle.textColor} title={t("默认")} onclick={() => void setReaderOption("textColor", "")}>
-                    {t("默认")}
+                  <button class:active={!readerStyle.textColor} title={t("Default")} onclick={() => void setReaderOption("textColor", "")}>
+                    {t("Default")}
                   </button>
                   {#each READER_TEXT_COLORS as color (color.value)}
                     <button
@@ -5359,17 +7017,17 @@
                     class="set-color"
                     type="color"
                     value={readerStyle.textColor ?? "#1a1a1a"}
-                    title={t("自定义颜色")}
+                    title={t("Custom color")}
                     oninput={(e) => void setReaderOption("textColor", e.currentTarget.value)}
                   />
                 </div>
               </div>
 
               <div class="set-row set-row--stack">
-                <span class="set-label">{t("页面背景")}</span>
+                <span class="set-label">{t("Page Background")}</span>
                 <div class="reader-swatches">
-                  <button class:active={!readerStyle.background} title={t("默认")} onclick={() => void setReaderOption("background", "")}>
-                    {t("默认")}
+                  <button class:active={!readerStyle.background} title={t("Default")} onclick={() => void setReaderOption("background", "")}>
+                    {t("Default")}
                   </button>
                   {#each READER_BACKGROUNDS as color (color.value)}
                     <button
@@ -5385,19 +7043,19 @@
                     class="set-color"
                     type="color"
                     value={readerStyle.background ?? "#f6efdc"}
-                    title={t("自定义颜色")}
+                    title={t("Custom color")}
                     oninput={(e) => void setReaderOption("background", e.currentTarget.value)}
                   />
                 </div>
               </div>
 
-              <button class="set-action" onclick={() => void resetReaderStyle()}>{t("恢复默认排版")}</button>
+              <button class="set-action" onclick={() => void resetReaderStyle()}>{t("Reset Typography")}</button>
             </section>
           </div>
         {/if}
       </div>
 
-      <button class="icon-btn" title={t("软件设置")} aria-label={t("软件设置")} onclick={() => (settingsOpen = true)}>
+      <button class="icon-btn" title={t("Settings")} aria-label={t("Settings")} onclick={() => (settingsOpen = true)}>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
@@ -5409,6 +7067,7 @@
   {#if findOpen}
     <FindBar
       {locale}
+      i18nEntries={activeEntries}
       bind:findText
       bind:replaceText
       {findStatus}
@@ -5441,17 +7100,22 @@
         searchFiles={searchFileCount}
         {searchTruncated}
         onView={setSidebarView}
+        bookmarks={bookmarkItems}
+        onAddBookmark={addBookmark}
+        bookmarksAllowed={bookmarksAllowed()}
         onClose={toggleSidebar}
         onOpenFile={openFromTree}
         onPickRoot={pickTreeRoot}
         onGotoHeading={gotoHeading}
         onSearch={(q, cs, re) => void runSearch(q, cs, re)}
         onOpenHit={(hit) => void openSearchHit(hit)}
+        dav={davUrl.trim() !== "" ? davConfig : null}
+        onOpenCloud={(remote, content) => void openCloudBound(remote, content)}
         t={t}
       />
     {/if}
 
-    <div class="editor-area">
+    <div class="editor-area" role="presentation" oncontextmenu={openDocMenu}>
       <main id="editor-host"></main>
 
       {#if docKind === "html"}
@@ -5464,7 +7128,7 @@
               <iframe
                 bind:this={previewFrame}
                 class:editing={previewEditable}
-                title={t("HTML 预览")}
+                title={t("HTML Preview")}
                 sandbox={htmlScripts ? "allow-scripts" : "allow-same-origin"}
                 srcdoc={previewDoc}
                 onload={onPreviewLoad}
@@ -5510,18 +7174,18 @@
 
   <StatusBar
     {locale}
+    i18nEntries={activeEntries}
     {wordCount}
     {charCount}
     {lineCount}
     {currentPath}
     {dirty}
     {docKind}
+    onSetDocKind={(kind) => void setDocMode(kind)}
     {editorMode}
     onSetEditorMode={switchEditorMode}
     {htmlView}
     onSetHtmlView={setHtmlView}
-    {htmlScripts}
-    onToggleHtmlScripts={toggleHtmlScripts}
     {codeLargeText}
     {codeLangLabel}
     {codeCursor}
@@ -5533,16 +7197,24 @@
     bind:codeLangOpen
     {typewriterOn}
     {paragraphFocus}
+    onToggleTypewriter={() => void toggleTypewriter()}
+    onToggleParagraphFocus={() => void toggleParagraphFocus()}
     {encoding}
     bind:encodingOpen
+    bind:modeOpen
     onApplyEncoding={(id) => void applyEncoding(id)}
     {davEnabled}
     {davSyncState}
     {davSyncTip}
+    cloudUpdateCount={cloudUpdates.length}
+    cloudUpdateTip={cloudUpdates.length === 0
+      ? ""
+      : `${t("Cloud versions updated: {n}", { n: cloudUpdates.length })}\n${cloudUpdates.map((u) => u.name).join("、")}`}
+    onOpenCloudUpdates={() => void promptCloudUpdates()}
   />
 
   {#if dragOver}
-    <div class="drop-overlay">{t("松开鼠标打开文件（支持 md / html / docx / pdf）")}</div>
+    <div class="drop-overlay">{t("Release to open the file (supports md / html / docx / pdf)")}</div>
   {/if}
 
   <!-- 快捷键一览（帮助菜单）：表格按分类分组，比原先的一行行文本更好速查 -->
@@ -5554,28 +7226,70 @@
         if (e.target === e.currentTarget) shortcutsOpen = false;
       }}
     >
-      <div class="modal modal--shortcuts" role="dialog" aria-label={t("快捷键一览")}>
+      <div class="modal modal--shortcuts" role="dialog" aria-label={t("Keyboard Shortcuts")}>
         <div class="modal-head">
-          <span>{t("快捷键一览")}</span>
-          <button class="icon-btn" title={t("关闭")} aria-label={t("关闭")} onclick={() => (shortcutsOpen = false)}>✕</button>
+          <span>{t("Keyboard Shortcuts")}</span>
+          <button class="icon-btn" title={t("Close")} aria-label={t("Close")} onclick={() => (shortcutsOpen = false)}>✕</button>
         </div>
         <div class="modal-body">
           <table class="sc-table">
             <thead>
-              <tr><th>{t("快捷键")}</th><th>{t("功能")}</th></tr>
+              <tr><th>{t("Shortcut")}</th><th>{t("Function")}</th></tr>
             </thead>
             {#each SHORTCUT_GROUPS as group (group.group)}
               <tbody>
                 <tr class="sc-group"><td colspan="2">{t(group.group)}</td></tr>
                 {#each group.items as item (item.desc)}
                   <tr>
-                    <td class="sc-keys"><kbd>{item.keys}</kbd></td>
+                    <td class="sc-keys"><kbd>{t(item.keys)}</kbd></td>
                     <td>{t(item.desc)}</td>
                   </tr>
                 {/each}
               </tbody>
             {/each}
           </table>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- 关于（帮助菜单）：带应用图标的自绘对话框 -->
+  {#if aboutOpen}
+    <div
+      class="modal-mask"
+      role="none"
+      onclick={(e) => {
+        if (e.target === e.currentTarget) aboutOpen = false;
+      }}
+    >
+      <div class="modal modal--about" role="dialog" aria-label={t("About Sticho")}>
+        <div class="modal-head">
+          <span>{t("About Sticho")}</span>
+          <button class="icon-btn" title={t("Close")} aria-label={t("Close")} onclick={() => (aboutOpen = false)}>✕</button>
+        </div>
+        <div class="modal-body about-body">
+          <img class="about-logo" src="/sticho-icon.png" alt="Sticho" />
+          <div class="about-title">{t("Sticho {version}", { version: APP_VERSION })}</div>
+          <p class="about-line">{t("A lightweight Markdown / plain text / code / HTML document editor.")}</p>
+          <p class="about-line">{t("Converts between Markdown, Word, PDF and HTML, all on your machine.")}</p>
+          <p class="about-line about-dim">{t("Built with Tauri + Svelte + Vditor.")}</p>
+          <p class="about-line about-dim">
+            {t("Word conversion is done by a separate Pandoc process (GPL-2.0, not bundled with this app).")}
+          </p>
+          <!-- 作者与版权：中英文一致，硬编码即可，不入 i18n 词表（免得撞「中文值 ≠ 英文键」的断言） -->
+          <div class="about-author">© 2026 Marvin 翁敏峰</div>
+          <!-- GitHub 占位：开源后把这里替换成真实仓库链接（届时改成 <a> 并复用现有外链打开方式） -->
+          <div class="about-links">
+            <span class="about-link about-link--placeholder">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+                />
+              </svg>
+              <span>GitHub</span>
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -5593,7 +7307,7 @@
       <div class="modal" role="dialog" aria-label={choiceState.title}>
         <div class="modal-head">
           <span>{choiceState.title}</span>
-          <button class="icon-btn" title={t("取消")} aria-label={t("取消")} onclick={() => resolveChoice(null)}>✕</button>
+          <button class="icon-btn" title={t("Cancel")} aria-label={t("Cancel")} onclick={() => resolveChoice(null)}>✕</button>
         </div>
         <div class="modal-body">
           <p class="choice-message">{choiceState.message}</p>
@@ -5611,16 +7325,31 @@
   {#if settingsOpen}
     <SettingsModal
       {locale}
+      i18nEntries={activeEntries}
       appVersion={APP_VERSION}
       bind:settingsTab
       onClose={() => (settingsOpen = false)}
       selectLocale={(id) => void selectLocale(id)}
+      {localeOptions}
+      onOpenLocalesDir={() => void openLocalesFolder()}
       {autoSaveEnabled}
       onToggleAutoSave={() => void toggleAutoSave()}
+      {autoSaveIntervalMin}
+      onSetAutoSaveInterval={(n) => void setAutoSaveInterval(n)}
       {defaultOpenMode}
       onSetDefaultOpenMode={(m) => void setDefaultOpenMode(m)}
       {historyKeep}
       onSetHistoryKeep={(n) => void setHistoryKeep(n)}
+      {historyCountLimitOn}
+      onSetHistoryCountLimitOn={(v) => void setHistoryCountLimitOn(v)}
+      {historySizeLimitOn}
+      onSetHistorySizeLimitOn={(v) => void setHistorySizeLimitOn(v)}
+      {historyMaxSizeMb}
+      onSetHistoryMaxSizeMb={(n) => void setHistoryMaxSizeMb(n)}
+      {historyAgeLimitOn}
+      onSetHistoryAgeLimitOn={(v) => void setHistoryAgeLimitOn(v)}
+      {historyMaxAgeDays}
+      onSetHistoryMaxAgeDays={(n) => void setHistoryMaxAgeDays(n)}
       {notepadAll}
       {assocBusy}
       onToggleNotepad={() => void toggleNotepad()}
@@ -5629,6 +7358,8 @@
       onToggleContextMenu={() => void toggleContextMenu()}
       {recentFiles}
       onClearRecentFiles={() => void clearRecentFiles()}
+      onClearSystemWrites={() => void clearSystemWrites()}
+      onClearConfigFiles={() => void clearConfigFiles()}
       {assoc}
       {assocExts}
       {allAssoc}
@@ -5640,6 +7371,7 @@
       bind:davUser
       bind:davPass
       bind:davRoot
+      bind:davUseHttps
       {onDavInput}
       onPersistDavConfig={() => void persistDavConfig()}
       {davTesting}
@@ -5650,26 +7382,33 @@
       onTestDav={() => void testDav()}
       onToggleDavEnabled={() => void toggleDavEnabled()}
       onOpenCloud={() => (cloudOpen = true)}
-      {davVersioning}
-      onToggleDavVersioning={() => void toggleDavVersioning()}
-      {davKeep}
-      onSetDavKeep={(n) => void setDavKeep(n)}
       {davConflictPolicy}
       onSetDavConflictPolicy={(p) => void setDavConflictPolicy(p)}
       {dataLocation}
       {locationBusy}
       onChangeDataLocation={(m) => void changeDataLocation(m)}
-      onPickCustomLocation={() => void pickCustomLocation()}
       {dataRootPath}
       {locationTip}
       {locationTipOk}
-      onRestart={() => void doRestart()}
+    />
+  {/if}
+
+  {#if configSetupOpen}
+    <ConfigSetupDialog
+      {locale}
+      i18nEntries={activeEntries}
+      {localeOptions}
+      onSelectLocale={selectSetupLocale}
+      busy={configSetupBusy}
+      tip={configSetupTip}
+      onChoose={(m) => void chooseConfigLocation(m)}
     />
   {/if}
 
   {#if codeToolsOpen}
     <CodeTools
       {locale}
+      i18nEntries={activeEntries}
       readSelection={getCodeSelection}
       writeText={(text) => {
         replaceCodeSelection(text);
@@ -5682,6 +7421,7 @@
   {#if cloudOpen}
     <CloudBrowser
       {locale}
+      i18nEntries={activeEntries}
       dav={davConfig}
       onOpen={(remote, content) => void openCloudDoc(remote, content)}
       onClose={() => (cloudOpen = false)}
@@ -5692,6 +7432,7 @@
   {#if recoveryOpen}
     <RecoveryCenter
       {locale}
+      i18nEntries={activeEntries}
       onRestore={(payload) => void restoreFromRecoveryCenter(payload)}
       onClose={() => (recoveryOpen = false)}
     />
@@ -5700,6 +7441,7 @@
   {#if diffView}
     <DiffView
       {locale}
+      i18nEntries={activeEntries}
       title={diffView.title}
       leftLabel={diffView.leftLabel}
       rightLabel={diffView.rightLabel}
@@ -5712,6 +7454,7 @@
   {#if paletteOpen}
     <CommandPalette
       {locale}
+      i18nEntries={activeEntries}
       commands={paletteCommands}
       onClose={() => (paletteOpen = false)}
     />
@@ -5719,7 +7462,7 @@
 
   <!-- 入门指南（批次四）：首次启动弹出，帮助菜单可随时重开 -->
   {#if welcomeOpen}
-    <WelcomeDialog {locale} appVersion={APP_VERSION} onClose={dismissWelcome} />
+    <WelcomeDialog {locale} i18nEntries={activeEntries} appVersion={APP_VERSION} onClose={dismissWelcome} />
   {/if}
 
   <!-- 标签栏右键菜单：固定定位在鼠标处（放在最外层，不受 .tabs 横向滚动裁剪） -->
@@ -5731,18 +7474,121 @@
       style={`left:${tabMenu.x}px; top:${tabMenu.y}px`}
       oncontextmenu={(e) => e.preventDefault()}
     >
-      <button class="menu-item" role="menuitem" onclick={() => runTabMenu(true)}>
-        <span class="label">{t("关闭标签页")}</span>
+      <button class="menu-item" role="menuitem" onclick={() => runTabMenu("close")}>
+        <span class="label">{t("Close Tab")}</span>
       </button>
       <button
         class="menu-item"
         role="menuitem"
         disabled={tabs.length < 2}
-        onclick={() => runTabMenu(false)}
+        onclick={() => runTabMenu("closeOther")}
       >
-        <span class="label">{t("关闭其他标签页")}</span>
+        <span class="label">{t("Close Other Tabs")}</span>
+      </button>
+      <div class="menu-sep" role="separator"></div>
+      <button
+        class="menu-item"
+        role="menuitem"
+        disabled={tabMenu.index === tabs.length - 1}
+        onclick={() => runTabMenu("closeRight")}
+      >
+        <span class="label">{t("Close Tabs to the Right")}</span>
+      </button>
+      <button
+        class="menu-item"
+        role="menuitem"
+        disabled={tabMenu.index === 0}
+        onclick={() => runTabMenu("closeLeft")}
+      >
+        <span class="label">{t("Close Tabs to the Left")}</span>
+      </button>
+      <div class="menu-sep" role="separator"></div>
+      <!-- 打开文件位置：未保存到本地（或仅云端）的标签不可用 -->
+      <button
+        class="menu-item"
+        role="menuitem"
+        disabled={!tabPathAt(tabMenu.index)}
+        onclick={() => runTabMenu("reveal")}
+      >
+        <span class="label">{t("Open File Location")}</span>
+      </button>
+      <button
+        class="menu-item"
+        role="menuitem"
+        disabled={busy}
+        onclick={() => runTabMenu("save")}
+      >
+        <span class="label">{t("Save")}</span>
+      </button>
+      <button
+        class="menu-item"
+        role="menuitem"
+        disabled={busy}
+        onclick={() => runTabMenu("saveAs")}
+      >
+        <span class="label">{t("Save As…")}</span>
+      </button>
+      <button
+        class="menu-item"
+        role="menuitem"
+        onclick={() => runTabMenu("properties")}
+      >
+        <span class="label">{t("File Properties")}</span>
       </button>
     </div>
+  {/if}
+
+  <!-- 文档区右键菜单：代码 / Markdown 文档自绘（标准编辑项 + 添加为书签），HTML 保留原生菜单 -->
+  {#if docMenu}
+    <div
+      class="tab-menu"
+      role="menu"
+      tabindex="-1"
+      style={`left:${docMenu.x}px; top:${docMenu.y}px`}
+      oncontextmenu={(e) => e.preventDefault()}
+    >
+      <button
+        class="menu-item"
+        role="menuitem"
+        class:is-disabled={browseMode || !docSelectionText()}
+        aria-disabled={browseMode || !docSelectionText()}
+        onclick={() => void runDocMenu("cut")}
+      >
+        <span class="label">{t("Cut")}</span>
+      </button>
+      <button
+        class="menu-item"
+        role="menuitem"
+        class:is-disabled={!docSelectionText()}
+        aria-disabled={!docSelectionText()}
+        onclick={() => void runDocMenu("copy")}
+      >
+        <span class="label">{t("Copy")}</span>
+      </button>
+      <button
+        class="menu-item"
+        role="menuitem"
+        class:is-disabled={browseMode}
+        aria-disabled={browseMode}
+        onclick={() => void runDocMenu("paste")}
+      >
+        <span class="label">{t("Paste")}</span>
+      </button>
+      <button class="menu-item" role="menuitem" onclick={() => void runDocMenu("selectAll")}>
+        <span class="label">{t("Select All")}</span>
+      </button>
+      {#if bookmarksAllowed()}
+        <div class="menu-sep" role="separator"></div>
+        <button class="menu-item" role="menuitem" onclick={() => void runDocMenu("bookmark")}>
+          <span class="label">{t("Add Bookmark")}</span>
+        </button>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- 自绘浮窗说明（data-tip）：固定定位在最外层，不受设置面板滚动裁剪 -->
+  {#if tipText}
+    <div class="app-tip" bind:this={tipEl} style={`left:${tipLeft}px; top:${tipTop}px`}>{tipText}</div>
   {/if}
 </div>
 
@@ -5957,10 +7803,23 @@
     box-shadow: inset 0 2px 0 var(--accent, #2563eb);
   }
 
+  /* 阅读模式的选中标签：改用阅读强调色，与编辑模式（强调蓝）区分 */
+  .app.read-mode .tab.active {
+    border-color: var(--read-accent, #2f9e44);
+    box-shadow: inset 0 2px 0 var(--read-accent, #2f9e44);
+  }
+
   .tab-label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* 未保存标记：独立节点才能单独染红（拼进标签文案里会跟着文字走同一种颜色） */
+  .tab-dot {
+    flex: 0 0 auto;
+    color: var(--danger, #e5484d);
+    font-size: 0.9em;
   }
 
   .tab-close {
@@ -5976,7 +7835,7 @@
 
   .tab-close:hover {
     background: var(--danger, #e5484d);
-    color: #fff;
+    color: var(--danger-contrast, #fff);
     opacity: 1;
   }
 
@@ -6009,15 +7868,54 @@
     background: var(--hover, rgba(0, 0, 0, 0.07));
   }
 
+  /* 顶栏自定义按钮：当前文档不可用时置灰、不响应点击 */
+  .icon-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+
+  .icon-btn:disabled:hover {
+    background: transparent;
+  }
+
   /* 皮肤设置面板：承载外观 / 主题 / 阅读排版三块设置，比一级菜单宽；
      按钮在齿轮左边，面板向左展开避免溢出窗口右侧，内容超高时自身滚动 */
   .skin-panel {
-    width: 300px;
-    max-height: 72vh;
+    width: 380px;
+    max-height: 74vh;
     overflow-y: auto;
-    padding: 0.8rem;
+    padding: 0.9rem 0.85rem;
     left: auto;
     right: 0;
+  }
+
+  /* 分组标题行：标题在左、可选的「打开…文件夹」动作按钮贴右，下沿一条细线分隔 */
+  .skin-panel .set-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-bottom: 0.6rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border, #ddd);
+  }
+
+  .skin-panel .set-head h3 {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    opacity: 1;
+  }
+
+  /* 面板内控件统一过渡，聚焦时给一圈强调色 */
+  .skin-panel .set-action {
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  }
+
+  .skin-panel .set-action:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
   }
 
   /* ---- 软件设置面板 ---- */
@@ -6102,6 +8000,63 @@
     color: var(--accent);
   }
 
+  /* ---- 关于对话框（帮助菜单）：居中展示应用图标与版本信息 ---- */
+  .modal--about {
+    /* 原 340px；按用户要求加宽到约 1.3 倍，版本信息与说明文字排布更舒展 */
+    width: 442px;
+  }
+
+  .about-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.35rem;
+  }
+
+  .about-logo {
+    width: 72px;
+    height: 72px;
+    border-radius: 16px;
+    margin: 0.2rem 0 0.4rem;
+  }
+
+  .about-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+
+  .about-line {
+    margin: 0;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+
+  .about-dim {
+    opacity: 0.7;
+  }
+
+  .about-author {
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    opacity: 0.85;
+  }
+
+  .about-links {
+    margin-top: 0.15rem;
+    display: flex;
+    justify-content: center;
+  }
+
+  /* GitHub 占位：开源后替换为真实链接（届时改成可点的 <a>，复用现有外链打开方式） */
+  .about-link--placeholder {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.75rem;
+    opacity: 0.45;
+  }
+
   /* ---- 快捷键一览表格（帮助菜单）---- */
   .modal--shortcuts {
     width: 640px;
@@ -6160,46 +8115,42 @@
     margin-bottom: 0.5rem;
   }
 
-  .set-choices {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .set-choices button {
-    flex: 1;
-    font: inherit;
-    font-size: 0.8125rem;
-    padding: 0.35rem 0;
-    border: 1px solid var(--border, #ddd);
-    border-radius: 6px;
-    background: transparent;
-    color: inherit;
-    cursor: pointer;
-  }
-
-  .set-choices button:hover {
-    background: var(--hover, rgba(0, 0, 0, 0.07));
-  }
-
-  .set-choices button.active {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  /* 主题名长短不一：皮肤设置面板里放不下就换行，且按钮按内容宽度而非等分 */
-  .set-choices--wrap {
-    flex-wrap: wrap;
-    margin-top: 0.4rem;
-  }
-
-  .set-choices--wrap button {
-    flex: 0 1 auto;
-    padding: 0.35rem 0.7rem;
-  }
-
   /* 皮肤设置面板里的动作按钮（打开主题文件夹 / 恢复默认排版）与上方控件拉开间距 */
   .set-group > .set-action {
     margin-top: 0.5rem;
+  }
+
+  /* 自绘浮窗说明（data-tip / 原生 title）：替代系统气泡——限宽提前换行、圆角柔和描边、
+     随主题取色的浮面，并带轻微淡入，固定在视口坐标不受面板滚动裁剪影响 */
+  .app-tip {
+    position: fixed;
+    z-index: 900;
+    max-width: 320px;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+    color: var(--tip-fg, #1f2328);
+    background: var(--tip-bg, #fff);
+    border: 1px solid var(--tip-border, rgba(120, 120, 130, 0.28));
+    border-radius: 8px;
+    box-shadow: var(--tip-shadow, 0 8px 22px rgba(0, 0, 0, 0.14));
+    backdrop-filter: blur(2px);
+    pointer-events: none;
+    transform-origin: top left;
+    animation: app-tip-in 0.12s ease-out;
+  }
+
+  @keyframes app-tip-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 
   .set-row {
@@ -6208,6 +8159,23 @@
     gap: 0.45rem;
     font-size: 0.8125rem;
     padding: 0.25rem 0;
+    cursor: pointer;
+  }
+
+  /* 工具栏自定义的多选框：固定三列排布，兼顾横向空间与阅读顺序 */
+  .set-checks {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.2rem 0.9rem;
+  }
+
+  .set-check {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    font-size: 0.8125rem;
+    padding: 0.2rem 0;
     cursor: pointer;
   }
 
@@ -6284,12 +8252,6 @@
     border-radius: 6px;
     background: transparent;
     cursor: pointer;
-  }
-
-  .set-tip {
-    font-size: 0.75rem;
-    opacity: 0.6;
-    margin-top: 0.35rem;
   }
 
   .set-action {

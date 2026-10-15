@@ -8,7 +8,8 @@ describe("encodingLabel", () => {
     expect(encodingLabel("gb18030")).toContain("GB18030");
   });
 
-  it("未知 id 原样返回，便于排查", () => {
+  it("表外 id 原样返回（显示 encoding_rs 规范名，便于用户判断）", () => {
+    expect(encodingLabel("windows-1251")).toBe("windows-1251");
     expect(encodingLabel("no-such-encoding")).toBe("no-such-encoding");
   });
 

@@ -24,11 +24,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 下载 / PROPFIND 响应的读取上限（防止异常响应把内存吃满）
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// 版本目录名（放在远端根目录下的隐藏目录里）
-const VERSION_DIR: &str = ".mdstudio-versions";
-
-/// 版本目录标识的最大长度（远端文件名长度限制不一，留足余量）
-const MAX_DOC_ID_LEN: usize = 90;
+/// 上传文档的本地文件大小上限（200MB）。
+/// 这里在 `fs::read` 一次性读全文件之前先拦一道，避免超大文件把内存吃满或长时间无响应；
+/// 单纯放宽此值即可支持更大文档，无需改动上传流程。
+const MAX_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
 /// 冲突判定容差（秒）：远端 size 相同、modified 相差不超过此值，视为「就是自己刚传的那份」。
 ///
@@ -79,15 +78,15 @@ pub struct WebdavEntry {
     pub size: u64,
 }
 
-/// 历史版本项
+/// 远端文件状态（`webdav_stat` 的返回值）：供前端判断「云端是否被别的设备改过」。
 #[derive(Serialize, Clone)]
-pub struct VersionEntry {
-    pub n: u32,
-    /// 版本文件的远端路径，可直接交给 `webdav_download`
-    pub path: String,
+pub struct RemoteStat {
+    /// 远端是否存在该文件；不存在时下面两个字段都是 0
+    pub exists: bool,
+    /// 字节数
     pub size: u64,
-    /// Unix 秒；服务器没给可解析的 Last-Modified 时为 0
-    pub saved_at: u64,
+    /// Last-Modified（Unix 秒；无法解析为 0）
+    pub modified: u64,
 }
 
 // ---------------------------------------------------------------- 纯函数
@@ -162,7 +161,9 @@ fn find_elements_in<'a>(xml: &'a str, lower: &str, local: &str) -> Vec<&'a str> 
             i += 1;
             continue;
         }
-        let Some(gt_rel) = lower[i..].find('>') else { break };
+        let Some(gt_rel) = lower[i..].find('>') else {
+            break;
+        };
         let gt = i + gt_rel;
         let raw_tag = &lower[i + 1..gt];
         let name = raw_tag.split_whitespace().next().unwrap_or("");
@@ -247,18 +248,28 @@ fn local_segments(local: &str) -> Vec<String> {
     if let Some(first) = segs.first_mut() {
         let is_drive = first.len() == 2
             && first.ends_with(':')
-            && first.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+            && first
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic());
         if is_drive {
             first.pop();
         }
     }
+    // `.` / `..` 段必须剔除：它们会被原样编码送到服务器，而部分 WebDAV 实现会按
+    // 路径语义解析 `..`，等于允许把文件写到 base 目录之外（目录穿越）。
+    segs.retain(|seg| seg != "." && seg != "..");
     segs
 }
 
 /// 文档的远端路径（相对 base，含根前缀，**未编码**）。
 pub fn remote_path(root: &str, local: &str) -> String {
     let mut out = String::new();
-    for seg in root.split('/').filter(|s| !s.is_empty()) {
+    // 根配置同理过滤 `.` / `..`：根治目录穿越（本地段见 local_segments）
+    for seg in root
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+    {
         out.push('/');
         out.push_str(seg);
     }
@@ -288,87 +299,6 @@ fn ext_of(remote: &str) -> String {
     }
 }
 
-/// FNV-1a 32 位。仅用于给版本目录标识消歧，不需要密码学强度。
-fn fnv1a(s: &str) -> u32 {
-    let mut h: u32 = 0x811c_9dc5;
-    for b in s.as_bytes() {
-        h ^= *b as u32;
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    h
-}
-
-/// 文档在版本目录里的标识。
-///
-/// 用「相对远端路径 `/` → `__`」再净化，末尾附 8 位哈希：
-/// 净化与截断都可能让两个不同文档撞名，撞名会让两份文档共用一份版本历史，必须避免。
-pub fn doc_id(root: &str, remote: &str) -> String {
-    let prefix = root.trim_matches('/');
-    let rel = remote.trim_matches('/');
-    let rel = rel.strip_prefix(prefix).unwrap_or(rel);
-    let rel = rel.trim_start_matches('/');
-    let mut safe: String = rel
-        .replace('/', "__")
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if safe.len() > MAX_DOC_ID_LEN {
-        safe.truncate(MAX_DOC_ID_LEN);
-    }
-    format!("{safe}-{:08x}", fnv1a(rel))
-}
-
-/// 版本文件所在目录的远端路径（不含尾部斜杠）
-fn version_dir_path(root: &str, remote: &str) -> String {
-    format!(
-        "/{}/{VERSION_DIR}/{}",
-        root.trim_matches('/'),
-        doc_id(root, remote)
-    )
-}
-
-/// 单个版本文件的远端路径
-fn version_file_path(root: &str, remote: &str, n: u32) -> String {
-    format!(
-        "{}/v{n}{}",
-        version_dir_path(root, remote),
-        ext_of(remote)
-    )
-}
-
-/// 从版本文件名解析版本号：`v3.md` → 3。不匹配返回 None。
-fn version_number_of(name: &str) -> Option<u32> {
-    let rest = name.strip_prefix('v')?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return None;
-    }
-    digits.parse::<u32>().ok()
-}
-
-/// 计算下一个版本号，以及为满足上限需要删除的旧版本号。
-///
-/// 追加式推进（不做重命名），换取请求数与原子性：
-/// 新版本号 = 现有最大号 + 1；写完后若总数超过 `keep`，从最小号开始删。
-/// `keep == 0` 表示不记录版本，返回 `(0, [])`。
-pub fn next_version(existing: &[u32], keep: u32) -> (u32, Vec<u32>) {
-    if keep == 0 {
-        return (0, Vec::new());
-    }
-    let mut all: Vec<u32> = existing.to_vec();
-    let next = all.iter().copied().max().unwrap_or(0) + 1;
-    all.push(next);
-    all.sort_unstable();
-    let excess = all.len().saturating_sub(keep as usize);
-    (next, all.into_iter().take(excess).collect())
-}
-
 // ---------------------------------------------------------------- 冲突判定
 
 /// 文件名里不允许出现的字符（Windows 侧限制）一律换成 `_`。
@@ -385,7 +315,7 @@ fn sanitize_component(name: &str) -> String {
         .collect();
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
-        "未命名".to_string()
+        "untitled".to_string()
     } else {
         trimmed.to_string()
     }
@@ -407,7 +337,7 @@ fn conflict_stamp(secs: u64) -> String {
     }
 }
 
-/// 冲突副本的远端路径：同目录下 `name (冲突副本 YYYY-MM-DD HHmmss).ext`。
+/// 冲突副本的远端路径：同目录下 `name (conflict copy YYYY-MM-DD HHmmss).ext`。
 fn conflict_remote_path(remote: &str, secs: u64) -> String {
     let (dir, name) = match remote.rsplit_once('/') {
         Some((d, n)) => (d.to_string(), n.to_string()),
@@ -418,7 +348,7 @@ fn conflict_remote_path(remote: &str, secs: u64) -> String {
         _ => (name.clone(), String::new()),
     };
     format!(
-        "{dir}/{} (冲突副本 {}){ext}",
+        "{dir}/{} (conflict copy {}){ext}",
         sanitize_component(&stem),
         conflict_stamp(secs)
     )
@@ -428,13 +358,14 @@ fn conflict_remote_path(remote: &str, secs: u64) -> String {
 ///
 /// 判据（防误判，宁可少判也不误判）：
 /// - 远端没有该文件 → 不算冲突（正常新建 / 覆盖）
-/// - 没有上次记录 → 首次同步，直接覆盖并回填，不算冲突
+/// - 远端存在但没有上次记录 → 判为冲突：本机没有同步索引，无法证明远端那份是自己传的，
+///   直接覆盖可能悄悄抹掉别的设备写上去的版本（索引丢失 / 换机后首次上传）
 /// - size 相同且 modified 相差 ≤ 容差 → 就是自己刚传的那份，正常覆盖
 /// - 其余 → 冲突（远端被别的设备改过）
 fn is_conflict(remote: Option<(u64, u64)>, prev: Option<(u64, u64)>) -> bool {
     match (remote, prev) {
         (None, _) => false,
-        (Some(_), None) => false,
+        (Some(_), None) => true,
         (Some((rs, rm)), Some((ps, pm))) => {
             !(rs == ps && rm.abs_diff(pm) <= CONFLICT_TOLERANCE_SECS)
         }
@@ -531,19 +462,19 @@ fn request(
     }
 }
 
-/// 把 ureq 的错误翻译成能直接给用户看的中文。
+/// 把 ureq 的错误转成可直接展示的英文结论（前端 `t()` 再按当前语言翻译）。
 fn map_err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, _) => match code {
-            401 | 403 => "凭据错误，请检查用户名与密码".to_string(),
-            404 => "远端路径不存在（404）".to_string(),
-            405 => "该地址不支持 WebDAV（405）".to_string(),
-            409 => "远端父目录不存在（409）".to_string(),
-            507 => "远端存储空间不足（507）".to_string(),
-            _ => format!("服务器返回 {code}"),
+            401 | 403 => "Invalid credentials — check the username and password".to_string(),
+            404 => "Remote path not found (404)".to_string(),
+            405 => "This URL does not support WebDAV (405)".to_string(),
+            409 => "Remote parent directory not found (409)".to_string(),
+            507 => "Remote storage is full (507)".to_string(),
+            _ => format!("Server returned {code}"),
         },
         ureq::Error::Transport(t) => {
-            format!("网络不可达或证书校验失败：{t}")
+            format!("Network unreachable or certificate verification failed: {t}")
         }
     }
 }
@@ -561,7 +492,9 @@ impl From<ureq::Error> for DavError {
     fn from(e: ureq::Error) -> Self {
         match e {
             ureq::Error::Status(code, _) => DavError::Status(code),
-            ureq::Error::Transport(t) => DavError::Other(format!("网络不可达或证书校验失败：{t}")),
+            ureq::Error::Transport(t) => DavError::Other(format!(
+                "Network unreachable or certificate verification failed: {t}"
+            )),
         }
     }
 }
@@ -570,12 +503,12 @@ impl DavError {
     fn message(self) -> String {
         match self {
             DavError::Status(code) => match code {
-                401 | 403 => "凭据错误，请检查用户名与密码".to_string(),
-                404 => "远端路径不存在（404）".to_string(),
-                405 => "该地址不支持 WebDAV（405）".to_string(),
-                409 => "远端父目录不存在（409）".to_string(),
-                507 => "远端存储空间不足（507）".to_string(),
-                _ => format!("服务器返回 {code}"),
+                401 | 403 => "Invalid credentials — check the username and password".to_string(),
+                404 => "Remote path not found (404)".to_string(),
+                405 => "This URL does not support WebDAV (405)".to_string(),
+                409 => "Remote parent directory not found (409)".to_string(),
+                507 => "Remote storage is full (507)".to_string(),
+                _ => format!("Server returned {code}"),
             },
             DavError::Other(msg) => msg,
         }
@@ -604,10 +537,10 @@ fn read_all(resp: ureq::Response) -> Result<Vec<u8>, String> {
     resp.into_reader()
         .take(MAX_RESPONSE_BYTES + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| format!("读取响应失败：{e}"))?;
+        .map_err(|e| format!("Failed to read response: {e}"))?;
     if buf.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(format!(
-            "云端文件超过 {} MB 上限，已中止（避免内存占用过高）",
+            "Cloud file exceeds the {} MB limit; aborted (to avoid excessive memory usage)",
             MAX_RESPONSE_BYTES / (1024 * 1024)
         ));
     }
@@ -627,11 +560,17 @@ fn propfind(
         .send_string(PROPFIND_BODY)?;
     // 与下载走同一个带上限的读取，避免异常服务器返回超大 multistatus 时内存失控
     let bytes = read_all(resp).map_err(DavError::Other)?;
-    String::from_utf8(bytes)
-        .map_err(|_| DavError::Other("服务器返回的目录信息不是 UTF-8".to_string()))
+    String::from_utf8(bytes).map_err(|_| {
+        DavError::Other("Directory information returned by the server is not UTF-8".to_string())
+    })
 }
 
 /// 创建一个集合（目录）。已存在（405/409）视为成功——建目录是幂等操作。
+///
+/// 说明：`ureq::Error` 体积约 272B，直接返回它会触发 `clippy::result_large_err`。
+/// 以下四个 WebDAV 辅助函数调用点很少、错误随即被转为 `DavError`，
+/// 保留扁平错误类型更直观，故显式豁免该 lint。
+#[allow(clippy::result_large_err)]
 fn mkcol(agent: &ureq::Agent, url: &str, user: &str, password: &str) -> Result<(), ureq::Error> {
     match request(agent, "MKCOL", url, user, password).call() {
         Ok(_) => Ok(()),
@@ -641,6 +580,7 @@ fn mkcol(agent: &ureq::Agent, url: &str, user: &str, password: &str) -> Result<(
 }
 
 /// 逐级创建远端路径里的所有目录（最后一段视作文件名，不建）。
+#[allow(clippy::result_large_err)]
 fn ensure_dirs(
     agent: &ureq::Agent,
     base: &str,
@@ -661,6 +601,7 @@ fn ensure_dirs(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 fn put_bytes(
     agent: &ureq::Agent,
     url: &str,
@@ -675,35 +616,71 @@ fn put_bytes(
         .map(|_| ())
 }
 
-/// 仅当目标不存在时写入（`If-None-Match: *`）。
+/// 原子上传：先把字节 PUT 到同目录的临时名，再 MOVE 覆盖目标。
 ///
-/// 返回 `false` 表示目标已存在（服务器回 412），用于版本号并发防撞。
-fn put_bytes_create_only(
+/// 直接 PUT 到目标路径时，若传输中途中断（断网 / 进程被杀 / 磁盘满），
+/// 服务端往往已经把半截内容写进了原文件，远端版本就此损坏。
+/// 先写临时名再 MOVE：中断只会留下一个可丢弃的临时文件，目标文件在 MOVE 成功前始终完好。
+///
+/// 少数服务端不支持 MOVE（405 / 501）：清掉临时文件后退回直接 PUT——
+/// 那类服务端上没有原子性保证，但至少功能可用。
+fn put_atomic(
     agent: &ureq::Agent,
-    url: &str,
+    base: &str,
     user: &str,
     password: &str,
-    body: &[u8],
+    remote: &str,
+    bytes: &[u8],
     content_type: &str,
-) -> Result<bool, ureq::Error> {
-    match request(agent, "PUT", url, user, password)
-        .set("Content-Type", content_type)
-        .set("If-None-Match", "*")
-        .send_bytes(body)
+) -> Result<(), String> {
+    // 临时名与目标同目录（`ensure_dirs` 已建好父目录），序号取当前秒保证唯一
+    let seq = crate::logging::now_secs();
+    let tmp_remote = format!("{remote}.{seq}.sticho.tmp");
+    let tmp_url = join_url(base, &tmp_remote);
+    let dest_url = join_url(base, remote);
+
+    put_bytes(agent, &tmp_url, user, password, bytes, content_type).map_err(map_err)?;
+
+    match request(agent, "MOVE", &tmp_url, user, password)
+        .set("Destination", &dest_url)
+        .set("Overwrite", "T")
+        .call()
     {
-        Ok(_) => Ok(true),
-        Err(ureq::Error::Status(412, _)) => Ok(false),
-        Err(e) => Err(e),
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(code, _)) if code == 405 || code == 501 => {
+            // 服务端不支持 MOVE：清理临时文件后退回直接 PUT
+            let _ = request(agent, "DELETE", &tmp_url, user, password).call();
+            put_bytes(agent, &dest_url, user, password, bytes, content_type).map_err(map_err)
+        }
+        Err(e) => {
+            // 其它失败：删掉临时文件，目标文件保持原样（不会被半截内容污染）
+            let _ = request(agent, "DELETE", &tmp_url, user, password).call();
+            Err(map_err(e))
+        }
     }
 }
 
-/// 目录项（列目录与列版本共用的中间结构）
+/// 远端原子上传留下的临时文件名（形如 `<目标>.<序号>.sticho.tmp`）。
+///
+/// 上传成功后 MOVE 会把它搬走，正常不会出现在列表里；只有 MOVE 与清理 DELETE
+/// 双双失败的极端情况才会残留。列目录时统一挡掉，免得被当成正常文档打开。
+fn is_upload_tmp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".sticho.tmp") else {
+        return false;
+    };
+    // 序号段必须是纯数字，用户真有一个叫 `x.sticho.tmp` 的文件不会被误藏
+    match rest.rsplit_once('.') {
+        Some((_, seq)) => !seq.is_empty() && seq.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// 目录项（列目录共用的中间结构）
 struct ChildEntry {
     name: String,
     path: String,
     is_dir: bool,
     size: u64,
-    modified: u64,
 }
 
 /// PROPFIND Depth:1 列目录。
@@ -754,10 +731,6 @@ fn parse_children(xml: &str, request_path: &str, remote: &str) -> Vec<ChildEntry
                 .first()
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(0),
-            modified: find_elements_in(resp, &resp_lower, "getlastmodified")
-                .first()
-                .and_then(|s| parse_http_date(&unescape(s)))
-                .unwrap_or(0),
         });
     }
     out
@@ -802,36 +775,11 @@ fn stat_remote(
     }
 }
 
-/// 列出某文档已有的版本号（升序去重）。版本目录不存在时返回空表。
-fn list_versions(
-    agent: &ureq::Agent,
-    base: &str,
-    user: &str,
-    password: &str,
-    root: &str,
-    remote: &str,
-) -> Result<Vec<u32>, String> {
-    let dir = version_dir_path(root, remote);
-    let children = match propfind_children(agent, base, user, password, &dir) {
-        Ok(c) => c,
-        Err(DavError::Status(404)) => return Ok(Vec::new()),
-        Err(e) => return Err(e.message()),
-    };
-    let mut nums: Vec<u32> = children
-        .iter()
-        .filter(|c| !c.is_dir)
-        .filter_map(|c| version_number_of(&c.name))
-        .collect();
-    nums.sort_unstable();
-    nums.dedup();
-    Ok(nums)
-}
-
 // ---------------------------------------------------------------- 命令
 
 /// 测试连接：对配置的根目录发一次 PROPFIND。
 ///
-/// 返回值是可直接展示的中文结论；只有返回 Ok 前端才允许打开同步开关。
+/// 返回值是可直接展示的英文结论（前端 `t()` 再按当前语言翻译）；只有返回 Ok 前端才允许打开同步开关。
 #[tauri::command]
 pub async fn webdav_test(
     url: String,
@@ -848,17 +796,20 @@ pub async fn webdav_test(
             .send_string(PROPFIND_BODY)
             .map_err(DavError::from);
         match result {
-            Ok(_) => Ok("连接成功（支持 WebDAV）".to_string()),
+            Ok(_) => Ok("Connected (WebDAV supported)".to_string()),
             // 根目录还没建不算失败：上传时 ensure_dirs 会自动创建
-            Err(DavError::Status(404)) => Ok("远端根目录不存在，将在上传时自动创建".to_string()),
+            Err(DavError::Status(404)) => Ok(
+                "Remote root does not exist yet; it will be created automatically on upload"
+                    .to_string(),
+            ),
             Err(e) => Err(e.message()),
         }
     })
     .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
+    .map_err(|e| format!("Task spawn failed: {e}"))?
 }
 
-/// 上传单个文档。`keep > 0` 时顺带记一份历史版本。
+/// 上传单个文档。
 ///
 /// `local` 是本地绝对路径；Rust 侧直接读刚落盘的字节，保证上传内容与本地完全一致
 /// （也顺带避开前端编码转换的差异）。
@@ -866,121 +817,128 @@ pub async fn webdav_test(
 /// 冲突处理：上传前先 `PROPFIND` 探测远端当前状态，与前端传来的上次同步记录
 /// （`prev_size` / `prev_modified`）比对。判定冲突且 `policy != "overwrite"` 时，
 /// 不覆盖原文件，而是另存为同目录的冲突副本——**绝不丢数据**。
+// 参数按名从 JS 透传（Tauri 命令约定），拆成结构体会改变前端调用形状，故保留多参数
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn webdav_upload(
     url: String,
     user: String,
     password: String,
     root: String,
     local: String,
-    keep: u32,
     policy: String,
     prev_size: Option<u64>,
     prev_modified: Option<u64>,
 ) -> Result<UploadResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let bytes = std::fs::read(&local).map_err(|e| format!("读取本地文件失败：{e}"))?;
+        let meta =
+            std::fs::metadata(&local).map_err(|e| format!("Failed to read local file: {e}"))?;
+        if meta.len() > MAX_UPLOAD_BYTES {
+            return Err(format!(
+                "File is too large ({} MB); cloud sync only supports documents up to {} MB",
+                meta.len() / 1024 / 1024,
+                MAX_UPLOAD_BYTES / 1024 / 1024
+            ));
+        }
+        let bytes = std::fs::read(&local).map_err(|e| format!("Failed to read local file: {e}"))?;
         let remote = remote_path(&root, &local);
         let agent = agent();
-        let content_type = content_type_of(&remote);
-
-        ensure_dirs(&agent, &url, &user, &password, &remote).map_err(map_err)?;
-
-        // 冲突探测：远端当前状态 vs 上次同步记录
-        let current = stat_remote(&agent, &url, &user, &password, &remote)?;
         let prev = match (prev_size, prev_modified) {
             (Some(s), Some(m)) => Some((s, m)),
             _ => None,
         };
-        let conflict = is_conflict(current, prev);
-        let make_copy = conflict && policy != "overwrite";
-        let target = if make_copy {
-            conflict_remote_path(&remote, crate::logging::now_secs())
-        } else {
-            remote.clone()
-        };
-
-        // 冲突副本与原文件同目录，父目录已由 ensure_dirs 建好
-        put_bytes(
-            &agent,
-            &join_url(&url, &target),
-            &user,
-            &password,
-            &bytes,
-            content_type,
-        )
-        .map_err(map_err)?;
-
-        // 版本留档记在「真正写入的那个远端路径」上，历史才不会串到别的文件
-        let mut version_label: Option<u32> = None;
-        if keep > 0 {
-            // 版本目录要先建出来，否则 PUT 会因为父目录不存在而 409
-            let vdir = version_dir_path(&root, &target);
-            mkcol(&agent, &join_url(&url, &vdir), &user, &password).map_err(map_err)?;
-
-            // 版本号是「先查后写」：并发上传（多设备同时同步）时会算出同一个号并互相覆盖。
-            // 用 If-None-Match:* 条件写，撞号（412）就重查一次再试，最多 3 轮。
-            for attempt in 0..3 {
-                let existing = list_versions(&agent, &url, &user, &password, &root, &target)?;
-                let (next, outdated) = next_version(&existing, keep);
-                if next == 0 {
-                    break;
-                }
-                let created = put_bytes_create_only(
-                    &agent,
-                    &join_url(&url, &version_file_path(&root, &target, next)),
-                    &user,
-                    &password,
-                    &bytes,
-                    content_type,
-                )
-                .map_err(map_err)?;
-                if !created {
-                    if attempt == 2 {
-                        return Err("云端版本号冲突（可能有其他设备正在同步），请稍后重试".to_string());
-                    }
-                    continue; // 被抢先，重查版本号
-                }
-                // 清理超限的旧版本：失败不影响本次同步的结果
-                for n in outdated {
-                    let _ = request(
-                        &agent,
-                        "DELETE",
-                        &join_url(&url, &version_file_path(&root, &target, n)),
-                        &user,
-                        &password,
-                    )
-                    .call();
-                }
-                version_label = Some(next);
-                break;
-            }
-        }
-
-        // 回读上传后的远端状态，供前端回填同步索引（下次据此判定远端是否被动过）
-        let (size, modified) = stat_remote(&agent, &url, &user, &password, &target)?
-            .unwrap_or((bytes.len() as u64, 0));
-
-        let message = if make_copy {
-            let name = target.rsplit('/').next().unwrap_or(target.as_str());
-            format!("云端文件已被其他设备修改，已另存为冲突副本：{name}")
-        } else {
-            match version_label {
-                Some(n) => format!("已上传（版本 v{n}）"),
-                None => "已上传".to_string(),
-            }
-        };
-
-        Ok(UploadResult {
-            status: if make_copy { "conflict" } else { "ok" }.to_string(),
-            remote: target,
-            size,
-            modified,
-            message,
-        })
+        upload_to_remote(&agent, &url, &user, &password, &remote, &bytes, &policy, prev)
     })
     .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
+    .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+/// 把正文直接写到指定远端路径——云端文档「就地编辑」保存时用。
+///
+/// 与 `webdav_upload` 的唯一区别：没有本地文件，`remote` 由前端给出（打开云端文档时记下的路径）。
+/// 冲突判定逻辑完全共用，行为一致。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn webdav_put(
+    url: String,
+    user: String,
+    password: String,
+    remote: String,
+    content: String,
+    policy: String,
+    prev_size: Option<u64>,
+    prev_modified: Option<u64>,
+) -> Result<UploadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = content.into_bytes();
+        // 与 webdav_upload 同一条上限：就地写回也不放行超大正文
+        if bytes.len() as u64 > MAX_UPLOAD_BYTES {
+            return Err(format!(
+                "File is too large ({} MB); cloud sync only supports documents up to {} MB",
+                bytes.len() / 1024 / 1024,
+                MAX_UPLOAD_BYTES / 1024 / 1024
+            ));
+        }
+        let agent = agent();
+        let prev = match (prev_size, prev_modified) {
+            (Some(s), Some(m)) => Some((s, m)),
+            _ => None,
+        };
+        upload_to_remote(&agent, &url, &user, &password, &remote, &bytes, &policy, prev)
+    })
+    .await
+    .map_err(|e| format!("Task spawn failed: {e}"))?
+}
+
+/// 上传字节到指定远端路径（含冲突副本判定），供上面两个命令共用。
+///
+/// `remote` 为相对 base 的远端路径（含根前缀，未编码）。
+#[allow(clippy::too_many_arguments)]
+fn upload_to_remote(
+    agent: &ureq::Agent,
+    url: &str,
+    user: &str,
+    password: &str,
+    remote: &str,
+    bytes: &[u8],
+    policy: &str,
+    prev: Option<(u64, u64)>,
+) -> Result<UploadResult, String> {
+    let content_type = content_type_of(remote);
+
+    ensure_dirs(agent, url, user, password, remote).map_err(map_err)?;
+
+    // 冲突探测：远端当前状态 vs 上次同步记录
+    let current = stat_remote(agent, url, user, password, remote)?;
+    let conflict = is_conflict(current, prev);
+    let make_copy = conflict && policy != "overwrite";
+    let target = if make_copy {
+        conflict_remote_path(remote, crate::logging::now_secs())
+    } else {
+        remote.to_string()
+    };
+
+    // 原子上传：冲突副本 / 目标与原文件同目录，父目录已由 ensure_dirs 建好
+    put_atomic(agent, url, user, password, &target, bytes, content_type)?;
+
+    // 回读上传后的远端状态，供前端回填同步索引（下次据此判定远端是否被动过）
+    let (size, modified) =
+        stat_remote(agent, url, user, password, &target)?.unwrap_or((bytes.len() as u64, 0));
+
+    let message = if make_copy {
+        let name = target.rsplit('/').next().unwrap_or(target.as_str());
+        format!("Cloud file was modified by another device; saved as a conflict copy: {name}")
+    } else {
+        "Uploaded".to_string()
+    };
+
+    Ok(UploadResult {
+        status: if make_copy { "conflict" } else { "ok" }.to_string(),
+        remote: target,
+        size,
+        modified,
+        message,
+    })
 }
 
 /// 列出远端某个目录下的内容（`path` 为相对 base 的远端路径）
@@ -993,10 +951,12 @@ pub async fn webdav_list(
 ) -> Result<Vec<WebdavEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let agent = agent();
-        let children = propfind_children(&agent, &url, &user, &password, &path)
-            .map_err(DavError::message)?;
+        let children =
+            propfind_children(&agent, &url, &user, &password, &path).map_err(DavError::message)?;
         let mut list: Vec<WebdavEntry> = children
             .into_iter()
+            // 挡掉原子上传残留的临时文件（MOVE + 清理 DELETE 双双失败的极端情况）
+            .filter(|c| !is_upload_tmp_name(&c.name))
             .map(|c| WebdavEntry {
                 name: c.name,
                 path: c.path,
@@ -1013,7 +973,7 @@ pub async fn webdav_list(
         Ok(list)
     })
     .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
+    .map_err(|e| format!("Task spawn failed: {e}"))?
 }
 
 /// 读取远端文件正文（按 UTF-8 解析；非 UTF-8 直接报错，不做有损解码）
@@ -1030,95 +990,43 @@ pub async fn webdav_download(
             .call()
             .map_err(map_err)?;
         let bytes = read_all(resp)?;
-        String::from_utf8(bytes).map_err(|_| "云端文件不是 UTF-8 编码，暂不支持下载".to_string())
+        String::from_utf8(bytes).map_err(|_| {
+            "Cloud file is not UTF-8 encoded and downloading is not supported yet".to_string()
+        })
     })
     .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
+    .map_err(|e| format!("Task spawn failed: {e}"))?
 }
 
-/// 列出某文档的历史版本（按版本号降序）。
+/// 探测某个远端文件的当前状态（PROPFIND Depth:0）。
 ///
-/// `remote` 是文档的远端路径：云端浏览里点某文件时就有这个路径，
-/// 不必再让前端复述一遍「本地路径 → 远端路径」的映射规则。
+/// 供前端做「云端变更检测」：把返回的 size / modified 与本机上次同步记录比对，不一致即说明
+/// 该文件已被别的设备改过——可提前提示用户，而不是等到下一次上传才发现冲突。
+/// 文件不存在时返回 `exists = false`（不算错误：只是还没被任何设备上传过）。
 #[tauri::command]
-pub async fn webdav_versions(
+pub async fn webdav_stat(
     url: String,
     user: String,
     password: String,
-    root: String,
-    remote: String,
-) -> Result<Vec<VersionEntry>, String> {
+    path: String,
+) -> Result<RemoteStat, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let agent = agent();
-        let dir = version_dir_path(&root, &remote);
-        let children = match propfind_children(&agent, &url, &user, &password, &dir) {
-            Ok(c) => c,
-            Err(DavError::Status(404)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.message()),
-        };
-        let mut list: Vec<VersionEntry> = children
-            .into_iter()
-            .filter(|c| !c.is_dir)
-            .filter_map(|c| {
-                let n = version_number_of(&c.name)?;
-                Some(VersionEntry {
-                    n,
-                    path: c.path,
-                    size: c.size,
-                    saved_at: c.modified,
-                })
-            })
-            .collect();
-        list.sort_by_key(|v| std::cmp::Reverse(v.n));
-        Ok(list)
+        match stat_remote(&agent, &url, &user, &password, &path)? {
+            Some((size, modified)) => Ok(RemoteStat {
+                exists: true,
+                size,
+                modified,
+            }),
+            None => Ok(RemoteStat {
+                exists: false,
+                size: 0,
+                modified: 0,
+            }),
+        }
     })
     .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
-}
-
-/// 取回某个历史版本的正文
-#[tauri::command]
-pub async fn webdav_fetch_version(
-    url: String,
-    user: String,
-    password: String,
-    root: String,
-    remote: String,
-    n: u32,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let agent = agent();
-        let target = join_url(&url, &version_file_path(&root, &remote, n));
-        let resp = request(&agent, "GET", &target, &user, &password)
-            .call()
-            .map_err(map_err)?;
-        let bytes = read_all(resp)?;
-        String::from_utf8(bytes).map_err(|_| "云端文件不是 UTF-8 编码，暂不支持下载".to_string())
-    })
-    .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
-}
-
-/// 删除某个历史版本（版本面板里的「删除该版本」）
-#[tauri::command]
-pub async fn webdav_delete_version(
-    url: String,
-    user: String,
-    password: String,
-    root: String,
-    remote: String,
-    n: u32,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let agent = agent();
-        let target = join_url(&url, &version_file_path(&root, &remote, n));
-        request(&agent, "DELETE", &target, &user, &password)
-            .call()
-            .map_err(map_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("任务调度失败：{e}"))?
+    .map_err(|e| format!("Task spawn failed: {e}"))?
 }
 
 // ---------------------------------------------------------------- 测试
@@ -1146,68 +1054,68 @@ mod tests {
     }
 
     #[test]
+    fn remote_path_剔除路径穿越段() {
+        // 本地路径里的 `..` 段会被剔除，避免服务器按语义解析后写到 base 之外
+        assert_eq!(
+            remote_path("/sticho", "D:\\a\\..\\b.md"),
+            "/sticho/D/a/b.md"
+        );
+        assert_eq!(remote_path("/sticho", "D:\\a\\.\\b.md"), "/sticho/D/a/b.md");
+        // 根配置里的 `..` 同样被过滤
+        assert_eq!(remote_path("/../x", "C:\\n.md"), "/x/C/n.md");
+    }
+
+    #[test]
     fn remote_path_maps_windows_paths() {
-        assert_eq!(remote_path("/MDStudio", "D:\\TraeProject\\note.md"), "/MDStudio/D/TraeProject/note.md");
-        assert_eq!(remote_path("/MDStudio", "\\\\?\\D:\\a\\b.md"), "/MDStudio/D/a/b.md");
-        assert_eq!(remote_path("MDStudio/", "D:\\a\\b.md"), "/MDStudio/D/a/b.md");
+        assert_eq!(
+            remote_path("/MDStudio", "D:\\TraeProject\\note.md"),
+            "/MDStudio/D/TraeProject/note.md"
+        );
+        assert_eq!(
+            remote_path("/MDStudio", "\\\\?\\D:\\a\\b.md"),
+            "/MDStudio/D/a/b.md"
+        );
+        assert_eq!(
+            remote_path("MDStudio/", "D:\\a\\b.md"),
+            "/MDStudio/D/a/b.md"
+        );
         // 盘符大小写保留
         assert_eq!(remote_path("/r", "c:\\x.md"), "/r/c/x.md");
     }
 
     #[test]
     fn remote_path_keeps_unc_prefix() {
-        assert_eq!(remote_path("/r", "\\\\server\\share\\x.md"), "/r/server/share/x.md");
+        assert_eq!(
+            remote_path("/r", "\\\\server\\share\\x.md"),
+            "/r/server/share/x.md"
+        );
     }
 
     #[test]
     fn url_helpers() {
-        assert_eq!(join_url("http://h:8080/dav/", "/MDStudio/a b.md"), "http://h:8080/dav/MDStudio/a%20b.md");
+        assert_eq!(
+            join_url("http://h:8080/dav/", "/MDStudio/a b.md"),
+            "http://h:8080/dav/MDStudio/a%20b.md"
+        );
         assert_eq!(join_url("http://h", "/"), "http://h");
         assert_eq!(url_path("http://h:8080/dav/x"), "/dav/x");
         assert_eq!(url_path("http://h"), "/");
     }
 
     #[test]
-    fn ext_and_version_number() {
+    fn ext_of_works() {
         assert_eq!(ext_of("/a/note.md"), ".md");
         assert_eq!(ext_of("/a/README"), "");
         assert_eq!(ext_of("/a/archive.tar.gz"), ".gz");
-        assert_eq!(version_number_of("v1.md"), Some(1));
-        assert_eq!(version_number_of("v10"), Some(10));
-        assert_eq!(version_number_of("v"), None);
-        assert_eq!(version_number_of("videos.md"), None);
-    }
-
-    #[test]
-    fn doc_id_is_stable_and_disambiguated() {
-        let a = doc_id("/MDStudio", "/MDStudio/D/a/note.md");
-        assert_eq!(a, doc_id("/MDStudio", "/MDStudio/D/a/note.md"));
-        // 净化后同形的两个路径不能撞名
-        assert_ne!(doc_id("/r", "/r/a/b.md"), doc_id("/r", "/r/a_b.md"));
-        // 不含非法字符
-        assert!(a
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')));
-    }
-
-    #[test]
-    fn next_version_appends_and_trims() {
-        assert_eq!(next_version(&[], 3), (1, vec![]));
-        assert_eq!(next_version(&[1], 3), (2, vec![]));
-        assert_eq!(next_version(&[1, 2], 3), (3, vec![]));
-        // 恰好到上限：写入后总数等于 keep，不删
-        assert_eq!(next_version(&[1, 2, 3], 3), (4, vec![1]));
-        // 有空洞时以最大值为准推进
-        assert_eq!(next_version(&[1, 5], 3), (6, vec![]));
-        assert_eq!(next_version(&[1, 5, 6], 2), (7, vec![1, 5]));
-        // keep = 0 表示不记录
-        assert_eq!(next_version(&[1, 2], 0), (0, vec![]));
     }
 
     #[test]
     fn parse_http_date_works() {
         // 2026-10-08T03:12:00Z
-        assert_eq!(parse_http_date("Thu, 08 Oct 2026 03:12:00 GMT"), Some(1791429120));
+        assert_eq!(
+            parse_http_date("Thu, 08 Oct 2026 03:12:00 GMT"),
+            Some(1791429120)
+        );
         assert_eq!(parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
         assert_eq!(parse_http_date("垃圾数据"), None);
     }
@@ -1245,7 +1153,6 @@ mod tests {
         assert!(!file.is_dir);
         assert_eq!(file.path, "/MDStudio/中文.md");
         assert_eq!(file.size, 42);
-        assert_eq!(file.modified, 1791429120);
     }
 
     #[test]
@@ -1301,8 +1208,8 @@ mod tests {
         // 远端没有该文件 → 不冲突
         assert!(!is_conflict(None, None));
         assert!(!is_conflict(None, Some((10, 100))));
-        // 首次同步（无上次记录）→ 直接覆盖，不判冲突
-        assert!(!is_conflict(Some((10, 100)), None));
+        // 远端存在但本机无上次记录 → 判冲突（无法证明是自己传的，避免静默覆盖他机版本）
+        assert!(is_conflict(Some((10, 100)), None));
         // size 相同且 modified 差 ≤ 2s → 视为自己刚传的
         assert!(!is_conflict(Some((10, 100)), Some((10, 101))));
         assert!(!is_conflict(Some((10, 100)), Some((10, 98))));
@@ -1313,22 +1220,49 @@ mod tests {
     }
 
     #[test]
+    fn upload_tmp_names_are_hidden_from_listing() {
+        // 形如 <目标>.<纯数字序号>.sticho.tmp → 视为上传残留
+        assert!(is_upload_tmp_name("a.md.1792000000.sticho.tmp"));
+        assert!(is_upload_tmp_name("笔记.md.0.sticho.tmp"));
+        // 不带数字序号的同名文件是用户自己的文件，不能误藏
+        assert!(!is_upload_tmp_name("笔记.sticho.tmp"));
+        assert!(!is_upload_tmp_name("a.md.sticho.tmp"));
+        assert!(!is_upload_tmp_name("a.md.x.sticho.tmp"));
+        assert!(!is_upload_tmp_name("a.md"));
+        assert!(!is_upload_tmp_name(""));
+    }
+
+    #[test]
     fn conflict_path_is_sibling_with_stamp() {
         // 2026-10-12 14:30:25 UTC
         let secs = 1_791_815_425;
         assert_eq!(
             conflict_remote_path("/Sticho/D/a/note.md", secs),
-            "/Sticho/D/a/note (冲突副本 2026-10-12 143025).md"
+            "/Sticho/D/a/note (conflict copy 2026-10-12 143025).md"
         );
         // 无扩展名
         assert_eq!(
             conflict_remote_path("/r/README", secs),
-            "/r/README (冲突副本 2026-10-12 143025)"
+            "/r/README (conflict copy 2026-10-12 143025)"
         );
         // 文件名里的非法字符被净化
         assert_eq!(
             conflict_remote_path("/r/a:b*c.md", secs),
-            "/r/a_b_c (冲突副本 2026-10-12 143025).md"
+            "/r/a_b_c (conflict copy 2026-10-12 143025).md"
         );
+    }
+
+    #[test]
+    fn sanitize_component_cleans_illegal_chars() {
+        // Windows 非法字符（\ / : * ? " < > |）与控制字符一律换成 _
+        assert_eq!(
+            sanitize_component(r#"a\b/c:d*e?f"g<h>i|j"#),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+        assert_eq!(sanitize_component("tab\there"), "tab_here");
+        // 首尾空白裁掉；净化后为空则退回 "untitled"
+        assert_eq!(sanitize_component("  note.md  "), "note.md");
+        assert_eq!(sanitize_component("   "), "untitled");
+        assert_eq!(sanitize_component("///"), "___");
     }
 }

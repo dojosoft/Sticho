@@ -14,17 +14,13 @@
 
 export type ToolResult = { ok: true; text: string } | { ok: false; error: string };
 
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 /** 取原文的行尾风格 */
 export function eolOf(src: string): string {
   return src.includes("\r\n") ? "\r\n" : "\n";
 }
 
 /** 原文末尾有换行时，给处理结果补回一个换行（避免每次美化都丢掉文件末尾的换行） */
-function keepTrailingEol(text: string, src: string): string {
+export function keepTrailingEol(text: string, src: string): string {
   if (/(?:\r\n|\r|\n)$/.test(src) && !text.endsWith("\n")) return text + eolOf(src);
   return text;
 }
@@ -35,16 +31,17 @@ export function prettyJson(src: string): ToolResult {
   try {
     const text = JSON.stringify(JSON.parse(src), null, 2);
     return { ok: true, text: keepTrailingEol(text.split("\n").join(eolOf(src)), src) };
-  } catch (e) {
-    return { ok: false, error: errText(e) };
+  } catch {
+    // 返回英文 key 而非 JSON.parse 的原生英文报错，供调用方经 t() 翻译
+    return { ok: false, error: "Invalid JSON" };
   }
 }
 
 export function minifyJson(src: string): ToolResult {
   try {
     return { ok: true, text: keepTrailingEol(JSON.stringify(JSON.parse(src)), src) };
-  } catch (e) {
-    return { ok: false, error: errText(e) };
+  } catch {
+    return { ok: false, error: "Invalid JSON" };
   }
 }
 
@@ -408,8 +405,8 @@ export function base64Encode(src: string): ToolResult {
       bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
     }
     return { ok: true, text: btoa(bin) };
-  } catch (e) {
-    return { ok: false, error: errText(e) };
+  } catch {
+    return { ok: false, error: "Failed to encode to Base64" };
   }
 }
 
@@ -419,21 +416,25 @@ export function base64Decode(src: string): ToolResult {
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return { ok: true, text: new TextDecoder("utf-8").decode(bytes) };
-  } catch (e) {
-    return { ok: false, error: errText(e) };
+  } catch {
+    return { ok: false, error: "Invalid Base64 input" };
   }
 }
 
 /* ────────────────────────── 进制转换 ────────────────────────── */
 
-export type NumResult = { ok: true; value: number } | { ok: false; error: string };
+export type NumResult =
+  /** value 用 bigint：超过 2^53 的整数（如 64 位十六进制）用 number 会静默丢精度 */
+  | { ok: true; value: bigint }
+  /** error 为英文 key；vars 供 t() 插值（如非法数字与进制） */
+  | { ok: false; error: string; vars?: Record<string, string | number> };
 
 const DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz";
 
 /** 按进制解析整数。`base = 0` 时按前缀自动识别（0x / 0o / 0b，否则十进制） */
 export function parseNumberInBase(src: string, base: number): NumResult {
   const clean = src.trim().replace(/[\s_]/g, "");
-  if (clean === "") return { ok: false, error: "输入为空" };
+  if (clean === "") return { ok: false, error: "Input is empty" };
   const negative = clean.startsWith("-");
   let body = negative ? clean.slice(1) : clean;
   let radix = base;
@@ -453,19 +454,27 @@ export function parseNumberInBase(src: string, base: number): NumResult {
   } else {
     body = body.replace(/^0[xX]/, "").replace(/^0[oO]/, "").replace(/^0[bB]/, "");
   }
-  if (body === "") return { ok: false, error: "输入为空" };
+  if (body === "") return { ok: false, error: "Input is empty" };
   const allowed = DIGITS.slice(0, radix);
   for (const ch of body.toLowerCase()) {
-    if (!allowed.includes(ch)) return { ok: false, error: `“${ch}” 不是 ${radix} 进制的合法数字` };
+    if (!allowed.includes(ch)) {
+      return { ok: false, error: "“{ch}” is not a valid digit in base {radix}", vars: { ch, radix } };
+    }
   }
-  const value = parseInt(body, radix);
-  if (!Number.isFinite(value)) return { ok: false, error: "解析失败" };
+  // 位数上限：超长输入下 BigInt 的逐位累乘会退化成平方级复杂度，挡住病态粘贴（如几十万位的二进制）
+  if (body.length > 4096) return { ok: false, error: "Input is too long" };
+  // 用 BigInt 解析：parseInt 走 double，超过 2^53 的整数会静默丢精度（例如 64 位的十六进制）
+  let value = 0n;
+  const radixBig = BigInt(radix);
+  for (const ch of body.toLowerCase()) {
+    value = value * radixBig + BigInt(DIGITS.indexOf(ch));
+  }
   return { ok: true, value: negative ? -value : value };
 }
 
-export function formatInBase(value: number, base: number): string {
-  const text = Math.abs(value).toString(base);
-  return value < 0 ? `-${text}` : text;
+export function formatInBase(value: bigint, base: number): string {
+  const text = (value < 0n ? -value : value).toString(base);
+  return value < 0n ? `-${text}` : text;
 }
 
 /* ────────────────────────── 插入类 ────────────────────────── */
