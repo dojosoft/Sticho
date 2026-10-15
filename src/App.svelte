@@ -3161,8 +3161,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       );
       if (!ok) return;
     }
-    // 退出前落一份草稿与会话：定时器可能刚好还没轮到（tickAutoSave 已吞掉所有异常）
+    // 退出前落一份草稿与会话：定时器可能刚好还没轮到（tickAutoSave 已吞掉所有异常）。
+    // 会话必须再显式写一次：tickAutoSave 走的是 runAutoSave，它在「自动保存已关闭」时
+    // 会整轮提前返回（连会话也不写），于是 Ctrl+Q / 菜单退出后标签集不恢复；而关窗路径
+    // （onCloseRequested）是显式写会话的，两条出口必须一致。
     await tickAutoSave();
+    await saveSession();
     await getCurrentWindow().destroy();
   }
 
