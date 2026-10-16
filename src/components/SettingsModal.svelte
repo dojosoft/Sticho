@@ -358,15 +358,15 @@
 
           <section class="set-group">
             <h3
-              data-tip={t("On: the tab set is saved when you exit, and the next start asks whether to restore it. Off: the session is neither saved nor restored — each start begins with a single welcome tab.")}
-            >{t("Session")}</h3>
+              data-tip={t("On: the tab set is saved when you exit, and the next start asks whether to restore it. Off: the session is neither saved nor restored — each start begins with a single blank document.")}
+            >{t("Session Restore")}</h3>
             <label class="set-row">
               <input
                 type="checkbox"
                 checked={restoreSession}
                 onchange={onToggleRestoreSession}
               />
-              <span>{t("Restore the tabs from my last session")}</span>
+              <span>{t("Ask to restore the last session's tabs on startup")}</span>
             </label>
           </section>
 

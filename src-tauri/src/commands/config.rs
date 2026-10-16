@@ -40,7 +40,7 @@ const SETTINGS_FILE: &str = "settings.json";
 const SECRETS_FILE: &str = "secrets.json";
 
 // 迁移与清理都不维护硬编码的数据项清单：配置根目录里除位置标记 `data-location.json`
-// 外的所有内容都算用户数据（settings.json、recovery、themes、locales、fonts、docs、
+// 外的所有内容都算用户数据（settings.json、recovery、themes、locales、fonts、
 // pandoc、bookmarks、history、logs…），统一由 `data_entries` 枚举整个目录处理——
 // 这样日后新增目录会自动纳入，不会再出现「迁移漏掉新文件夹」的问题。
 //
@@ -370,7 +370,6 @@ const PROGRAM_DIR_DATA_ITEMS: &[&str] = &[
     "themes",
     "locales",
     "fonts",
-    "docs",
     "pandoc",
     "bookmarks",
     "history",

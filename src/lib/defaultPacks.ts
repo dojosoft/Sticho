@@ -5,14 +5,13 @@
  * 一份。三个目录各附一份 README.txt 说明格式，用户照着改就行。
  *
  * 释放规则（批次十五统一）：
- * - 不带 `version` 的包（主题 / 字体 / 说明文件 / 欢迎页正文）：只在文件缺失时释放，
+ * - 不带 `version` 的包（主题 / 字体 / 说明文件）：只在文件缺失时释放，
  *   用户改过或删过的文件不会被下次启动写回；
  * - 自带语言包（内置 en-US / zh-CN，未来可增）统一带 `version`：目标缺失时释放补充，
  *   已存在且其中 `_version` 低于当前内置版本时覆盖更新——软件据此把内置词表保持在最新
  *   版本。规则与语种无关，新增自带语言包沿用同一条规则即可。
  */
 import { ZH } from "./i18n";
-import { WELCOME_DOC_FILES } from "./welcome";
 import type { DefaultPackFile } from "./tauri-api";
 
 /** locales/ 目录的说明文件 */
@@ -449,6 +448,4 @@ export const DEFAULT_PACK_FILES: DefaultPackFile[] = [
   // 内置「温酒」主题：与之对应的整套暖黄浅色界面配色（不带 version，缺失时才释放）
   { dir: "themes", name: WARM_WINE_THEME_FILE, content: WARM_WINE_THEME },
   { dir: "fonts", name: "README.txt", content: FONTS_README },
-  // docs/ 下的欢迎页正文与说明：同样不带 version，仅在缺失时释放（用户可自行修改）
-  ...WELCOME_DOC_FILES,
 ];

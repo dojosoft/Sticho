@@ -104,7 +104,7 @@ export type FontPack = {
 
 /** 待释放的默认包文件 */
 export type DefaultPackFile = {
-  dir: "locales" | "themes" | "fonts" | "docs";
+  dir: "locales" | "themes" | "fonts";
   name: string;
   content: string;
   /**
@@ -129,8 +129,8 @@ export function loadFonts(): Promise<FontPack[]> {
   return invoke<FontPack[]>("load_fonts");
 }
 
-/** 在资源管理器中打开某个包目录（locales | themes | fonts | docs），返回其绝对路径 */
-export function openPackDir(kind: "locales" | "themes" | "fonts" | "docs"): Promise<string> {
+/** 在资源管理器中打开某个包目录（locales | themes | fonts），返回其绝对路径 */
+export function openPackDir(kind: "locales" | "themes" | "fonts"): Promise<string> {
   return invoke<string>("open_pack_dir", { kind });
 }
 

@@ -198,6 +198,11 @@ function buildTheme(modules: CmModules, dark: boolean): Ext {
         color: `var(--cm-fg, ${fg})`,
         backgroundColor: `var(--cm-bg, ${bg})`,
       },
+      // 焦点环：CodeMirror 的 baseTheme 会给获得焦点的编辑器描一圈 1px 点线框
+      // （见 @codemirror/view 的 baseTheme：`&.cm-focused` → outline: 1px dotted #212121）。
+      // 编辑器只在可编辑时才能拿到焦点，于是「切到编辑模式」就会在正文区外面多出一圈虚框；
+      // 阅读模式下不可聚焦、本就不出现，去掉它正好让两种模式的观感一致。
+      "&.cm-focused": { outline: "none" },
       ".cm-scroller": {
         overflow: "auto",
         fontFamily: `var(--cm-font-family, ${CODE_FONT})`,

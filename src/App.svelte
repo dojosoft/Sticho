@@ -180,7 +180,7 @@
     removeTrailingSpaces,
   } from "./lib/textTools";
   import { ENCODINGS, encodingLabel } from "./lib/encoding";
-  import { newDocTab, sessionOf, applyEol, detectEol, restoredTabNeedsWelcome, type DocTab, type Eol, type SessionState, type SessionTab } from "./lib/docState";
+  import { newDocTab, sessionOf, applyEol, detectEol, type DocTab, type Eol, type SessionState, type SessionTab } from "./lib/docState";
   import { parseOutline, parseOutlineFromHtml, parseFrontMatter, htmlPlainText, type OutlineItem, type SidebarView } from "./lib/sidebar";
   import Sidebar from "./components/Sidebar.svelte";
   import CodeTools from "./components/CodeTools.svelte";
@@ -207,7 +207,6 @@
     LEGACY_THEME_FILES,
     LEGACY_THEME_RENAMES,
   } from "./lib/defaultPacks";
-  import { loadWelcomeDocs, welcomeFor } from "./lib/welcome";
   import {
     compileFindRegex,
     collectDomHits,
@@ -601,13 +600,13 @@
 
   // ---- 侧边栏（阶段 11）----
   /**
-   * 侧边栏显隐按「当前文档模式」分别记忆：纯文本（代码）默认不启用，Markdown / HTML 默认启用；
+   * 侧边栏显隐按「当前文档模式」分别记忆：三种模式（Markdown / HTML / 纯文本）默认都启用；
    * 各模式里做过的手动改动各自保存，切换文档模式时套用该模式的记忆值。
    */
   let sidebarByKind = $state<Record<"markdown" | "html" | "code", boolean>>({
     markdown: true,
     html: true,
-    code: false,
+    code: true,
   });
   let sidebarView = $state<SidebarView>("outline");
   /**
@@ -807,35 +806,13 @@
   let findWord = $state(false);
   let findRegex = $state(false);
 
-  /**
-   * 新建文档的欢迎正文：优先取配置目录 `docs/Welcome.<locale>.md` 的正文（用户可自由修改），
-   * 读不到时回落内置文案。文档内容不随切换语言重译——只在「新建标签 / 首次打开」时取当时的语言，
-   * 之后它就是普通正文，用户改动与保存都不受影响。
-   */
-  function welcomeText(): string {
-    return welcomeFor(locale) ?? builtinWelcomeText();
-  }
-
-  /** 内置欢迎文案（配置目录里没有对应文档时的回落） */
-  function builtinWelcomeText(): string {
-    return `# ${t("Welcome to Sticho")}
-
-${t("Type to start, or load a .md / .html file via File → Open.")}
-
-${t("Drag md / html / docx / pdf files into the window to open them directly.")}
-`;
-  }
-
   // ---- 多标签页（批次六）----
   // 顶层 $state 仍是活跃标签的唯一真源；tabs 只在切换 / 关闭 / 落草稿时被搬运（见 lib/docState.ts）。
   let tabSeq = 0;
+  /** 新建标签：未命名、空正文的 Markdown 文档（启动首屏也是它，见 tabs 的初值） */
   function createTab(): DocTab {
     tabSeq += 1;
-    const tab = newDocTab(tabSeq, welcomeText());
-    // 这份正文是「欢迎文档」，不是用户新建的空白标签：会话恢复只带元信息，
-    // 靠本字段才能把欢迎文档补回来、又不去动用户新建的空白标签（见 docState.restoredTabNeedsWelcome）
-    tab.welcome = true;
-    return tab;
+    return newDocTab(tabSeq, "");
   }
 
   let tabs = $state<DocTab[]>([createTab()]);
@@ -1141,11 +1118,6 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     // 刚打开的文档也要把磁盘上的书签装回来：本函数是「直填全局状态」的落点，
     // 不走 activateTab，不在这里补一次，重开后书签就会像「没保存」一样消失。
     const openedTab = tabs[activeIndex];
-    // 此后这个标签装的是「刚打开 / 导入的文档」，不再是新建标签时注入的欢迎正文。不摘掉这个
-    // 标记，它会继续带着「欢迎文档」身份——复用了欢迎标签的场合尤其明显（云端浏览 / 历史版本
-    // 打开不绑定远端路径，标签既没路径也没草稿），退出重启后会话恢复就会把用户那份文档
-    // 换成一份欢迎正文。打开失败时正文其实还是欢迎文案，但那次本来也没打开任何文档。
-    if (openedTab) openedTab.welcome = false;
     if (openedTab && shouldLoadBookmarks(openedTab)) await loadStoredBookmarks(openedTab);
     resetToBrowseMode();
   }
@@ -1690,8 +1662,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   /**
    * 往预览文档里补一条样式：正文（contenteditable 的 body）一拿到焦点，浏览器就会沿整篇正文
    * 描一圈默认焦点环。那圈环来自 UA 样式，文档自带的 CSS 改不掉它，看起来就是页面外面一整个
-   * 蓝框（Chromium 对 contenteditable 即如此；CodeMirror 6 也是因此才给 .cm-content 写
-   * outline:none）。进编辑态时焦点是主动送进 iframe 的，所以必须在这里补上。
+   * 蓝框（Chromium 对 contenteditable 即如此；CodeMirror 6 与 Vditor 的正文元素同理，
+   * 分别由 codeEditor.ts 的主题与 app.css 的规则压掉）。进编辑态时焦点是主动送进 iframe 的，
+   * 所以必须在这里补上。
    */
   function injectPreviewUiStyle(doc: Document): void {
     if (doc.querySelector(`style[${PREVIEW_UI_STYLE}]`)) return;
@@ -4486,11 +4459,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     } catch (e) {
       console.error("[sticho] 释放默认包文件失败：", e);
     }
-    // 欢迎正文 / 语言包 / 字体包：三者互不依赖（都只依赖上面已释放的默认包），并行读取。
-    // 欢迎正文（docs/Welcome.<locale>.md）在 initPacks 返回前一定就绪，
-    // 首个标签的正文随后才写进编辑器（见 boot 段）。
+    // 语言包 / 字体包：两者互不依赖（都只依赖上面已释放的默认包），并行读取。
     await Promise.all([
-      loadWelcomeDocs(),
       (async () => {
         try {
           localePacks = await loadLocales();
@@ -5575,14 +5545,13 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   /**
    * 「上次的会话是否值得问一句」。
    *
-   * 只有一个「全新欢迎标签」的现场不值得打扰：那是刚装完就退出、或写代码时一个文档都没开
-   * 的样子，静默恢复与直接开一个新欢迎标签没有区别。老会话文件没有 welcome 字段，
-   * 此时 welcome 不为 false，同样落进「不值得问」这一支——升级后第一次启动保持原样。
+   * 只有一个「干净的空标签」的现场不值得打扰：那是刚装完就退出、或一个文档都没打开就退出的
+   * 样子，静默恢复与直接开一个空白标签没有区别。
    */
   function sessionWorthAsking(list: SessionTab[]): boolean {
     if (list.length > 1) return true;
     return list.some(
-      (item) => item.welcome === false || item.path !== null || (item.remote ?? null) !== null || item.dirty,
+      (item) => item.path !== null || (item.remote ?? null) !== null || item.dirty,
     );
   }
 
@@ -5597,7 +5566,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
    * 返回 true 表示本次启动已按会话处理过（不再走单草稿的兜底提示）。
    */
   async function tryRestoreSession(): Promise<boolean> {
-    if (!restoreSession) return false; // 关掉了：不恢复，这次启动就是一张新的欢迎标签
+    if (!restoreSession) return false; // 关掉了：不恢复，这次启动就是一张新的空白标签
     const session = await loadSetting<SessionState>("session").catch(() => undefined);
     const list = session?.tabs ?? [];
     if (list.length === 0) return false;
@@ -5636,12 +5605,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         tab.content = draft;
         tab.loaded = true;
         if (item.eol === undefined) tab.eol = detectEol(draft); // 老会话无行尾字段：按草稿探测
-      } else if (restoredTabNeedsWelcome(item, tab.remote)) {
-        // 干净、未命名、无云端绑定：这是上次那个「欢迎文档」标签。正文只来自 createTab 注入的
-        // 欢迎文案，从未变脏，所以既没有路径也没有草稿——不补回来，下面 activateTab 投影到
-        // 编辑器里的就是空正文（实测现象：关掉再打开，文档是空白）。
-        tab.content = welcomeText();
-        tab.welcome = true; // 记回「这是欢迎文档」，下次恢复才继续认它（老会话的 undefined 走同一支）
+      } else if (!item.dirty && item.path === null && tab.remote === null) {
+        // 干净、未命名、无云端绑定：上次那个空白标签（没有路径可读盘、也没有草稿可回放）。
+        // 正文本来就是空的，这里只需要标记为「已载入」，价值在于下面 activateTab 能立刻
+        // 把它投影出去，而不是留一个 loaded=false 的空壳等激活时再读盘。
+        tab.content = "";
         tab.loaded = true;
       }
       built.push(tab);
@@ -5651,16 +5619,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     tabsReady = true;
     await activateTab(Math.max(0, Math.min(session?.active ?? 0, built.length - 1)));
     // 恢复出来的文档沿用「设置 → 默认打开模式」，和真正打开文档时一致。
-    // 唯一的例外是恢复成的那篇恰好是欢迎文档：那是程序自己的初始文档（正文由 createTab 注入、
-    // 从未进过草稿），启动时固定给编辑态（见 boot 段），不该被这条设置拽回阅读模式。
-    //
-    // 判据必须是 welcome 字段，不能再用「未命名 + 未改动 + 无云端绑定」那三条：用户新建的空白
-    // 标签（文件 → 新建标签 → 新建纯文本 / Markdown）一模一样地满足它们，只看那三条会把空白标签
-    // 当成欢迎文档、连带跳过它本该套用的「默认打开模式」（判据口径与 docState.restoredTabNeedsWelcome
-    // 及本文件的 sessionWorthAsking 保持一致）。
-    const restored = tabs[activeIndex];
-    const isWelcomeDoc = !!restored?.welcome;
-    if (!isWelcomeDoc) resetToBrowseMode();
+    resetToBrowseMode();
     return true;
   }
 
@@ -6929,14 +6888,15 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 代码文件「手动指定语法高亮语言」的覆盖表（键为路径指纹）：setCodeLang 负责写盘，
       // 这里必须读回，否则重启后回退成按扩展名判定，用户设过的语言白设。
       codeLangOverrides = (s["codeLangOverrides"] as Record<string, string | null> | undefined) ?? {};
-      // 侧边栏显隐按文档模式分别记忆。默认：Markdown / HTML 启用、纯文本（代码）不启用。
-      const byKindDefault: Record<"markdown" | "html" | "code", boolean> = { markdown: true, html: true, code: false };
+      // 侧边栏显隐按文档模式分别记忆：三种模式（Markdown / HTML / 纯文本）默认都启用。
+      const byKindDefault: Record<"markdown" | "html" | "code", boolean> = { markdown: true, html: true, code: true };
       const savedByKind = s["sidebarVisibleByKind"] as Partial<Record<"markdown" | "html" | "code", boolean>> | undefined;
       const savedSidebar = s["sidebarVisible"] as boolean | undefined;
-      // 旧配置只有一个全局布尔（sidebarVisible）：迁到 Markdown / HTML 两个「默认启用」档位，
-      // 纯文本档保持默认不启用。迁完删掉旧键，否则下次启动又被它盖回去。
+      // 旧配置只有一个全局布尔（sidebarVisible）：它当时对三种模式统一起作用，故一并迁到三档，
+      // 用户当初收起的侧边栏不会因为「纯文本档改默认启用」而在纯文本模式下自己冒出来。
+      // 迁完删掉旧键，否则下次启动又被它盖回去。
       if (savedByKind === undefined && savedSidebar !== undefined) {
-        sidebarByKind = { ...byKindDefault, markdown: savedSidebar, html: savedSidebar };
+        sidebarByKind = { markdown: savedSidebar, html: savedSidebar, code: savedSidebar };
         void saveSetting("sidebarVisibleByKind", sidebarByKind);
         void deleteSetting("sidebarVisible");
       } else {
@@ -7018,19 +6978,13 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       await refreshThemes();
 
       const host = document.getElementById("editor-host")!;
-      // 启动即编辑模式：首屏是欢迎文档，正文写着「Type to start」，理应能直接开敲。
+      // 启动即编辑模式：首屏是一个未命名、空正文的标签，理应能直接开敲。
       // 先把可编辑意图写进编辑器层（此时正文元素还没建好，真正的 disabled() 由 editor.ts
-      // 在就绪回调里补一次）。这里不受「设置 → 默认打开模式」影响——那条设置管的是之后
-      // 打开 / 新建 / 导入的文档，欢迎页是程序自己铺的初始文档，固定给编辑态。
+      // 在就绪回调里补一次）。这里不受「设置 → 默认打开模式」影响——那条设置管的是打开 /
+      // 导入已落盘的文档，首屏这个空标签是程序自己铺的初始文档，固定给编辑态。
       browseMode = false;
       setEditorReadonly(false);
-      // 欢迎正文在 initPacks 之后才拿得到（要等 docs/Welcome.<locale>.md 释放并读回），
-      // 而初始标签是脚本顶层用内置文案建的：这里把还没被动过的初始标签正文对齐成最终内容，
-      // 否则它和编辑器里显示的内容会不一致（后续同步会把旧文案写回去）。
-      const initial = welcomeText();
-      const firstTab = tabs[activeIndex];
-      if (firstTab && firstTab.path === null && !firstTab.dirty) firstTab.content = initial;
-      void initEditor(host, initial, theme === "dark");
+      void initEditor(host, tabs[activeIndex]?.content ?? "", theme === "dark");
       onEditorChange(() => syncFromEditor());
       // 渲染模式变化（工具栏下拉或菜单）：同步状态栏图标与视图菜单复选
       onEditorModeChange((mode) => {

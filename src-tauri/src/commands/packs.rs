@@ -1,11 +1,13 @@
-//! 用户包目录：语言包 / 主题包 / 字体包 / 欢迎页文档（批次十二）
+//! 用户包目录：语言包 / 主题包 / 字体包（批次十二）
 //!
 //! 各类资源都放在**配置根目录**下的同名子目录里，用户把文件丢进去即可自动加载：
 //! - `locales/*.json`：语言包，键为英文原文、值为译文，特殊键 `_label` 是语言显示名、
 //!   `_version` 是释放时的软件版本（见下）；
 //! - `themes/*.css`：主题包（列出与读取由 `theme.rs` 负责，这里只管默认释放与目录打开）；
-//! - `fonts/*.{ttf,otf,woff,woff2}`：字体包，前端注册为 `@font-face` 后出现在「阅读排版 → 字体」；
-//! - `docs/*.md`：欢迎页正文（`Welcome.<locale>.md`），界面语言对应哪份就用哪份。
+//! - `fonts/*.{ttf,otf,woff,woff2}`：字体包，前端注册为 `@font-face` 后出现在「阅读排版 → 字体」。
+//!
+//! `docs/` 目录（欢迎页正文）已下线：程序不再释放也不读取它，存量安装里已释放的
+//! `Welcome.<locale>.md` / `README.txt` 由 retire_removed_packs 一次性删掉。
 //!
 //! 「释放默认文件」由前端把内容传进来（TS 是内容的唯一真源，避免把整张词表在 Rust 里
 //! 再抄一份）：不带 `version` 的文件（主题 / 字体 / 说明）目标**已存在时一律不覆盖**，
@@ -33,7 +35,7 @@ const MAX_PACK_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const LOCALES_DIR: &str = "locales";
 pub(crate) const FONTS_DIR: &str = "fonts";
 pub(crate) const THEMES_DIR: &str = "themes";
-/// 欢迎页正文目录：放 `Welcome.<locale>.md`（用户可自行修改）
+/// 已下线的欢迎页正文目录：不再读写，仅用于一次性清理存量文件（见 retire_removed_packs）
 pub(crate) const DOCS_DIR: &str = "docs";
 
 /// 支持的字体文件扩展名
@@ -43,9 +45,17 @@ const FONT_EXTS: &[&str] = &["ttf", "otf", "woff", "woff2"];
 /// `themes/` 目录里残留已下线的文件（全新安装本就不会再释放它）。
 const RETIRED_THEME_FILES: &[&str] = &["示例主题·护眼浅黄.css", "示例主题.css"];
 
+/// 曾经随程序释放、现已下线的欢迎页正文文件名（配置根 `docs/` 下）：欢迎页下线后
+/// 一并清掉，避免配置目录里留着程序不再使用的文件。
+const RETIRED_DOCS_FILES: &[&str] = &["README.txt", "Welcome.zh-CN.md", "Welcome.en-US.md"];
+
 /// 一次性清理标记文件名（写在配置根）：已存在即视为「清理过」，不再重复删，
 /// 以免用户日后把同名文件放回来时被反复删除。
 const RETIRED_MARKER: &str = ".retired-packs";
+
+/// 存量欢迎页文件的清理标记：与 RETIRED_MARKER 分开，因为后者在「示例主题清理」那次
+/// 就已经落盘，共用会让本次清理永远不执行。
+const RETIRED_DOCS_MARKER: &str = ".retired-docs";
 
 /// 解析包目录名 → 实际路径（不存在时创建）
 fn pack_dir(app: &AppHandle, kind: &str) -> Result<PathBuf, String> {
@@ -53,7 +63,6 @@ fn pack_dir(app: &AppHandle, kind: &str) -> Result<PathBuf, String> {
         LOCALES_DIR => LOCALES_DIR,
         THEMES_DIR => THEMES_DIR,
         FONTS_DIR => FONTS_DIR,
-        DOCS_DIR => DOCS_DIR,
         other => return Err(format!("Unknown pack directory: {other}")),
     };
     let dir = super::config::data_root(app)?.join(name);
@@ -66,7 +75,7 @@ fn pack_dir(app: &AppHandle, kind: &str) -> Result<PathBuf, String> {
 /// 前端传入的默认包文件
 #[derive(Deserialize)]
 pub struct PackFile {
-    /// 目标目录：`locales` | `themes` | `fonts` | `docs`
+    /// 目标目录：`locales` | `themes` | `fonts`
     dir: String,
     /// 文件名（只允许文件名本身，不得含路径分隔符）
     name: String,
@@ -137,7 +146,6 @@ fn validate_name(dir: &str, name: &str) -> Result<(), String> {
         LOCALES_DIR => ext == "json" || ext == "txt",
         THEMES_DIR => ext == "css" || ext == "txt",
         FONTS_DIR => ext == "txt",
-        DOCS_DIR => ext == "md" || ext == "txt",
         _ => false,
     };
     if !ok {
@@ -148,22 +156,33 @@ fn validate_name(dir: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 一次性删除历史上随程序释放、现已下线的内置文件（目前是示例主题）。
+/// 一次性删除历史上随程序释放、现已下线的内置文件（示例主题、欢迎页正文）。
 ///
-/// 只按固定文件名删一次：标记文件落盘后不再执行，尊重用户日后重新放回的同名文件。
+/// 两份清单各有自己的标记文件：标记落盘后不再执行，尊重用户日后重新放回的同名文件。
+/// 用不同标记而不是共用，是因为示例主题那次清理早已落盘，共用会让本次的欢迎页清理永不执行。
 fn retire_removed_packs(app: &AppHandle) {
     let Ok(root) = super::config::data_root(app) else {
         return; // 位置未初始化（首启引导之前）：本就无存量文件可清
     };
     let marker = root.join(RETIRED_MARKER);
-    if marker.is_file() {
-        return;
+    if !marker.is_file() {
+        let themes = root.join(THEMES_DIR);
+        for name in RETIRED_THEME_FILES {
+            let _ = fs::remove_file(themes.join(name));
+        }
+        let _ = fs::write(&marker, b"1");
     }
-    let themes = root.join(THEMES_DIR);
-    for name in RETIRED_THEME_FILES {
-        let _ = fs::remove_file(themes.join(name));
+    // 欢迎页下线（本次新增）：删掉存量安装里已释放的 docs/ 默认文件；
+    // 目录本身若已空则一并移除，用户往里放过的其它文件不受影响
+    let docs_marker = root.join(RETIRED_DOCS_MARKER);
+    if !docs_marker.is_file() {
+        let docs = root.join(DOCS_DIR);
+        for name in RETIRED_DOCS_FILES {
+            let _ = fs::remove_file(docs.join(name));
+        }
+        let _ = fs::remove_dir(&docs); // 非空时失败，正好保住用户自己的文件
+        let _ = fs::write(&docs_marker, b"1");
     }
-    let _ = fs::write(&marker, b"1");
 }
 
 /// 释放默认包文件：目标不存在时才写入；带 `version` 的自带语言包在已存在且版本更旧时覆盖。
@@ -346,13 +365,12 @@ mod tests {
         assert!(validate_name(LOCALES_DIR, "README.txt").is_ok());
         assert!(validate_name(THEMES_DIR, "示例主题.css").is_ok());
         assert!(validate_name(FONTS_DIR, "README.txt").is_ok());
-        assert!(validate_name(DOCS_DIR, "Welcome.zh-CN.md").is_ok());
-        assert!(validate_name(DOCS_DIR, "README.txt").is_ok());
         // 类型不在本目录白名单内
         assert!(validate_name(LOCALES_DIR, "evil.css").is_err());
         assert!(validate_name(THEMES_DIR, "x.json").is_err());
         assert!(validate_name(FONTS_DIR, "font.ttf").is_err());
-        assert!(validate_name(DOCS_DIR, "evil.json").is_err());
+        // 已下线的 docs/ 目录不再接受任何释放请求
+        assert!(validate_name(DOCS_DIR, "Welcome.zh-CN.md").is_err());
     }
 
     #[test]

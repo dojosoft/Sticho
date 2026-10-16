@@ -238,6 +238,21 @@ body {
 }
 
 /**
+ * 焦点环：正文拿到焦点时浏览器会沿整块正文描一圈默认焦点环（UA 样式，正文里的 CSS 改不掉）。
+ *
+ * 三通路的正文都走各自的方式压掉：HTML 预览的 body 由注入样式压（见 App.svelte 的
+ * injectPreviewUiStyle）、纯文本的 CodeMirror 由主题压（见 codeEditor.ts 的 `&.cm-focused`），
+ * 这里补上 Markdown 三模式的正文元素——IR / 所见即所得的 `pre.vditor-reset`、分屏预览的
+ * `.vditor-sv`。进编辑态时焦点是主动送进去的，不压就会看到正文外面多出一圈框；
+ * 编辑态本身已由工具栏与状态栏标识，不需要这圈焦点环。
+ */
+.vditor-ir > .vditor-reset,
+.vditor-wysiwyg > .vditor-reset,
+.vditor-sv {
+  outline: none;
+}
+
+/**
  * 正文行号栏（配套 editor.ts 的 attachLineNumbers）。
  *
  * 行号栏挂在正文滚动容器的父元素下、与正文元素互为兄弟：Vditor 在初始化、切换模式、

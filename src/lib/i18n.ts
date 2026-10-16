@@ -173,9 +173,9 @@ export const ZH: Record<string, string> = {
   "The current document has unsaved changes that will be discarded on exit. Exit anyway?": "当前文档有未保存的修改，退出将丢弃这些修改。确定退出吗？",
   "Restore the {n} tab(s) from your last session?": "是否恢复上次会话的 {n} 个标签？",
   "Restore the {n} tab(s) from your last session? {d} of them have unsaved changes that will be discarded if you don't.": "是否恢复上次会话的 {n} 个标签？其中 {d} 个有未保存的修改，不恢复就会丢弃。",
-  "Session": "会话",
-  "Restore the tabs from my last session": "恢复上次会话的标签",
-  "On: the tab set is saved when you exit, and the next start asks whether to restore it. Off: the session is neither saved nor restored — each start begins with a single welcome tab.": "开启：退出时保存标签集，下次启动询问是否恢复。关闭：既不保存也不恢复——每次启动都是一个欢迎标签。",
+  "Session Restore": "会话恢复",
+  "Ask to restore the last session's tabs on startup": "启动时提示恢复上次会话的标签",
+  "On: the tab set is saved when you exit, and the next start asks whether to restore it. Off: the session is neither saved nor restored — each start begins with a single blank document.": "开启：退出时保存标签集，下次启动询问是否恢复。关闭：既不保存也不恢复——每次启动都是一个空白文档。",
   "Line numbers hidden for the long source": "源码过长，行号已省略",
   "Line numbers are drawn line by line to follow the source wrapping. A page with tens of thousands of lines would make switching views freeze, so the gutter is skipped above 5000 lines.": "行号要逐行复刻源码的换行才能对齐。几万行的页面会让视图切换明显卡顿，因此超过 5000 行就不再绘制行号。",
   "Found unsaved content from an abnormal exit ({title}, {when}). Restore it?": "检测到上次未正常退出的编辑内容（{title}，{when}）。是否恢复？",
@@ -706,9 +706,7 @@ export const ZH: Record<string, string> = {
   "{n} draft(s)": "{n} 份草稿",
   "{n} document(s)": "{n} 个文档",
 
-  // ---- 批次十五补录：欢迎页 / 快捷键一览 / 编码 / 代码工具 / 导出图片说明 ----
-  "Type to start, or load a .md / .html file via File → Open.": "开始输入，或从「文件 → 打开」载入 .md / .html 文件。",
-  "Drag md / html / docx / pdf files into the window to open them directly.": "支持把 md / html / docx / pdf 文件拖进窗口直接打开。",
+  // ---- 批次十五补录：快捷键一览 / 编码 / 代码工具 / 导出图片说明 ----
   "Sticho {version}": "短笺 Sticho {version}",
   "Find / Replace": "查找 / 替换",
   "Middle Click": "鼠标中键",
