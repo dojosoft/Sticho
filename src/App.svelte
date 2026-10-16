@@ -1066,6 +1066,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     // 刚打开的文档也要把磁盘上的书签装回来：本函数是「直填全局状态」的落点，
     // 不走 activateTab，不在这里补一次，重开后书签就会像「没保存」一样消失。
     const openedTab = tabs[activeIndex];
+    // 此后这个标签装的是「刚打开 / 导入的文档」，不再是新建标签时注入的欢迎正文。不摘掉这个
+    // 标记，它会继续带着「欢迎文档」身份——复用了欢迎标签的场合尤其明显（云端浏览 / 历史版本
+    // 打开不绑定远端路径，标签既没路径也没草稿），退出重启后会话恢复就会把用户那份文档
+    // 换成一份欢迎正文。打开失败时正文其实还是欢迎文案，但那次本来也没打开任何文档。
+    if (openedTab) openedTab.welcome = false;
     if (openedTab && shouldLoadBookmarks(openedTab)) await loadStoredBookmarks(openedTab);
     resetToBrowseMode();
   }
