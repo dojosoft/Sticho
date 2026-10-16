@@ -4,9 +4,8 @@ version = "0.1.0"
 description = "Sticho - 轻量级 Markdown / 纯文本 / 代码 / HTML 文档编辑器"
 authors = ["Marvin"]
 license = "MIT"
-# 仓库地址（发布前把 USERNAME 换成实际 GitHub 用户名/组织名）
-repository = "https://github.com/USERNAME/sticho"
-homepage = "https://github.com/USERNAME/sticho"
+repository = "https://github.com/dojosoft/sticho"
+homepage = "https://github.com/dojosoft/sticho"
 readme = "../README.md"
 edition = "2021"
 

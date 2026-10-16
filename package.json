@@ -7,11 +7,11 @@
   "author": "Marvin",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/USERNAME/sticho.git"
+    "url": "git+https://github.com/dojosoft/sticho.git"
   },
-  "homepage": "https://github.com/USERNAME/sticho#readme",
+  "homepage": "https://github.com/dojosoft/sticho#readme",
   "bugs": {
-    "url": "https://github.com/USERNAME/sticho/issues"
+    "url": "https://github.com/dojosoft/sticho/issues"
   },
   "keywords": [
     "markdown",
