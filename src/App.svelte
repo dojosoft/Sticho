@@ -477,6 +477,9 @@
    */
   const HTML_GUTTER_MAX_LINES = 5000;
 
+  /** 叠层重算的防抖间隔（ms）：输入停止后再算，避免每敲一键都整篇扫一遍 */
+  const HTML_GUTTER_DEBOUNCE_MS = 200;
+
   /** 数行数而不建数组：上限判据只关心行数，没必要为此切出几万个字符串 */
   function countLines(text: string): number {
     let lines = 1;
@@ -498,22 +501,45 @@
   );
 
   /**
-   * 叠层逐行渲染用的源码行；超过上限则返回空数组（= 不画叠层）。
+   * 叠层逐行渲染用的源码行；超过上限则为空数组（= 不画叠层）。
    *
-   * 只在条件成立时才拆分，且先数行数再决定——不这么做的话，几万行的数组每敲一个字符都要
-   * 重建一次，然后被上限判据丢掉，纯属白费。
+   * 为什么不用 $derived：判上限要先数一遍行数，而数行是 O(n) 的整篇扫描。挂在 $derived 上
+   * 等于每敲一个字符都把 MB 级源码扫一遍、还要 split 出全部行（上限内），正是「大 HTML 源码
+   * 输入发卡」的来源。改为防抖重算：输入停止 `HTML_GUTTER_DEBOUNCE_MS` 后算一版。
+   *
+   * 首次进入源码视图 / 换文档时**立刻**算一版（htmlGutterPrimed 为 false 即首次）：否则叠层
+   * 与「源码过长，行号已省略」提示会空窗一个防抖周期。
    */
-  const htmlSourceLines = $derived.by(() => {
-    if (!htmlGutterReady) return [];
-    if (countLines(htmlSource) > HTML_GUTTER_MAX_LINES) return [];
-    return htmlSource.split(/\r\n|\r|\n/);
+  let htmlGutterLines = $state<string[]>([]);
+  /** 本次「行号叠层可用」期间是否已算过一版（非响应式；不可用时复位，见下） */
+  let htmlGutterPrimed = false;
+
+  function computeHtmlGutterLines(content: string): void {
+    htmlGutterLines =
+      countLines(content) > HTML_GUTTER_MAX_LINES ? [] : content.split(/\r\n|\r|\n/);
+  }
+
+  $effect(() => {
+    if (!htmlGutterReady) {
+      htmlGutterLines = [];
+      htmlGutterPrimed = false;
+      return;
+    }
+    const content = htmlSource; // 依赖正文：内容变了才重算
+    if (!htmlGutterPrimed) {
+      htmlGutterPrimed = true;
+      computeHtmlGutterLines(content);
+      return;
+    }
+    const timer = window.setTimeout(() => computeHtmlGutterLines(content), HTML_GUTTER_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
   });
 
   /** HTML 源码视图的行号叠层是否应当出现（split 至少返回一个元素，故空数组只可能是被上限挡下） */
-  const htmlGutterOn = $derived(htmlSourceLines.length > 0);
+  const htmlGutterOn = $derived(htmlGutterLines.length > 0);
 
   /** 行号叠层因源码行数超上限而未画出：状态栏据此说明一句，免得用户以为行号开关坏了 */
-  const htmlGutterCapped = $derived(htmlGutterReady && htmlSourceLines.length === 0);
+  const htmlGutterCapped = $derived(htmlGutterReady && htmlGutterLines.length === 0);
 
   /**
    * Markdown「不渲染」模式：只保留 SV 源码栏，渲染结果栏由 CSS 隐藏（见 app.css 的
@@ -3323,26 +3349,41 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     );
   }
 
+  /**
+   * 退出流程进行中（Ctrl+Q 与关窗拦截共用）。
+   *
+   * 确认框悬挂期间用户再点「×」或再按 Ctrl+Q，若直接放行就会叠出第二个确认框——先结算的
+   * 那个会 destroy 窗口，第一个框还挂在屏幕上却再也没人管。两条出口共用这一个标记。
+   */
+  let closing = false;
+
   async function exitApp(): Promise<void> {
-    if (busy) return;
-    captureActiveTab();
-    if (anyTabDirty()) {
-      const count = tabs.filter((_t, i) => tabDirty(i)).length;
-      const ok = await confirmDialog(
-        count > 1
-          ? t("{n} tabs have unsaved changes that will be discarded on exit. Exit anyway?", { n: count })
-          : t("The current document has unsaved changes that will be discarded on exit. Exit anyway?"),
-        { title: "Sticho", kind: "warning", okLabel: t("Exit"), cancelLabel: t("Cancel") },
-      );
-      if (!ok) return;
+    // busy 时静默返回（与其它写入口同口径）：不打断在途的文件操作
+    if (busy || closing) return;
+    closing = true;
+    try {
+      captureActiveTab();
+      if (anyTabDirty()) {
+        const count = tabs.filter((_t, i) => tabDirty(i)).length;
+        const ok = await confirmDialog(
+          count > 1
+            ? t("{n} tabs have unsaved changes that will be discarded on exit. Exit anyway?", { n: count })
+            : t("The current document has unsaved changes that will be discarded on exit. Exit anyway?"),
+          { title: "Sticho", kind: "warning", okLabel: t("Exit"), cancelLabel: t("Cancel") },
+        );
+        if (!ok) return;
+      }
+      // 退出前落一份草稿与会话：定时器可能刚好还没轮到（tickAutoSave 已吞掉所有异常）。
+      // 会话必须再显式写一次：tickAutoSave 走的是 runAutoSave，它在「自动保存已关闭」时
+      // 会整轮提前返回（连会话也不写），于是 Ctrl+Q / 菜单退出后标签集不恢复；而关窗路径
+      // （onCloseRequested）是显式写会话的，两条出口必须一致。
+      await tickAutoSave();
+      await saveSession();
+      await getCurrentWindow().destroy();
+    } finally {
+      // destroy 成功时窗口已消失，复位只对「取消 / 异常」两条路径有意义
+      closing = false;
     }
-    // 退出前落一份草稿与会话：定时器可能刚好还没轮到（tickAutoSave 已吞掉所有异常）。
-    // 会话必须再显式写一次：tickAutoSave 走的是 runAutoSave，它在「自动保存已关闭」时
-    // 会整轮提前返回（连会话也不写），于是 Ctrl+Q / 菜单退出后标签集不恢复；而关窗路径
-    // （onCloseRequested）是显式写会话的，两条出口必须一致。
-    await tickAutoSave();
-    await saveSession();
-    await getCurrentWindow().destroy();
   }
 
   // ---- 编辑菜单：剪贴板 ----
@@ -5610,10 +5651,15 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     tabsReady = true;
     await activateTab(Math.max(0, Math.min(session?.active ?? 0, built.length - 1)));
     // 恢复出来的文档沿用「设置 → 默认打开模式」，和真正打开文档时一致。
-    // 唯一的例外是恢复成的那篇恰好是欢迎文档（未命名、未改过、无云端绑定）：那是程序自己的
-    // 初始文档，启动时固定给编辑态（见 boot 段），不该被这条设置拽回阅读模式。
+    // 唯一的例外是恢复成的那篇恰好是欢迎文档：那是程序自己的初始文档（正文由 createTab 注入、
+    // 从未进过草稿），启动时固定给编辑态（见 boot 段），不该被这条设置拽回阅读模式。
+    //
+    // 判据必须是 welcome 字段，不能再用「未命名 + 未改动 + 无云端绑定」那三条：用户新建的空白
+    // 标签（文件 → 新建标签 → 新建纯文本 / Markdown）一模一样地满足它们，只看那三条会把空白标签
+    // 当成欢迎文档、连带跳过它本该套用的「默认打开模式」（判据口径与 docState.restoredTabNeedsWelcome
+    // 及本文件的 sessionWorthAsking 保持一致）。
     const restored = tabs[activeIndex];
-    const isWelcomeDoc = !!restored && restored.path === null && !restored.dirty && restored.remote === null;
+    const isWelcomeDoc = !!restored?.welcome;
     if (!isWelcomeDoc) resetToBrowseMode();
     return true;
   }
@@ -5717,7 +5763,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   // 内容变化后把叠层滚到与 textarea 相同的位置（行高变了，仅靠 scroll 事件补不齐）。
   $effect(() => {
     if (!htmlGutterOn) return;
-    void htmlSourceLines; // 依赖内容：每次重排后重新对齐滚动位置
+    void htmlGutterLines; // 依赖内容：每次重排后重新对齐滚动位置
     const ta = sourceArea;
     if (!ta) return;
     syncHtmlGutterMetrics();
@@ -7054,8 +7100,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     // 之前就卸载，解绑函数还没拿到，旧写法会漏解绑；统一在 cleanup 里等 Promise 再解绑。
     const unlisteners: Promise<() => void>[] = [];
 
-    // 未保存关闭拦截（preventDefault 必须同步调用，确认框异步进行）
-    let closing = false;
+    // 未保存关闭拦截（preventDefault 必须同步调用，确认框异步进行）。
+    // closing 与 exitApp（Ctrl+Q）共用同一标记：两条退出出口互斥，不会叠出两个确认框。
     unlisteners.push(
       win.onCloseRequested((event) => {
         captureActiveTab();
@@ -7640,7 +7686,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
                 <!-- 镜像叠层：逐行隐藏原文（决定软换行后的行高），行号绝对定位到左侧车道。
                      与编辑器自绘行号栏同理，行号只随纵向滚动同步，不参与交互。 -->
                 <div class="html-linenumbers" bind:this={htmlGutterEl} aria-hidden="true">
-                  {#each htmlSourceLines as line, i (i)}
+                  {#each htmlGutterLines as line, i (i)}
                     <div class="html-linenumber">
                       <span class="num">{i + 1}</span>
                       <span class="ghost">{line === "" ? "\u200b" : line}</span>
