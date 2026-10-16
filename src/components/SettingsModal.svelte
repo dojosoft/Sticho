@@ -35,6 +35,9 @@
     /** 自动保存间隔（分钟）；0.5 表示 30 秒 */
     autoSaveIntervalMin: number;
     onSetAutoSaveInterval: (min: number) => void;
+    /** 「恢复上次会话」：开启时退出写会话、启动问是否恢复；关闭时都不做 */
+    restoreSession: boolean;
+    onToggleRestoreSession: () => void;
     defaultOpenMode: "read" | "edit";
     onSetDefaultOpenMode: (mode: "read" | "edit") => void;
     /* 本地多版本控制：三类上限 */
@@ -114,6 +117,8 @@
     onToggleAutoSave,
     autoSaveIntervalMin,
     onSetAutoSaveInterval,
+    restoreSession,
+    onToggleRestoreSession,
     defaultOpenMode,
     onSetDefaultOpenMode,
     historyKeep,
@@ -349,6 +354,20 @@
                 </label>
               </div>
             </div>
+          </section>
+
+          <section class="set-group">
+            <h3
+              data-tip={t("On: the tab set is saved when you exit, and the next start asks whether to restore it. Off: the session is neither saved nor restored — each start begins with a single welcome tab.")}
+            >{t("Session")}</h3>
+            <label class="set-row">
+              <input
+                type="checkbox"
+                checked={restoreSession}
+                onchange={onToggleRestoreSession}
+              />
+              <span>{t("Restore the tabs from my last session")}</span>
+            </label>
           </section>
 
           <section class="set-group">

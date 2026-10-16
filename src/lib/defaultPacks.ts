@@ -149,6 +149,7 @@ html, html.light, html.dark {
   --danger-soft: rgba(224, 122, 95, 0.16);
   --danger-contrast: #241d16;
   --read-accent: #8fbf6a;      /* 阅读模式标签条（暖绿） */
+  --read-contrast: #241d16;    /* 阅读模式活动标签上的文字（暖绿偏亮，配深字） */
   --spotlight-dim: rgba(18, 12, 8, 0.5);   /* 段落聚焦遮罩 */
   --find-hl: #6f531d;          /* 查找命中 */
   --find-hl-active: #a8631f;   /* 当前命中 */
@@ -249,6 +250,7 @@ html, html.light, html.dark {
   --danger-soft: rgba(179, 84, 58, 0.14);
   --danger-contrast: #ffffff;
   --read-accent: #6b8e23;      /* 阅读模式标签条（橄榄绿） */
+  --read-contrast: #fffaf0;    /* 阅读模式活动标签上的文字（橄榄绿偏深，配浅字） */
   --spotlight-dim: rgba(60, 45, 20, 0.16);  /* 段落聚焦遮罩 */
   --find-hl: #ffe08a;          /* 查找命中 */
   --find-hl-active: #f6a94a;   /* 当前命中 */
@@ -348,6 +350,7 @@ html, html.light, html.dark {
   --danger-soft: rgba(244, 135, 113, 0.18);
   --danger-contrast: #ffffff;
   --read-accent: #4ade80;      /* 阅读模式标签条（绿） */
+  --read-contrast: #12301a;    /* 阅读模式活动标签上的文字（亮绿配深字） */
   --spotlight-dim: rgba(0, 0, 0, 0.45); /* 段落聚焦遮罩 */
   --find-hl: #6b5c1e;          /* 查找命中 */
   --find-hl-active: #a1521f;   /* 当前命中 */

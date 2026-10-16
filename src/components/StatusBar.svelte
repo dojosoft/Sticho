@@ -43,6 +43,8 @@
     /** HTML 文档：预览 / 源码切换 */
     htmlView: "preview" | "source";
     onSetHtmlView: (view: "preview" | "source") => void;
+    /** HTML 源码视图因行数过多而没画行号叠层：这里说明一句，免得用户以为行号开关坏了 */
+    htmlGutterCapped: boolean;
 
     /** 代码文件：语言名 + 光标行列 + 匹配数；超大文件走只读分节视图 */
     codeLargeText: string | null;
@@ -97,6 +99,7 @@
     onSetBrowseMode,
     htmlView,
     onSetHtmlView,
+    htmlGutterCapped,
     codeLargeText,
     codeLangLabel,
     codeCursor,
@@ -260,6 +263,9 @@
       <button class:active={htmlView === "preview"} onclick={() => onSetHtmlView("preview")}>{t("Preview")}</button>
       <button class:active={htmlView === "source"} onclick={() => onSetHtmlView("source")}>{t("Source")}</button>
     </span>
+    {#if htmlGutterCapped}
+      <span class="count" data-tip={t("Line numbers are drawn line by line to follow the source wrapping. A page with tens of thousands of lines would make switching views freeze, so the gutter is skipped above 5000 lines.")}>{t("Line numbers hidden for the long source")}</span>
+    {/if}
   {/if}
 
   <!-- 代码文件：光标行列 / 分节只读提示（由 CodeMirror 的 updateListener 上报） -->
@@ -592,9 +598,18 @@
     opacity: 0.7;
   }
 
-  .html-switch button.active,
   .mode-switch button.active {
     background: var(--hover, rgba(0, 0, 0, 0.07));
+    opacity: 1;
+    font-weight: 600;
+  }
+
+  /* 「预览 / 源码」的选中项改用反色（深灰底 + 白字），与右侧渲染模式图标按钮同一套观感：
+     原先那条中性淡灰底在状态栏里几乎看不出是按下的（模式切换是最常用的开关，必须一眼可辨）。
+     写在上面那条之后，同优先级下由它胜出。 */
+  .html-switch button.active {
+    background: var(--render-active-bg, #3f4650);
+    color: var(--render-active-fg, #ffffff);
     opacity: 1;
     font-weight: 600;
   }

@@ -180,7 +180,7 @@
     removeTrailingSpaces,
   } from "./lib/textTools";
   import { ENCODINGS, encodingLabel } from "./lib/encoding";
-  import { newDocTab, sessionOf, applyEol, detectEol, restoredTabNeedsWelcome, type DocTab, type Eol, type SessionState } from "./lib/docState";
+  import { newDocTab, sessionOf, applyEol, detectEol, restoredTabNeedsWelcome, type DocTab, type Eol, type SessionState, type SessionTab } from "./lib/docState";
   import { parseOutline, parseOutlineFromHtml, parseFrontMatter, htmlPlainText, type OutlineItem, type SidebarView } from "./lib/sidebar";
   import Sidebar from "./components/Sidebar.svelte";
   import CodeTools from "./components/CodeTools.svelte";
@@ -289,6 +289,15 @@
   let autoSaveEnabled = $state(true); // 持久化键 "autoSave"，默认开
   /** 自动保存间隔（分钟）：0.5 表示 30 秒；持久化键 "autoSaveIntervalMin"，默认 1 分钟 */
   let autoSaveIntervalMin = $state(1);
+
+  /**
+   * 「恢复上次会话」（设置 → 通用）：持久化键 "restoreSession"，默认开。
+   *
+   * 开启时退出会写入标签集（仅元信息），下次启动问一次是否恢复；关闭时既不写也不恢复
+   * （见 saveSession / tryRestoreSession 两处守卫）。默认开是为了保住「关掉再打开、标签还在」
+   * 这个既有行为——默认关等于把老用户每次的工作现场白白丢掉。
+   */
+  let restoreSession = $state(true);
 
   /**
    * 默认打开模式：打开 / 新建 / 导入文档后先进阅读模式还是直接进编辑模式。
@@ -458,13 +467,53 @@
       (docKind === "html" && htmlView === "source"),
   );
 
-  /** HTML 源码视图的行号叠层是否应当出现（跟随总开关与当前视图） */
-  const htmlGutterOn = $derived(
+  /**
+   * 行号叠层的行数上限。
+   *
+   * 叠层必须「逐行」复刻 textarea 的换行，行号才能落在正确的纵向位置，所以每行都要一对节点、
+   * 还要把整篇原文再排一次版。几万行的页面光是挂载就是几万个节点加一次全文重排——这正是
+   * 「大页面切到源码视图卡顿很久」的来源。超过这个行数就不画叠层（正文照常可读可编辑），
+   * 取舍与「超大代码文件不挂 CodeMirror、改走只读分节」同源。
+   */
+  const HTML_GUTTER_MAX_LINES = 5000;
+
+  /** 数行数而不建数组：上限判据只关心行数，没必要为此切出几万个字符串 */
+  function countLines(text: string): number {
+    let lines = 1;
+    for (let i = 0; i < text.length; i += 1) {
+      const code = text.charCodeAt(i);
+      if (code === 10) lines += 1; // \n
+      else if (code === 13) {
+        // \r\n 只算一行
+        lines += 1;
+        if (text.charCodeAt(i + 1) === 10) i += 1;
+      }
+    }
+    return lines;
+  }
+
+  /** HTML 源码视图的行号叠层是否具备出现的条件（跟随总开关与当前视图，不含行数上限） */
+  const htmlGutterReady = $derived(
     docKind === "html" && htmlView === "source" && showLineNumbers && lineNumbersSupported,
   );
 
-  /** 叠层逐行渲染用的源码行（仅在叠层可见时才拆分，避免编辑时白白 split 大文本） */
-  const htmlSourceLines = $derived(htmlGutterOn ? htmlSource.split(/\r\n|\r|\n/) : []);
+  /**
+   * 叠层逐行渲染用的源码行；超过上限则返回空数组（= 不画叠层）。
+   *
+   * 只在条件成立时才拆分，且先数行数再决定——不这么做的话，几万行的数组每敲一个字符都要
+   * 重建一次，然后被上限判据丢掉，纯属白费。
+   */
+  const htmlSourceLines = $derived.by(() => {
+    if (!htmlGutterReady) return [];
+    if (countLines(htmlSource) > HTML_GUTTER_MAX_LINES) return [];
+    return htmlSource.split(/\r\n|\r|\n/);
+  });
+
+  /** HTML 源码视图的行号叠层是否应当出现（split 至少返回一个元素，故空数组只可能是被上限挡下） */
+  const htmlGutterOn = $derived(htmlSourceLines.length > 0);
+
+  /** 行号叠层因源码行数超上限而未画出：状态栏据此说明一句，免得用户以为行号开关坏了 */
+  const htmlGutterCapped = $derived(htmlGutterReady && htmlSourceLines.length === 0);
 
   /**
    * Markdown「不渲染」模式：只保留 SV 源码栏，渲染结果栏由 CSS 隐藏（见 app.css 的
@@ -1375,6 +1424,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   /** 把当前标签集写进会话（正文各自在恢复草稿里，这里只有元信息） */
   async function saveSession(): Promise<void> {
     if (!tabsReady) return;
+    if (!restoreSession) return; // 设置里关掉了「恢复上次会话」：一份都不写（见 restoreSession 的说明）
     const json = JSON.stringify(sessionOf(tabs, activeIndex));
     if (json === lastSessionJson) return;
     try {
@@ -4748,6 +4798,24 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (autoSaveEnabled) void tickAutoSave();
   }
 
+  /**
+   * 设置 → 通用：「恢复上次会话」开关。
+   *
+   * 关掉时顺手清掉磁盘上那份会话：否则重新开启时会把一份与当下无关的旧现场又恢复出来。
+   * 恢复草稿不在这里删——那是自动保存（另一个开关）的东西，删掉等于把用户没保存的正文
+   * 一并丢掉。
+   */
+  async function toggleRestoreSession(): Promise<void> {
+    restoreSession = !restoreSession;
+    await saveSetting("restoreSession", restoreSession);
+    if (restoreSession) {
+      void saveSession(); // 开启后立刻把当前现场写一份，下次启动才有东西可恢复
+      return;
+    }
+    await saveSetting("session", { tabs: [], active: 0 });
+    lastSessionJson = "";
+  }
+
   // 自动保存定时器：间隔取自设置项（默认 1 分钟），设置一变本 effect 自动重建定时器
   $effect(() => {
     const ms = Math.max(30_000, autoSaveIntervalMin * 60_000);
@@ -5455,25 +5523,42 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   }
 
   /**
+   * 「上次的会话是否值得问一句」。
+   *
+   * 只有一个「全新欢迎标签」的现场不值得打扰：那是刚装完就退出、或写代码时一个文档都没开
+   * 的样子，静默恢复与直接开一个新欢迎标签没有区别。老会话文件没有 welcome 字段，
+   * 此时 welcome 不为 false，同样落进「不值得问」这一支——升级后第一次启动保持原样。
+   */
+  function sessionWorthAsking(list: SessionTab[]): boolean {
+    if (list.length > 1) return true;
+    return list.some(
+      (item) => item.welcome === false || item.path !== null || (item.remote ?? null) !== null || item.dirty,
+    );
+  }
+
+  /**
    * 启动时恢复上次退出时的标签集（批次六）。
    *
    * 标签集与各标签的未保存正文是分开存的：元信息在 settings 的 "session" 键，
    * 正文在各自的恢复草稿里。恢复**全部**标签（含已保存的干净标签）——正常关闭后再启动
-   * 应当还原上次打开的标签集；只有「存在未保存内容」时才弹框确认（那是需要用户担责的操作），
-   * 全是干净标签时静默恢复，免得每次启动都被一张「要不要恢复上次的窗口」打扰。
+   * 应当还原上次打开的标签集。是否恢复由「设置 → 通用 → 恢复上次会话」决定：开启时启动
+   * 问一次（只问「有内容值得恢复」的现场，见 sessionWorthAsking），关闭时一份都不读、
+   * 也不写（见 saveSession 的守卫）。
    * 返回 true 表示本次启动已按会话处理过（不再走单草稿的兜底提示）。
    */
   async function tryRestoreSession(): Promise<boolean> {
+    if (!restoreSession) return false; // 关掉了：不恢复，这次启动就是一张新的欢迎标签
     const session = await loadSetting<SessionState>("session").catch(() => undefined);
     const list = session?.tabs ?? [];
     if (list.length === 0) return false;
     const dirtyCount = list.filter((item) => item.dirty).length;
 
-    // 有未保存内容才弹确认框；否则直接静默恢复全部标签
-    if (dirtyCount > 0) {
+    if (sessionWorthAsking(list)) {
       const ok = await confirmDialog(
-        t("Found {n} unsaved tab(s) from your last session (out of {total} tabs). Restore them?", { n: dirtyCount, total: list.length }),
-        { title: "Sticho", kind: "warning", okLabel: t("Restore"), cancelLabel: t("Discard") },
+        dirtyCount > 0
+          ? t("Restore the {n} tab(s) from your last session? {d} of them have unsaved changes that will be discarded if you don't.", { n: list.length, d: dirtyCount })
+          : t("Restore the {n} tab(s) from your last session?", { n: list.length }),
+        { title: "Sticho", kind: dirtyCount > 0 ? "warning" : "info", okLabel: t("Restore"), cancelLabel: t("Discard") },
       );
       if (!ok) {
         for (const item of list) void deleteRecovery(item.draftId).catch(() => {});
@@ -6824,6 +6909,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       // 阅读排版（字体 / 字号 / 行距 / 文字色 / 护眼底色）：按文档模式分流见下方 $effect
       readerStyle = (s["readerStyle"] as ReaderStyle | undefined) ?? {};
       autoSaveEnabled = (s["autoSave"] as boolean | undefined) ?? true;
+      restoreSession = (s["restoreSession"] as boolean | undefined) ?? true;
       autoSaveIntervalMin = (s["autoSaveIntervalMin"] as number | undefined) ?? 1;
       defaultOpenMode = (s["defaultOpenMode"] as "read" | "edit" | undefined) ?? "edit";
       // 顶栏自定义按钮开关：与默认值（全关）合并，兼容旧配置
@@ -7577,6 +7663,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     onSetEditorMode={switchEditorMode}
     {htmlView}
     onSetHtmlView={setHtmlView}
+    {htmlGutterCapped}
     {codeLargeText}
     {codeLangLabel}
     {codeCursor}
@@ -7727,6 +7814,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       onToggleAutoSave={() => void toggleAutoSave()}
       {autoSaveIntervalMin}
       onSetAutoSaveInterval={(n) => void setAutoSaveInterval(n)}
+      {restoreSession}
+      onToggleRestoreSession={() => void toggleRestoreSession()}
       {defaultOpenMode}
       onSetDefaultOpenMode={(m) => void setDefaultOpenMode(m)}
       {historyKeep}
@@ -8195,18 +8284,23 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     background: var(--hover, rgba(128, 128, 128, 0.12));
   }
 
-  /* 选中标签：不透明 + 加粗 + 顶部强调条，与未选中拉开层级 */
+  /* 选中标签：反色填充（强调色底 + 反白文字）。
+     原先靠「加粗描边 + 顶部强调条」标识，一圈蓝 / 绿框线加重得很显眼，与整体设计不搭；
+     改成整块填色后，层级只靠底色与字色拉开，不再画额外的线。 */
   .tab.active {
     opacity: 1;
     font-weight: 600;
     border-color: var(--accent, #2563eb);
-    box-shadow: inset 0 2px 0 var(--accent, #2563eb);
+    background: var(--accent, #2563eb);
+    color: var(--accent-contrast, #ffffff);
   }
 
-  /* 阅读模式的选中标签：改用阅读强调色，与编辑模式（强调蓝）区分 */
+  /* 阅读模式的选中标签：改用阅读强调色，与编辑模式（强调蓝）区分；反白文字用该强调色自己的
+     对比色（深色档位下的阅读绿是亮色，配白字反而看不清） */
   .app.read-mode .tab.active {
     border-color: var(--read-accent, #2f9e44);
-    box-shadow: inset 0 2px 0 var(--read-accent, #2f9e44);
+    background: var(--read-accent, #2f9e44);
+    color: var(--read-contrast, var(--edit-contrast, #ffffff));
   }
 
   .tab-label {
@@ -8220,6 +8314,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     flex: 0 0 auto;
     color: var(--danger, #e5484d);
     font-size: 0.9em;
+  }
+
+  /* 选中标签上的未保存圆点改用反白：红点在强调色底上几乎看不出（「未保存」靠圆点本身表达，
+     颜色只是让它更醒目，故这里跟着标签的反白字色走） */
+  .tab.active .tab-dot {
+    color: inherit;
   }
 
   .tab-close {

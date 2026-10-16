@@ -42,8 +42,10 @@ html.light {
   /* 危险色的浅色填充与危险色上的文字 */
   --danger-soft: rgba(192, 57, 43, 0.12);
   --danger-contrast: #ffffff;
-  /* 阅读模式标签的强调色（与编辑模式的蓝区分开） */
+  /* 阅读模式标签的强调色（与编辑模式的蓝区分开），以及它上面的文字色
+     （阅读模式的活动标签用整块填色标识，配白字时若该绿偏亮就得换深字） */
   --read-accent: #2f9e44;
+  --read-contrast: #ffffff;
   /* 状态栏「编辑」开关激活时的底色（绿）与其中的文字色 */
   --edit-accent: #2f9e44;
   --edit-contrast: #ffffff;
@@ -80,6 +82,8 @@ html.dark {
   --danger-soft: rgba(244, 135, 113, 0.18);
   --danger-contrast: #ffffff;
   --read-accent: #4ade80;
+  /* 阅读模式的活动标签用亮绿填色，配白字看不清，这里用深字 */
+  --read-contrast: #12301a;
   /* 状态栏「编辑」开关激活时的底色（绿）与其中的文字色（亮绿底配深字） */
   --edit-accent: #4ade80;
   --edit-contrast: #12301a;
