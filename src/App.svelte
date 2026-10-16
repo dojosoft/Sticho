@@ -4334,6 +4334,10 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   }
 
   function onTipOver(e: MouseEvent): void {
+    // iframe 的 title 是给无障碍用的名称，不是给鼠标看的提示。而鼠标一进入 iframe，浏览器就会给
+    // 父文档发一个 target=iframe 的 mouseover——若按普通 title 处理，整块预览区都成了「HTML 预览」
+    // 浮窗的热区（这正是「鼠标移进预览正文就冒浮窗」的来源）。iframe 一律不参与自绘浮窗。
+    if (e.target instanceof HTMLIFrameElement) return;
     const anchor = (e.target as HTMLElement | null)?.closest?.(TIP_SELECTOR) as HTMLElement | null;
     if (!anchor) return;
     if (anchor === tipAnchor) {
@@ -7605,7 +7609,10 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         <div class="html-view">
           {#if htmlView === "preview"}
             <!-- 沙箱两模式互斥：不跑脚本时给 allow-same-origin（父窗口可读文档，支撑编辑/查找/大纲定位），
-                 跑脚本时只给 allow-scripts（iframe 降级为独立源，脚本无法反向操作本应用） -->
+                 跑脚本时只给 allow-scripts（iframe 降级为独立源，脚本无法反向操作本应用）。
+                 这里的 title 是无障碍名称（svelte-check 的 a11y 规则也要求 iframe 带上它），
+                 不当作鼠标提示用——见 onTipOver 里对 iframe 的排除，否则鼠标一移进预览正文
+                 就会冒出「HTML 预览」浮窗 -->
             {#key previewKey}
               <iframe
                 bind:this={previewFrame}

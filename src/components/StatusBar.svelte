@@ -312,7 +312,9 @@
 
   <!-- Markdown 渲染模式（IR / 所见即所得 / 分屏预览）：仅 Markdown 模式下出现，图标点击即切换 -->
   {#if docKind === "markdown"}
-    <span class="render-switch" title={t("Render Mode")}>
+    <!-- 渲染模式图标组：提示语只挂在各按钮上（每个按钮自带 title）。外层span 若也给 title，
+         它那圈边框与按钮间的留白就成了「渲染模式」的热区——同样属于「不点在按钮上也弹提示」 -->
+    <span class="render-switch">
       <button
         class:active={editorMode === "ir"}
         title={t("Instant Rendering (IR)")}
@@ -360,13 +362,22 @@
     </span>
   {/if}
 
-  <!-- 阅读 / 编辑模式切换：放在编码切换右侧；阅读态（只读）红底、编辑态（可改）绿底 -->
-  <span
-    class="mode-switch"
-    title={browseMode ? t("Reading mode: the document is read-only. Click to switch to edit mode (Ctrl+E)") : t("Edit mode: the document can be modified. Click to return to reading mode (Ctrl+E)")}
-  >
-    <button class:active={browseMode} class:on-read={browseMode} onclick={() => onSetBrowseMode(true)}>{t("Read")}</button>
-    <button class:active={!browseMode} class:on-edit={!browseMode} onclick={() => onSetBrowseMode(false)}>{t("Edit")}</button>
+  <!-- 阅读 / 编辑模式切换：放在编码切换右侧；阅读态（只读）红底、编辑态（可改）绿底。
+       提示语挂在两个按钮上，不挂外层分段开关：外层那条 title 会把整块（含边框、两个按钮之间
+       与四角留白）都变成提示热区，鼠标落在「不是这个按钮」的位置也会弹出同一句话 -->
+  <span class="mode-switch">
+    <button
+      class:active={browseMode}
+      class:on-read={browseMode}
+      title={t("Switch to Reading Mode (the document becomes read-only, Ctrl+E)")}
+      onclick={() => onSetBrowseMode(true)}
+    >{t("Read")}</button>
+    <button
+      class:active={!browseMode}
+      class:on-edit={!browseMode}
+      title={t("Switch to Edit Mode (the document can be modified, Ctrl+E)")}
+      onclick={() => onSetBrowseMode(false)}
+    >{t("Edit")}</button>
   </span>
 
   {#if davEnabled}
