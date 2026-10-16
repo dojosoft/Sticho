@@ -756,7 +756,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   let tabSeq = 0;
   function createTab(): DocTab {
     tabSeq += 1;
-    return newDocTab(tabSeq, welcomeText());
+    const tab = newDocTab(tabSeq, welcomeText());
+    // 这份正文是「欢迎文档」，不是用户新建的空白标签：会话恢复只带元信息，
+    // 靠本字段才能把欢迎文档补回来、又不去动用户新建的空白标签（见 docState.restoredTabNeedsWelcome）
+    tab.welcome = true;
+    return tab;
   }
 
   let tabs = $state<DocTab[]>([createTab()]);
@@ -1570,6 +1574,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (!doc?.documentElement) return htmlSource;
     const clone = doc.documentElement.cloneNode(true) as HTMLElement;
     clone.querySelector("body")?.removeAttribute("contenteditable");
+    clone.querySelector(`style[${PREVIEW_UI_STYLE}]`)?.remove(); // 应用侧注入的样式不入源码
     const dt = doc.doctype ? `<!DOCTYPE ${doc.doctype.name}>\n` : "";
     return dt + clone.outerHTML;
   }
@@ -1598,11 +1603,30 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     return !!previewFrame?.contentDocument?.body;
   }
 
+  /** 应用侧注入预览文档的样式节点标记：序列化回源码时必须剔除，绝不写进用户的 HTML */
+  const PREVIEW_UI_STYLE = "data-sticho-ui";
+
+  /**
+   * 往预览文档里补一条样式：正文（contenteditable 的 body）一拿到焦点，浏览器就会沿整篇正文
+   * 描一圈默认焦点环。那圈环来自 UA 样式，文档自带的 CSS 改不掉它，看起来就是页面外面一整个
+   * 蓝框（Chromium 对 contenteditable 即如此；CodeMirror 6 也是因此才给 .cm-content 写
+   * outline:none）。进编辑态时焦点是主动送进 iframe 的，所以必须在这里补上。
+   */
+  function injectPreviewUiStyle(doc: Document): void {
+    if (doc.querySelector(`style[${PREVIEW_UI_STYLE}]`)) return;
+    const style = doc.createElement("style");
+    style.setAttribute(PREVIEW_UI_STYLE, "");
+    style.textContent =
+      "body[contenteditable]:focus, body[contenteditable]:focus-visible { outline: none !important; }";
+    (doc.head ?? doc.documentElement).appendChild(style);
+  }
+
   /** iframe 每次加载完成：挂事件、按需恢复可编辑（srcdoc / sandbox 变更后编辑态会丢失） */
   function onPreviewLoad(): void {
     previewMutated = false; // DOM 刚由 previewDoc 重建，与源码一致
     const doc = previewFrame?.contentDocument;
     if (!doc) return; // 执行脚本模式下是独立源，拿不到文档，也就无需挂事件
+    injectPreviewUiStyle(doc);
     doc.addEventListener("input", onPreviewInput);
     // iframe 内的按键不会冒泡到主窗口，Ctrl+S 等快捷键需要在这里转发
     doc.addEventListener("keydown", onPreviewKeydown);
@@ -1669,11 +1693,28 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
   }
 
   // ---- 确认与错误 ----
+  /**
+   * 二进制文件拒读的稳定标记（见 src-tauri/src/commands/file_io.rs 的 NUL 判据）：
+   * 读取侧返回 `E_BINARY: <path>`，这里据此换成本地化、可操作的提示。
+   */
+  const ERR_BINARY = "E_BINARY: ";
+
+  /** 打开失败的详情文案：把读取侧的机器标记换成词表里的译文，其余原样透出 */
+  function failureDetail(e: unknown): string {
+    const raw = e instanceof Error ? e.message : String(e);
+    if (!raw.startsWith(ERR_BINARY)) return raw;
+    // 「未收录的后缀一律按纯文本打开」之后，拖进一张图片也会走到这里。直接弹一句
+    // 英文错误外加一整条路径，用户既看不懂也不知道下一步该做什么，故给出可操作的说法。
+    return t("Not a text file: {name}. Word (.docx) / PDF files can be imported via File → Import, or by dragging them into the window.", {
+      name: fileName(raw.slice(ERR_BINARY.length).trim()),
+    });
+  }
+
   async function showError(prefix: string, e: unknown): Promise<void> {
-    const detail = e instanceof Error ? e.message : String(e);
+    const raw = e instanceof Error ? e.message : String(e);
     // 同步落一份日志：错误弹窗转瞬即逝，事后排查需要可回溯的记录（失败不影响提示）
-    void logEvent("ERROR", `${prefix}${detail}`).catch(() => {});
-    await messageDialog(`${prefix}${detail}`, { title: "Sticho", kind: "error" });
+    void logEvent("ERROR", `${prefix}${raw}`).catch(() => {});
+    await messageDialog(`${prefix}${failureDetail(e)}`, { title: "Sticho", kind: "error" });
   }
 
   // ---- 本地版本历史（文件菜单 →「文件历史」）----
@@ -2200,7 +2241,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       const picked = await openDialog({
         multiple: false,
         title: t("Import HTML Document"),
-        filters: [{ name: t("HTML Document"), extensions: ["html", "htm"] }],
+        filters: [{ name: t("HTML Document"), extensions: [...HTML_DOC_EXTS] }],
       });
       if (typeof picked !== "string") return; // 用户取消
       const file = await readTextFile(picked);
@@ -2462,7 +2503,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
               ? `${t("Untitled")}.${codeExt || "txt"}`
               : `${t("Untitled")}.md`,
         filters: isHtml
-          ? [{ name: "HTML", extensions: ["html", "htm"] }]
+          ? [{ name: "HTML", extensions: [...HTML_DOC_EXTS] }]
           : isCode
             ? [{ name: t("Code File"), extensions: codeExt ? [codeExt] : [...CODE_EXTS_SORTED] }]
             : [{ name: "Markdown", extensions: ["md"] }],
@@ -5441,6 +5482,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         // 欢迎文案，从未变脏，所以既没有路径也没有草稿——不补回来，下面 activateTab 投影到
         // 编辑器里的就是空正文（实测现象：关掉再打开，文档是空白）。
         tab.content = welcomeText();
+        tab.welcome = true; // 记回「这是欢迎文档」，下次恢复才继续认它（老会话的 undefined 走同一支）
         tab.loaded = true;
       }
       built.push(tab);
@@ -8693,6 +8735,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     width: 100%;
     height: 100%;
     border: none;
+    /* 与源码视图的 textarea 同样处理：预览可编辑时焦点会送进 iframe，浏览器会给
+       获得焦点的 iframe 画一圈默认焦点环，看上去又是一圈蓝框 */
+    outline: none;
     background: #ffffff;
   }
 

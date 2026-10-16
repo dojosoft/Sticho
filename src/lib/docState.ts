@@ -49,6 +49,14 @@ export type DocTab = {
   /** 文档原有的行尾风格（保存时按它还原，避免 Markdown 被 Vditor 规整成 LF） */
   eol: Eol;
   dirty: boolean;
+  /**
+   * 本标签的正文是不是「新建标签时注入的欢迎文档」（见 App.svelte 的 createTab）。
+   *
+   * 会话只带元信息、正文一律从恢复草稿取，而「欢迎文档」从来没进过草稿；把它补回来的判据
+   * 又是「干净 + 未命名 + 无云端绑定」——用户新建的空白标签（文件 → 新建标签 → 新建纯文本 /
+   * Markdown）同样满足这三条，只看这三条会把空白标签恢复成一份欢迎正文。故用本字段把两者分开。
+   */
+  welcome: boolean;
   /** Markdown 文档：正文快照；HTML 文档：HTML 源码快照 */
   content: string;
   /** content 是否有效。会话恢复出来的标签只带元信息，正文在第一次被激活时才读盘 */
@@ -81,6 +89,9 @@ export type SessionTab = {
   /** 行尾风格（可选，老会话文件里没有该字段时按 LF 处理） */
   eol?: Eol;
   dirty: boolean;
+  /** 同上：正文是不是「新建标签时注入的欢迎文档」。老会话文件里没有这个字段（undefined），
+   *  那时按旧判据处理（见 restoredTabNeedsWelcome），升级后的第一次恢复才不会少一份正文 */
+  welcome?: boolean;
   htmlView: HtmlView;
   draftId: string;
 };
@@ -99,6 +110,7 @@ export function newDocTab(id: number, content: string): DocTab {
     encoding: "utf-8",
     eol: "\n",
     dirty: false,
+    welcome: false,
     content,
     loaded: true,
     htmlView: "preview",
@@ -116,11 +128,16 @@ export function newDocTab(id: number, content: string): DocTab {
  * 因此恢复草稿里从来没有它。而会话恢复只带元信息、正文一律从草稿取——不把这份正文补回去，
  * 恢复出来的标签就是空正文，用户看到「打开后文档是空白」。
  *
- * 只认「干净 + 没有路径 + 没有云端绑定」：dirty 标签的正文在草稿里，草稿万一读失败
- * 宁可留空，也不能用欢迎文案把「未知内容」顶掉。
+ * 判据是「干净 + 没有路径 + 没有云端绑定 **且正文是欢迎文档**」：dirty 标签的正文在草稿里，
+ * 草稿万一读失败宁可留空，也不能用欢迎文案把「未知内容」顶掉；而未命名、未改动、无云端绑定的
+ * 标签并不只有欢迎文档——用户新建的空白标签（文件 → 新建标签 → 新建纯文本 / 新建 Markdown）
+ * 一模一样，只凭前三条会把空白标签恢复成一份欢迎正文，故还要认 welcome 字段。
  */
 export function restoredTabNeedsWelcome(item: SessionTab, remote: string | null): boolean {
-  return !item.dirty && item.path === null && remote === null;
+  if (item.dirty || item.path !== null || remote !== null) return false;
+  // 老会话文件里没有 welcome 字段（undefined）：沿用旧判据，否则升级后的第一次恢复会把
+  // 那份欢迎正文丢成空白（那正是本机制当初要解决的问题）
+  return item.welcome !== false;
 }
 
 /** 生成会话快照（不含正文：正文分别落在恢复草稿里） */
@@ -133,6 +150,7 @@ export function sessionOf(tabs: DocTab[], active: number): SessionState {
       encoding: tab.encoding,
       eol: tab.eol,
       dirty: tab.dirty,
+      welcome: tab.welcome,
       htmlView: tab.htmlView,
       draftId: tab.draftId,
     })),

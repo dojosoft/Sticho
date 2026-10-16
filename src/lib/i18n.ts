@@ -197,6 +197,7 @@ export const ZH: Record<string, string> = {
 
   // ---- 错误前缀 ----
   "Failed to open: ": "打开失败：",
+  "Not a text file: {name}. Word (.docx) / PDF files can be imported via File → Import, or by dragging them into the window.": "这不是纯文本文件：{name}。Word（.docx）/ PDF 文件可通过「文件 → 导入」导入，也可以直接拖进窗口。",
   "Failed to save: ": "保存失败：",
   "Failed to cut: ": "剪切失败：",
   "Failed to copy: ": "复制失败：",

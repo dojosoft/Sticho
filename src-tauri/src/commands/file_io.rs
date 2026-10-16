@@ -250,15 +250,20 @@ fn read_text_file_blocking(path: &str, encoding: Option<&str>) -> Result<TextFil
         }
     } else {
         let (content, id) = decode_auto(&bytes);
-        TextFile { content, encoding: id }
+        TextFile {
+            content,
+            encoding: id,
+        }
     };
 
     // 二进制兜底：打开文档时「未收录的后缀一律按纯文本打开」（见 codeLang.ts 的
     // docKindForPath），所以「是不是文本」必须由内容本身判，不能只靠扩展名白名单。
     // 判据是解码结果里出现 NUL——文本文件不会有它，二进制（.png / .zip / .exe …）几乎必有；
     // 放在解码之后是为了不误伤 UTF-16 文本（其原始字节本来就隔字节带 0x00）。
+    // 用 E_BINARY 这个稳定标记开头，而不是直接给一句英文：拖进一张图片就会撞上这条，
+    // 前端据此换成本地化、可操作的提示（见 App.svelte 的 failureDetail）。
     if file.content.contains('\0') {
-        return Err(format!("Not a text file (binary content): {path}"));
+        return Err(format!("E_BINARY: {path}"));
     }
     Ok(file)
 }

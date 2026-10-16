@@ -1629,9 +1629,12 @@ function syncSvScroll(from: HTMLElement, to: HTMLElement): void {
   );
   const next = Number.isNaN(mapped) ? (from.scrollTop / fromMax) * toMax : mapped;
   if (Math.abs(next - to.scrollTop) < 1) return;
+  const before = to.scrollTop;
   to.scrollTop = next;
-  // 读回浏览器实际落值（小数取整 / 钳制后与 next 可能差一点），作为识别回声的依据
-  svEcho[to === svSyncSv ? "sv" : "preview"] = to.scrollTop;
+  // 只在真的动了时才记「预期落值」：赋值可能被浏览器钳回原值（目标已到边界），
+  // 那种情况不会再派发 scroll 事件，留下的标记就成了一枚永远等不到回声的悬空值，
+  // 之后用户真滚到该位置时会被误吞一次。落值取读回的（小数取整后与 next 可能差一点）
+  if (to.scrollTop !== before) svEcho[to === svSyncSv ? "sv" : "preview"] = to.scrollTop;
 }
 
 function onSvPaneScroll(which: "sv" | "preview"): void {
