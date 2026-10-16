@@ -1924,13 +1924,8 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (busy) return;
     busy = true;
     try {
-      // 最近列表里可能有各种后缀，统一按后缀决定模式（见 docKindForPath）
-      await loadIntoFreshTab(async () => {
-        const kind = docKindForPath(path);
-        if (kind === "html") await openHtmlPath(path);
-        else if (kind === "code") await openCodePath(path);
-        else await openPath(path);
-      });
+      // 最近列表里可能有各种后缀：统一走 openAnyPath（docx / pdf 一并接导入管道）
+      await openAnyPath(path);
     } catch (e) {
       // 失效条目（文件已被移动/删除）：从列表移除并告知
       recentFiles = recentFiles.filter((p) => p !== path);
@@ -2211,6 +2206,32 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     refreshSideNow();
   }
 
+  /**
+   * 按后缀把路径交给对应的打开通路（只决定通路，不含标签落点）。
+   *
+   * docx / pdf 不在这里分派：那两个走导入管道，落点由管道自己管（见 openAnyPath）。
+   */
+  function openKindPath(path: string): Promise<void> {
+    const kind = docKindForPath(path);
+    if (kind === "html") return openHtmlPath(path);
+    if (kind === "code") return openCodePath(path);
+    return openPath(path);
+  }
+
+  /**
+   * 通用「按路径打开」：打开对话框、最近文件、目录树、搜索结果、拖拽、启动参数都从这里分派。
+   *
+   * 一条规则走到底，否则同一个文件会出现「拖进来是导入、从目录树点开却报错」这类不一致：
+   * docx / pdf 交给导入管道（importWordPath / importPdfPath 自己负责标签落点，故不再套
+   * loadIntoFreshTab——套了会多出一次落点判定），其余按后缀决定模式并复用那个落点规则。
+   */
+  async function openAnyPath(path: string): Promise<void> {
+    const ext = extOf(path);
+    if (ext === "docx") return importWordPath(path);
+    if (ext === "pdf") return importPdfPath(path);
+    await loadIntoFreshTab(() => openKindPath(path));
+  }
+
   /** 把当前 HTML 文档转为 Markdown 新文档（导入语义：不写回原 .html） */
   async function convertToMarkdown(): Promise<void> {
     if (docKind !== "html") return;
@@ -2434,10 +2455,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         filters: [
           // 默认筛选器要能看见所有能打开的文件：Markdown / HTML / 纯文本三份清单与
           // docKindForPath 同源（都在 codeLang 里），代码扩展名读同一份白名单，
-          // 免得出现「能拖进来但在这个对话框里选不到」
+          // 免得出现「能拖进来但在这个对话框里选不到」。
+          // 用 Set 去重：.txt 既在纯文本清单里、又在代码白名单里（按代码视图打开），
+          // 两处都摊开会在筛选器里出现两次。
           {
             name: t("All Supported Documents"),
-            extensions: [...MD_DOC_EXTS, ...HTML_DOC_EXTS, ...PLAIN_TEXT_EXTS, ...CODE_EXTS_SORTED],
+            extensions: [...new Set([...MD_DOC_EXTS, ...HTML_DOC_EXTS, ...PLAIN_TEXT_EXTS, ...CODE_EXTS_SORTED])],
           },
           { name: "Markdown", extensions: [...MD_DOC_EXTS] },
           { name: "HTML", extensions: [...HTML_DOC_EXTS] },
@@ -2445,12 +2468,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
         ],
       });
       if (typeof picked !== "string") return; // 用户取消
-      await loadIntoFreshTab(async () => {
-        const kind = docKindForPath(picked);
-        if (kind === "html") await openHtmlPath(picked);
-        else if (kind === "code") await openCodePath(picked);
-        else await openPath(picked);
-      });
+      await openAnyPath(picked);
     } catch (e) {
       await showError(t("Failed to open: "), e);
     } finally {
@@ -2804,15 +2822,12 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     else void setSidebarView(enabledSidebarViews[0]!, false);
   });
 
-  /** 目录树点击文件 → 复用打开管道（按后缀决定模式，见 docKindForPath） */
+  /** 目录树点击文件 → 复用打开管道（docx / pdf 进导入管道，其余按后缀决定模式） */
   async function openFromTree(path: string): Promise<void> {
     if (busy) return;
     busy = true;
     try {
-      const kind = docKindForPath(path);
-      if (kind === "html") await loadIntoFreshTab(() => openHtmlPath(path));
-      else if (kind === "code") await loadIntoFreshTab(() => openCodePath(path));
-      else await loadIntoFreshTab(() => openPath(path));
+      await openAnyPath(path);
     } catch (e) {
       await showError(t("Failed to open: "), e);
     } finally {
@@ -5265,8 +5280,9 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
    *
    * `bind` 决定是否把文档绑定到远端路径：
    * - 侧边栏「云端」视图打开（bind=true）→ 绑定 remote，保存时按此路径就地写回云端；
-   * - 云端浏览模态打开 / 恢复历史版本（bind=false）→ 只取正文，作为未命名文档打开，
-   *   用户保存时走既有「另存为」流程落回本地，绝不误写云端。
+   * - 云端浏览模态打开 / 恢复历史版本（bind=false）→ 只取正文，作为未命名文档打开（标记为
+   *   「有未保存改动」，关闭 / 退出时会提醒另存到本地），用户保存时走既有「另存为」流程落回本地，
+   *   绝不误写云端。
    */
   async function openCloudContent(remote: string, content: string, bind: boolean): Promise<void> {
     const kind = docKindForPath(remote);
@@ -5274,7 +5290,10 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       currentPath = null;
       currentRemote = bind ? remote : null; // 未绑定时置空：避免沿用上一个文档的云端路径
       setDocumentPath(null);
-      dirty = false;
+      // 未绑定远端的文档，正文只留在内存里（没有本地文件、也不写进会话）：如实标成「有未保存
+      // 改动」，关闭标签 / 退出时才会提醒，用户也才有机会用「另存为」把它落到本地。绑定远端的
+      // 文档不算——那种保存会就地写回云端，保持干净即可。
+      dirty = !bind;
       encoding = "utf-8"; // 云端正文按 UTF-8 取回（非 UTF-8 已由 Rust 侧挡下）
       docEol = detectEol(content); // 云端原文的行尾风格一并保留
       if (kind === "html") {
@@ -6390,10 +6409,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
     if (busy) return;
     busy = true;
     try {
-      const kind = docKindForPath(hit.path);
-      if (kind === "html") await loadIntoFreshTab(() => openHtmlPath(hit.path));
-      else if (kind === "code") await loadIntoFreshTab(() => openCodePath(hit.path));
-      else await loadIntoFreshTab(() => openPath(hit.path));
+      await openAnyPath(hit.path);
       await revealSearchHit(hit);
     } catch (e) {
       await showError(t("Failed to open: "), e);
@@ -6724,10 +6740,7 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
           } else {
             // 其余一律按后缀决定模式（见 docKindForPath）：未收录的后缀即纯文本视图；
             // 二进制文件由读取侧（read_text_file）挡下，不会把 .png / .zip 当文本打开
-            const kind = docKindForPath(path);
-            if (kind === "html") await loadIntoFreshTab(() => openHtmlPath(path));
-            else if (kind === "code") await loadIntoFreshTab(() => openCodePath(path));
-            else await loadIntoFreshTab(() => openPath(path));
+            await loadIntoFreshTab(() => openKindPath(path));
           }
         } catch (e) {
           await showError(t("Failed to open: "), e);
@@ -6907,16 +6920,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       tabsReady = true; // 此刻起才允许把编辑器正文搬进标签快照
       refreshSideNow();
 
-      // 文件关联后双击文档启动：命令行带进来的文件直接打开（按后缀决定模式）
+      // 文件关联后双击文档启动：命令行带进来的文件直接打开（统一走 openAnyPath）
       const startup = await getStartupFile();
       if (startup) {
         try {
-          await loadIntoFreshTab(async () => {
-            const kind = docKindForPath(startup);
-            if (kind === "html") await openHtmlPath(startup);
-            else if (kind === "code") await openCodePath(startup);
-            else await openPath(startup);
-          });
+          await openAnyPath(startup);
         } catch (e) {
           await showError(t("Failed to open the startup file: "), e);
         }
