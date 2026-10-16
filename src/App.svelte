@@ -2916,6 +2916,11 @@ ${t("Drag md / html / docx / pdf files into the window to open them directly.")}
       syncHtmlFromPreview(); // 先把预览里的改动落回源码，textarea 才显示最新内容
       htmlView = "source";
     } else {
+      // 必须先让上一次预览直接编辑留下的 previewMutated 失效：切到预览时 iframe 会按 htmlSource
+      // 重建，DOM 随即与源码一致。否则源码编辑触发的 400ms 防抖（scheduleSideRefresh →
+      // syncHtmlFromPreview）会在这段窗口里把**旧 iframe 的 DOM** 序列化回 htmlSource，
+      // 把刚在源码里改的内容顶掉——大页面 iframe 要加载更久，这个窗口更宽。
+      previewMutated = false;
       htmlView = "preview";
       // 源码可能被改过：重新喂给 srcdoc 渲染（内容没变时 Svelte 不会动 iframe）
       previewDoc = htmlSource;
