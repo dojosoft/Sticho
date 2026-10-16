@@ -16,10 +16,14 @@ pub fn run() {
     // 只能用原生对话框引导安装或转跳官网。
     setup::ensure_webview2_or_exit();
 
-    tauri::Builder::default()
-        // 单实例插件必须是**第一个**注册的插件：第二个实例启动时由它在其它插件初始化
-        // 之前拦下，把命令行里的文件路径转发给已有窗口（前端监听 open-file 事件新开标签页）。
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    // 单实例插件必须是**第一个**注册的插件：第二个实例启动时由它在其它插件初始化
+    // 之前拦下，把命令行里的文件路径转发给已有窗口（前端监听 open-file 事件新开标签页）。
+    //
+    // 只有桌面需要它：移动端没有「第二个实例」这回事，该插件本身也只支持桌面
+    // （见 Cargo.toml 的平台专属依赖段），故这里整块按 desktop 门控。
+    #[cfg(desktop)]
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             use tauri::{Emitter, Manager};
 
             // 已有窗口被最小化 / 压在其他窗口后面时，先还原并置前，让用户看到反馈
@@ -39,7 +43,11 @@ pub fn run() {
             if !files.is_empty() {
                 let _ = app.emit("open-file", files);
             }
-        }))
+        }));
+    #[cfg(not(desktop))]
+    let builder = tauri::Builder::default();
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())

@@ -6,3 +6,14 @@
 *.ico binary
 *.pdf binary
 *.docx binary
+
+# Android / Tauri 移动端（将来做安卓版时生成的 src-tauri/gen/android）。
+# gradlew 与 gradlew.bat 的换行必须各自固定：两者混用会让 Gradle 包装器在另一平台上跑不起来。
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+*.apk binary
+*.aab binary
+*.jks binary
+*.keystore binary
+# gen/ 下都是生成物，不计入 GitHub 的语言统计
+src-tauri/gen/** linguist-generated=true

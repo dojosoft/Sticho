@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Sticho - 轻量级 Markdown / 纯文本 / 代码 / HTML 文档编辑器"
 authors = ["Marvin"]
 license = "MIT"
+# 仓库地址（发布前把 USERNAME 换成实际 GitHub 用户名/组织名）
+repository = "https://github.com/USERNAME/sticho"
+homepage = "https://github.com/USERNAME/sticho"
+readme = "../README.md"
 edition = "2021"
 
 # 依赖全部为 MIT / Apache-2.0，符合许可证白名单（任务书 2.2）
@@ -12,9 +16,6 @@ edition = "2021"
 # 正文里的相对路径图片要靠它才能在预览里显示（tauri.conf.json 的 assetProtocol.enable
 # 只是注入这个 feature，两边都写才生效）
 tauri = { version = "2", features = ["protocol-asset"] }
-# 单实例：第二次启动（常见于文件关联后双击文档）不再开新进程，而是把文件路径
-# 转发给已有窗口新开一个标签页。必须作为第一个注册的插件。
-tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 # 编辑菜单的剪切/复制/粘贴：WebView2 的 navigator.clipboard 读取剪贴板受限，走原生插件
@@ -27,10 +28,25 @@ serde_json = "1"
 # encoding_rs 是其配套的编解码库（两者均 Apache-2.0/MIT）
 encoding_rs = "0.8"
 chardetng = "0.1"
+
+# 导入 Word：Pandoc 发行包下载与解压（GPL 的 pandoc.exe 本体不进入编译产物）
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Pandoc 发行包完整性校验
+sha2 = "0.10"
+
+# ---------------------------------------------------------- 平台专属依赖
+# 为什么单独成段：将来要出安卓版（Tauri 2 的移动端复用同一个 crate，见 README 的
+# 「平台与路线图」）。下面这些 crate 在非 Windows 目标上根本不存在，无条件依赖会让
+# 移动端一上来就编译失败；先把边界画在 Cargo 层面，移动端才有编过的可能。
+# 拆到 target 段不改变 Windows 上的任何行为——该目标下依赖集合与拆分前完全相同。
+
+[target.'cfg(windows)'.dependencies]
 # 文件关联（阶段 11）：读写 HKCU\Software\Classes，仅当前用户，无需管理员权限
 winreg = "0.52"
 
-# PDF 导出：WebView2 COM 打印接口（wry 的传递依赖，版本对齐，零额外体积）
+# PDF 导出：WebView2 COM 打印接口（wry 的传递依赖，版本对齐，零额外体积）；
+# windows-core 提供它生成的 COM 接口所用的 FOUNDATION 类型
 webview2-com = "0.38"
 windows-core = "0.61"
 # 启动失败时的原生提示框（MessageBoxW）：GUI 子系统无控制台，静默退出会让用户
@@ -42,11 +58,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Registry",
 ] }
 
-# 导入 Word：Pandoc 发行包下载与解压（GPL 的 pandoc.exe 本体不进入编译产物）
-ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
-# Pandoc 发行包完整性校验
-sha2 = "0.10"
+# 单实例：第二次启动（常见于文件关联后双击文档）不再开新进程，而是把文件路径
+# 转发给已有窗口新开一个标签页，必须作为第一个注册的插件（见 lib.rs）。
+# 只有桌面存在「多开进程」这回事，官方给的安装目标也正是桌面三平台。
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

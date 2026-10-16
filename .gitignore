@@ -48,3 +48,19 @@ demo.pdf
 # Vditor 运行时资源（公式 / 图表 / 代码高亮配色 / 表情图片等，约 12MB）：
 # 由 scripts/sync-vditor-assets.mjs 在 predev / prebuild 时从 node_modules/vditor 同步，不入库
 /public/vditor/
+
+# Android / Tauri 移动端（将来做安卓版时，`tauri android init` 会生成 src-tauri/gen/android）：
+# 工程源码本身要入库（签名配置、清单都可能被手工改过），故只忽略其中的构建产物与签名材料。
+# 注意别写成宽泛的 src-tauri/gen/ —— 那会连带忽略将来要提交的 android 工程。
+src-tauri/gen/android/build/
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/.idea/
+src-tauri/gen/android/local.properties
+# 签名配置与密钥：绝不入库
+src-tauri/gen/android/keystore.properties
+*.jks
+*.keystore
+# 移动端打包产物（体积大且可重建）
+*.apk
+*.aab

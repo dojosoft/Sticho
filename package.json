@@ -4,6 +4,26 @@
   "version": "0.1.0",
   "description": "Sticho - 轻量级 Markdown / 纯文本 / 代码 / HTML 文档编辑器",
   "license": "MIT",
+  "author": "Marvin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/USERNAME/sticho.git"
+  },
+  "homepage": "https://github.com/USERNAME/sticho#readme",
+  "bugs": {
+    "url": "https://github.com/USERNAME/sticho/issues"
+  },
+  "keywords": [
+    "markdown",
+    "editor",
+    "notepad",
+    "html",
+    "code-editor",
+    "offline",
+    "tauri",
+    "svelte",
+    "windows"
+  ],
   "type": "module",
   "scripts": {
     "predev": "node scripts/sync-vditor-assets.mjs",

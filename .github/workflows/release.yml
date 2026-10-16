@@ -1,0 +1,75 @@
+name: Release
+
+# 打 tag 即发布：构建 → 归档 → 把 release/ 里的产物作为附件挂到 GitHub Release。
+#
+# 前置条件：仓库已推送到 GitHub 且 GITHUB_TOKEN 有写权限（见下方 permissions）。
+#
+# 复用 scripts/release.mjs 而不是在这里裸调 tauri build：便携 zip 的生成方式、
+# SHA256SUMS.txt 的 `<hash>  <文件名>` 两空格格式、release notes 从 CHANGELOG 抽取，
+# 这三处逻辑在脚本里只写一次，本地发布与 CI 发布才会产出完全一致的产物。
+# 加 --no-desktop 是因为 runner 上没有「桌面」这个交付目标。
+
+on:
+  push:
+    tags: ["v*"]
+  # 干跑入口：手动触发只跑构建与归档，不建 Release（发布步骤按 tag 门控）。
+  workflow_dispatch:
+
+# 创建 Release 需要写权限（仓库默认给 GITHUB_TOKEN 的是只读）
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 读取 package.json 版本
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          Add-Content $env:GITHUB_OUTPUT "value=$v"
+
+      # 防止「tag 打错版本」把错误产物发出去
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          $pkg = '${{ steps.version.outputs.value }}'
+          if ($tag -ne $pkg) {
+            throw "tag $env:GITHUB_REF_NAME 与 package.json 版本 $pkg 不一致，已中止发布。"
+          }
+
+      - name: 构建并归档（不复制到桌面）
+        run: npm run release -- --no-desktop
+
+      - name: 创建 Release 并上传产物
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Sticho ${{ steps.version.outputs.value }}
+          body_path: release/release-notes-${{ steps.version.outputs.value }}.md
+          files: |
+            release/*.exe
+            release/*.zip
+            release/SHA256SUMS.txt

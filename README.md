@@ -1,5 +1,10 @@
 # Sticho
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform: Windows 10 1809+](https://img.shields.io/badge/platform-Windows%2010%201809%2B-0078D6.svg)](#平台与路线图)
+[![Version: 0.1.0](https://img.shields.io/badge/version-0.1.0-blue.svg)](./CHANGELOG.md)
+[![Offline, no telemetry](https://img.shields.io/badge/offline-no%20telemetry-success.svg)](#隐私与安全)
+
 轻量级 Markdown / 纯文本 / 代码 / HTML 文档编辑器：像记事本一样打开 `.md` / `.txt` / 代码文件编辑，Markdown 即时
 渲染（类 Typora），支持多标签页、命令面板、跨文件搜索；一键导出 Word / PDF / HTML / 纯文本 /
 LaTeX / Epub，导入 Word / PDF / HTML 转 Markdown 继续编辑；内置代码高亮与代码小工具，并提供
@@ -183,6 +188,38 @@ Windows SmartScreen 会显示「Windows 已保护你的电脑 / 未知发布者�
 - 文档中引用的远程图片 / 媒体默认不加载（预览显示占位提示），外链需手动点击后在系统浏览器打开
 - 只在用户显式选择的路径读写文件
 - 诊断报告导出前会剔除密码等敏感字段
+- 网页视图的内容安全策略（CSP）里放开了 `unsafe-eval` / `wasm-unsafe-eval`：把 Markdown 编译成 HTML 的渲染内核、以及随包内置的图表 / 公式组件需要运行期生成代码，关掉会导致预览与导出渲染失败。`script-src` 仍限定为 `'self'`（不加载任何远程脚本），页面内也没有第三方代码执行入口，因此这两个开关不引入远程代码执行面
+
+## 平台与路线图
+
+**当前只支持 Windows**（Windows 10 1809 及以上，x64）。移动端在计划中，尚未发布。
+
+### 安卓版规划
+
+安卓版将复用**同一个 Tauri 工程**，不拆成独立的安卓仓库：Tauri 2 的移动端与桌面端共用 `src-tauri` 这一个 crate。
+将来只需 `tauri android init` 生成 `src-tauri/gen/android` 工程，再用 `tauri android build --aab` 产出安装包。
+为让这一步能走通，仓库已预先做有下列准备：
+
+- `src-tauri/Cargo.toml` 的 `[lib] crate-type` 含 `staticlib` / `cdylib` / `rlib`
+- 应用入口标注了 `#[cfg_attr(mobile, tauri::mobile_entry_point)]`
+- Windows 专属 crate（`winreg` / `webview2-com` / `windows-core` / `windows-sys`）与桌面专有的单实例插件已按 target 分层，非 Windows 目标不会把它们拉进来
+- `.gitignore` / `.gitattributes` 已按移动端工程（`src-tauri/gen/android`）预置忽略规则与换行规则
+- 前端对原生能力的调用集中在 `src/lib/tauri-api.ts`，是天然的平台接缝
+
+### 桌面专属能力（做安卓版时的改动范围）
+
+下面这些能力依赖 Windows，安卓版需要另行实现或降级：
+
+| 能力 | 依赖 |
+|---|---|
+| 文件关联与「用 Sticho 打开」右键菜单 | `winreg`（读写 `HKCU\Software\Classes`） |
+| 导出 PDF（静默、带页眉页脚） | WebView2 的 PRINT COM 接口 |
+| 启动前 WebView2 运行时自检与自动安装 | Windows 注册表 |
+| 第二次启动把文件路径转发给已有窗口 | 桌面专有的单实例插件 |
+| WebDAV 密码加密存储 | Windows DPAPI |
+| 导入 Word / 导出 LaTeX、Epub | 按需下载并调用 Pandoc 子进程 |
+
+另外，`tauri icon` 生成安卓图标需要一张 **1024×1024 的方形主图**，仓库内目前最大的图标为 256px，届时要补一张主图。
 
 ## 开发
 
